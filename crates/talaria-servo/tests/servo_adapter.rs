@@ -2,9 +2,11 @@ use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use servo::EventLoopWaker as ServoEventLoopWaker;
+use servo::{EventLoopWaker as ServoEventLoopWaker, RenderingContext};
 use talaria_core::WebView;
-use talaria_servo::{EventLoopWaker, ServoWebView, ServoWebViewError};
+use talaria_servo::{
+    EventLoopWaker, ServoWebView, ServoWebViewError, SharedOpenGlContext, ViewportSize,
+};
 use url::Url;
 
 fn invalid_url_error() -> ServoWebViewError {
@@ -37,6 +39,28 @@ fn servo_web_view_implements_the_core_web_view_contract() {
     }
 
     assert_web_view::<ServoWebView>();
+}
+
+#[test]
+fn viewport_size_rejects_zero_dimensions() {
+    assert_eq!(ViewportSize::new(0, 720), None);
+    assert_eq!(ViewportSize::new(1280, 0), None);
+    assert_eq!(ViewportSize::new(0, 0), None);
+}
+
+#[test]
+fn viewport_size_preserves_non_zero_dimensions() {
+    let size = ViewportSize::new(1280, 720).expect("non-zero dimensions should be accepted");
+
+    assert_eq!(size.width(), 1280);
+    assert_eq!(size.height(), 720);
+}
+
+#[test]
+fn shared_opengl_context_implements_the_servo_rendering_contract() {
+    fn assert_rendering_context<T: RenderingContext>() {}
+
+    assert_rendering_context::<SharedOpenGlContext>();
 }
 
 #[test]

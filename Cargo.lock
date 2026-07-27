@@ -9159,8 +9159,12 @@ version = "0.1.0"
 name = "talaria-servo"
 version = "0.1.0"
 dependencies = [
+ "dpi",
+ "gleam",
+ "glow",
  "rustls",
  "servo",
+ "surfman",
  "talaria-core",
  "url",
 ]

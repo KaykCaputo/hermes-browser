@@ -12,6 +12,9 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+dpi = "0.1"
+gleam = "0.15"
+glow = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 servo = "=0.4.0"
 slint = { version = "~1.17.1", default-features = false, features = [
@@ -21,4 +24,5 @@ slint = { version = "~1.17.1", default-features = false, features = [
     "std",
 ] }
 slint-build = "~1.17.1"
+surfman = "0.13"
 url = "2.5"

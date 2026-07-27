@@ -4,7 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+dpi.workspace = true
+gleam.workspace = true
+glow.workspace = true
 rustls.workspace = true
 servo.workspace = true
+surfman.workspace = true
 talaria-core = { path = "../talaria-core" }
 url.workspace = true
