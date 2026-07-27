@@ -4,6 +4,7 @@ members = [
     "apps/hermes-desktop",
     "crates/hermes-ui",
     "crates/talaria-core",
+    "crates/talaria-servo",
 ]
 
 [workspace.package]
@@ -11,6 +12,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+servo = "=0.4.0"
 slint = { version = "~1.17.1", default-features = false, features = [
     "backend-winit-x11",
     "compat-1-2",
@@ -18,3 +21,4 @@ slint = { version = "~1.17.1", default-features = false, features = [
     "std",
 ] }
 slint-build = "~1.17.1"
+url = "2.5"

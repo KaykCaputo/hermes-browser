@@ -1,0 +1,10 @@
+[package]
+name = "talaria-servo"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rustls.workspace = true
+servo.workspace = true
+talaria-core = { path = "../talaria-core" }
+url.workspace = true
