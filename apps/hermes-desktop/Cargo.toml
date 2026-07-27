@@ -1,0 +1,9 @@
+[package]
+  name = "hermes-desktop"
+  version.workspace = true
+  edition.workspace = true
+
+  [dependencies]
+  hermes-ui = { path = "../../crates/hermes-ui" }
+  slint.workspace = true
+  talaria-core = { path = "../../crates/talaria-core" }

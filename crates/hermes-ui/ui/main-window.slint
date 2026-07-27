@@ -1,0 +1,202 @@
+component ChromeButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked;
+
+    width: 36px;
+    height: 32px;
+    border-radius: 8px;
+    background: button-area.has-hover && root.enabled ? #e6e9f2 : transparent;
+    opacity: root.enabled ? 1 : 0.38;
+
+    Text {
+        text: root.label;
+        color: #363b4d;
+        font-size: 17px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    button-area := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    in property <string> page-title: "New tab";
+    in-out property <string> address: "https://servo.org";
+    in property <bool> can-go-back: false;
+    in property <bool> can-go-forward: false;
+    in property <bool> is-loading: false;
+    in property <string> content-message: "The Servo WebView will be rendered in this area.";
+
+    callback navigate(string);
+    callback go-back;
+    callback go-forward;
+    callback reload;
+
+    title: page-title + " — Hermes Browser";
+    preferred-width: 1100px;
+    preferred-height: 720px;
+    min-width: 720px;
+    min-height: 480px;
+    background: #f5f6fa;
+
+    VerticalLayout {
+        spacing: 0px;
+
+        Rectangle {
+            height: 40px;
+            background: #e9ebf2;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 6px;
+                padding-bottom: 0px;
+
+                Rectangle {
+                    width: 250px;
+                    border-radius: 9px;
+                    background: #f5f6fa;
+
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        spacing: 8px;
+
+                        Text {
+                            text: "⌁";
+                            color: #6957d9;
+                            font-size: 19px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: root.page-title;
+                            color: #252938;
+                            font-size: 13px;
+                            overflow: elide;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    background: transparent;
+                }
+            }
+        }
+
+        Rectangle {
+            height: 54px;
+            background: #f5f6fa;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+                spacing: 7px;
+
+                ChromeButton {
+                    label: "‹";
+                    enabled: root.can-go-back;
+                    clicked => {
+                        root.go-back();
+                    }
+                }
+
+                ChromeButton {
+                    label: "›";
+                    enabled: root.can-go-forward;
+                    clicked => {
+                        root.go-forward();
+                    }
+                }
+
+                ChromeButton {
+                    label: "↻";
+                    clicked => {
+                        root.reload();
+                    }
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: 34px;
+                    border-radius: 10px;
+                    border-width: 1px;
+                    border-color: address-input.has-focus ? #6957d9 : #d5d8e3;
+                    background: #ffffff;
+
+                    address-input := TextInput {
+                        x: 13px;
+                        width: parent.width - 26px;
+                        height: parent.height;
+                        text <=> root.address;
+                        color: #252938;
+                        font-size: 14px;
+                        vertical-alignment: center;
+                        single-line: true;
+                        accepted => {
+                            root.navigate(self.text);
+                        }
+                    }
+                }
+
+                ChromeButton {
+                    label: "⋮";
+                }
+            }
+
+            Rectangle {
+                x: 0px;
+                y: parent.height - 1px;
+                width: parent.width;
+                height: 1px;
+                background: #dfe2eb;
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: #ffffff;
+
+            if root.is-loading: Rectangle {
+                x: 0px;
+                y: 0px;
+                width: parent.width * 45%;
+                height: 2px;
+                background: #6957d9;
+            }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 10px;
+                padding-left: 32px;
+                padding-right: 32px;
+
+                Text {
+                    text: "Hermes Browser";
+                    color: #252938;
+                    font-size: 28px;
+                    font-weight: 600;
+                    horizontal-alignment: center;
+                }
+
+                Text {
+                    text: root.content-message;
+                    color: #74798b;
+                    font-size: 14px;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+            }
+        }
+    }
+}

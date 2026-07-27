@@ -1,0 +1,6 @@
+[package]
+name = "talaria-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
