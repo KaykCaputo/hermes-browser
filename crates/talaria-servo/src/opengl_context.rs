@@ -4,7 +4,7 @@ use std::ptr;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use dpi::PhysicalSize;
+use dpi::{LogicalSize, PhysicalSize};
 use gleam::gl::{self, Gl};
 use glow::HasContext as _;
 use servo::{DeviceIntRect, RenderingContext, RgbaImage};
@@ -18,6 +18,24 @@ pub struct ViewportSize {
 impl ViewportSize {
     pub fn new(width: u32, height: u32) -> Option<Self> {
         (width > 0 && height > 0).then_some(Self { width, height })
+    }
+
+    pub fn from_logical(width: f32, height: f32, scale_factor: f32) -> Option<Self> {
+        if !width.is_finite()
+            || !height.is_finite()
+            || !scale_factor.is_finite()
+            || width <= 0.0
+            || height <= 0.0
+            || scale_factor <= 0.0
+        {
+            return None;
+        }
+
+        let logical_size = LogicalSize::new(f64::from(width), f64::from(height));
+
+        let physical_size = logical_size.to_physical::<u32>(f64::from(scale_factor));
+
+        Self::new(physical_size.width, physical_size.height)
     }
 
     pub fn width(self) -> u32 {

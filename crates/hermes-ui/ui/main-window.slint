@@ -31,6 +31,9 @@ export component MainWindow inherits Window {
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
     in property <bool> is-loading: false;
+    in property <bool> web-view-visible: false;
+    out property <length> web-view-width: web-view-area.width;
+    out property <length> web-view-height: web-view-area.height;
     in property <string> content-message: "The Servo WebView will be rendered in this area.";
 
     callback navigate(string);
@@ -163,9 +166,9 @@ export component MainWindow inherits Window {
             }
         }
 
-        Rectangle {
+        web-view-area := Rectangle {
             vertical-stretch: 1;
-            background: #ffffff;
+            background: root.web-view-visible ? transparent : #ffffff;
 
             if root.is-loading: Rectangle {
                 x: 0px;
@@ -175,7 +178,7 @@ export component MainWindow inherits Window {
                 background: #6957d9;
             }
 
-            VerticalLayout {
+            if !root.web-view-visible: VerticalLayout {
                 alignment: center;
                 spacing: 10px;
                 padding-left: 32px;

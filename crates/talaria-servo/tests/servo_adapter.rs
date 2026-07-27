@@ -57,6 +57,34 @@ fn viewport_size_preserves_non_zero_dimensions() {
 }
 
 #[test]
+fn viewport_size_converts_logical_dimensions_to_physical_pixels() {
+    let size = ViewportSize::from_logical(800.0, 600.0, 1.5)
+        .expect("valid logical dimensions should be converted");
+
+    assert_eq!(size.width(), 1200);
+    assert_eq!(size.height(), 900);
+}
+
+#[test]
+fn viewport_size_rounds_fractional_physical_pixels() {
+    let size = ViewportSize::from_logical(100.25, 100.5, 1.5)
+        .expect("positive fractional dimensions should be converted");
+
+    assert_eq!(size.width(), 150);
+    assert_eq!(size.height(), 151);
+}
+
+#[test]
+fn viewport_size_rejects_invalid_logical_dimensions_and_scale_factors() {
+    assert_eq!(ViewportSize::from_logical(0.0, 600.0, 1.0), None);
+    assert_eq!(ViewportSize::from_logical(800.0, -1.0, 1.0), None);
+    assert_eq!(ViewportSize::from_logical(800.0, 600.0, 0.0), None);
+    assert_eq!(ViewportSize::from_logical(f32::NAN, 600.0, 1.0), None);
+    assert_eq!(ViewportSize::from_logical(800.0, f32::INFINITY, 1.0), None);
+    assert_eq!(ViewportSize::from_logical(800.0, 600.0, f32::NAN), None);
+}
+
+#[test]
 fn shared_opengl_context_implements_the_servo_rendering_contract() {
     fn assert_rendering_context<T: RenderingContext>() {}
 
