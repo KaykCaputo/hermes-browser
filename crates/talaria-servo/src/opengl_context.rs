@@ -41,9 +41,7 @@ pub struct SharedOpenGlContext {
 
 impl SharedOpenGlContext {
     /// Creates a rendering context from the OpenGL context currently owned by the embedder.
-    ///
     /// # Safety
-    ///
     /// `get_proc_address` must return function pointers for the OpenGL context that is current on
     /// this thread. That context must remain alive while this `SharedOpenGlContext` exists, and
     /// every Servo rendering operation must run while the same context is current.

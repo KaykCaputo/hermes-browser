@@ -3,9 +3,9 @@ use std::error::Error;
 use std::rc::Rc;
 
 use hermes_ui::MainWindow;
-use slint::{ComponentHandle, RenderingState};
+use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 use talaria_core::{BrowserCommand, BrowserController, BrowserState, LoadState};
-use talaria_servo::{EventLoopWaker, ServoRuntime};
+use talaria_servo::{EventLoopWaker, ServoRuntime, SharedOpenGlContext, ViewportSize};
 
 fn main() -> Result<(), Box<dyn Error>> {
     let window = MainWindow::new()?;
@@ -23,22 +23,64 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 fn connect_servo_runtime(window: &MainWindow) -> Result<(), slint::SetRenderingNotifierError> {
-    let weak_window = window.as_weak();
+    let weak_window_for_waker = window.as_weak();
 
     let event_loop_waker = EventLoopWaker::new(move || {
-        let _wake_result = weak_window.upgrade_in_event_loop(|window| {
+        let _wake_result = weak_window_for_waker.upgrade_in_event_loop(|window| {
             window.window().request_redraw();
         });
     });
 
     let runtime = Rc::new(ServoRuntime::new(event_loop_waker));
+    let weak_window_for_rendering = window.as_weak();
+    let mut rendering_context: Option<Rc<SharedOpenGlContext>> = None;
 
     window
         .window()
-        .set_rendering_notifier(move |state, _graphics_api| {
-            if matches!(state, RenderingState::BeforeRendering) {
+        .set_rendering_notifier(move |state, graphics_api| match state {
+            RenderingState::RenderingSetup => {
+                if rendering_context.is_some() {
+                    return;
+                }
+
+                let Some(window) = weak_window_for_rendering.upgrade() else {
+                    return;
+                };
+
+                let GraphicsAPI::NativeOpenGL { get_proc_address } = graphics_api else {
+                    window.set_content_message(
+                        "The selected Slint renderer does not provide OpenGL.".into(),
+                    );
+                    return;
+                };
+
+                let window_size = window.window().size();
+
+                let Some(viewport_size) = ViewportSize::new(window_size.width, window_size.height)
+                else {
+                    window
+                        .set_content_message("The OpenGL viewport has invalid dimensions.".into());
+                    return;
+                };
+                // SAFETY:
+                // Slint guarantees that its OpenGL context is current while the
+                // rendering notifier is running. The wrapper is released during
+                // RenderingTeardown, before Slint destroys the native context.
+                let context = unsafe { SharedOpenGlContext::new(viewport_size, get_proc_address) };
+
+                rendering_context = Some(Rc::new(context));
+
+                window.set_content_message(
+                    "OpenGL context initialized. Waiting for Servo WebView.".into(),
+                );
+            }
+            RenderingState::BeforeRendering => {
                 runtime.spin_event_loop();
             }
+            RenderingState::RenderingTeardown => {
+                drop(rendering_context.take());
+            }
+            _ => {}
         })
 }
 
