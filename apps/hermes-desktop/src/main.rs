@@ -1,13 +1,20 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use hermes_ui::MainWindow;
 use slint::ComponentHandle;
-use talaria_core::{BrowserState, LoadState};
+use talaria_core::{BrowserCommand, BrowserController, BrowserState, LoadState};
 
 fn main() -> Result<(), slint::PlatformError> {
     let window = MainWindow::new()?;
-    let state = BrowserState::default();
+    let controller = Rc::new(RefCell::new(BrowserController::default()));
 
-    sync_ui(&window, &state);
-    connect_ui_callbacks(&window);
+    {
+        let controller = controller.borrow();
+        sync_ui(&window, controller.state());
+    }
+
+    connect_ui_callbacks(&window, Rc::clone(&controller));
 
     window.run()
 }
@@ -29,35 +36,38 @@ fn sync_ui(window: &MainWindow, state: &BrowserState) {
     window.set_content_message(content_message.into());
 }
 
-fn connect_ui_callbacks(window: &MainWindow) {
-    let weak_window = window.as_weak();
+fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserController>>) {
+    let navigate_controller = Rc::clone(&controller);
 
     window.on_navigate(move |address| {
-        let Some(window) = weak_window.upgrade() else {
-            return;
-        };
-
-        window.set_page_title("Navigation pending".into());
-        window.set_content_message(
-            format!(
-                "Talaria Core will receive the command to open
-              {address}"
-            )
-            .into(),
-        );
+        navigate_controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::Navigate {
+                url: address.to_string(),
+            });
     });
 
-    let weak_window = window.as_weak();
+    let back_controller = Rc::clone(&controller);
+
+    window.on_go_back(move || {
+        back_controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::GoBack);
+    });
+
+    let forward_controller = Rc::clone(&controller);
+
+    window.on_go_forward(move || {
+        forward_controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::GoForward);
+    });
+
+    let reload_controller = Rc::clone(&controller);
 
     window.on_reload(move || {
-        let Some(window) = weak_window.upgrade() else {
-            return;
-        };
-
-        window.set_content_message(
-            "The reload command will be connected to Servo
-              soon."
-                .into(),
-        );
+        reload_controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::Reload);
     });
 }
