@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 dpi.workspace = true
+euclid.workspace = true
 gleam.workspace = true
 glow.workspace = true
 rustls.workspace = true

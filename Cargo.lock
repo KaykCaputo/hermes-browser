@@ -9160,6 +9160,7 @@ name = "talaria-servo"
 version = "0.1.0"
 dependencies = [
  "dpi",
+ "euclid",
  "gleam",
  "glow",
  "rustls",

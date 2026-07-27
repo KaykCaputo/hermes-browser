@@ -55,6 +55,7 @@ pub struct SharedOpenGlContext {
     size: Cell<ViewportSize>,
     gleam_gl: Rc<dyn Gl>,
     glow_gl: Arc<glow::Context>,
+    connection: surfman::Connection,
 }
 
 impl SharedOpenGlContext {
@@ -66,7 +67,8 @@ impl SharedOpenGlContext {
     pub unsafe fn new(
         size: ViewportSize,
         get_proc_address: &dyn Fn(&CStr) -> *const c_void,
-    ) -> Self {
+    ) -> Result<Self, surfman::Error> {
+        let connection = surfman::Connection::new()?;
         let glow_gl = Arc::new(unsafe {
             glow::Context::from_loader_function_cstr(|symbol| get_proc_address(symbol))
         });
@@ -77,11 +79,12 @@ impl SharedOpenGlContext {
             unsafe { gl::GlFns::load_with(|symbol| load_symbol(get_proc_address, symbol)) }
         };
 
-        Self {
+        Ok(Self {
             size: Cell::new(size),
             gleam_gl,
             glow_gl,
-        }
+            connection,
+        })
     }
 
     pub fn resize(&self, size: ViewportSize) {
@@ -116,6 +119,10 @@ impl RenderingContext for SharedOpenGlContext {
 
     fn glow_gl_api(&self) -> Arc<glow::Context> {
         Arc::clone(&self.glow_gl)
+    }
+
+    fn connection(&self) -> Option<surfman::Connection> {
+        Some(self.connection.clone())
     }
 }
 
