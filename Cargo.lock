@@ -2951,6 +2951,7 @@ dependencies = [
  "hermes-ui",
  "slint",
  "talaria-core",
+ "talaria-servo",
 ]
 
 [[package]]
