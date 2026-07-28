@@ -15,6 +15,9 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   build-linux:
@@ -24,7 +27,22 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      - name: Free disk space for Servo
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          df -h /
+
+          sudo rm -rf \
+            /opt/ghc \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          sudo apt-get clean
+
+          df -h /
 
       - name: Install Rust
         shell: bash
@@ -59,9 +77,21 @@ jobs:
 
       - name: Run quality checks
         shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/hermes-qa-target
         run: |
           set -euo pipefail
+
+          df -h /
           make qa
+
+      - name: Reclaim quality-check build space
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo clean --target-dir "${RUNNER_TEMP}/hermes-qa-target"
+          df -h /
 
       - name: Build release executable
         shell: bash
@@ -142,7 +172,7 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Rust
         shell: pwsh
