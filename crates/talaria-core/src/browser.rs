@@ -1,5 +1,5 @@
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
-const INITIAL_ADDRESS: &str = "https://servo.org";
+const INITIAL_ADDRESS: &str = "";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadState {

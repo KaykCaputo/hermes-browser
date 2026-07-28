@@ -3,17 +3,17 @@ use std::error::Error;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 
-use hermes_ui::MainWindow;
+use hermes_ui::{MainWindow, WebViewPointerButton};
 use slint::{ComponentHandle, GraphicsAPI, RenderingState};
 use talaria_core::{
-    BrowserCommand, BrowserController, BrowserEvent, BrowserState, LoadState, dispatch_command,
+    BrowserCommand, BrowserController, BrowserEvent, BrowserState, LoadState, PointerButton,
+    PointerButtonAction, WebView as TalariaWebView, dispatch_command,
 };
 use talaria_servo::{
-    EventLoopWaker, ServoRuntime, ServoWebView, ServoWebViewError, SharedOpenGlContext,
-    ViewportSize,
+    EventLoopWaker, NEW_TAB_URL, ServoRuntime, ServoWebView, SharedOpenGlContext, ViewportSize,
 };
 
-const INITIAL_URL: &str = "https://servo.org";
+const MAX_COMMANDS_PER_FRAME: usize = 128;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let window = MainWindow::new()?;
@@ -151,13 +151,12 @@ fn connect_servo_runtime(
                 if web_view.is_none() {
                     match runtime.create_web_view(
                         Rc::clone(rendering_context),
-                        INITIAL_URL,
+                        NEW_TAB_URL,
                         scale_factor,
                         browser_event_sender.clone(),
                     ) {
                         Ok(created_web_view) => {
                             web_view = Some(created_web_view);
-                            window.set_web_view_visible(true);
                         }
                         Err(error) => {
                             window.set_content_message(
@@ -169,25 +168,31 @@ fn connect_servo_runtime(
                 }
 
                 if let Some(web_view) = web_view.as_mut() {
-                    if let Err(error) = dispatch_pending_commands(&controller, web_view) {
-                        controller
-                            .borrow_mut()
-                            .handle_event(BrowserEvent::LoadStateChanged {
-                                state: LoadState::Failed {
-                                    message: error.to_string(),
-                                },
-                            });
-
-                        {
-                            let controller = controller.borrow();
-                            sync_ui(&window, controller.state());
+                    match dispatch_pending_commands(&controller, web_view) {
+                        Ok(has_pending_commands) => {
+                            if has_pending_commands {
+                                window.window().request_redraw();
+                            }
                         }
+                        Err(error) => {
+                            controller
+                                .borrow_mut()
+                                .handle_event(BrowserEvent::LoadStateChanged {
+                                    state: LoadState::Failed {
+                                        message: error.to_string(),
+                                    },
+                                });
 
-                        window.set_web_view_visible(false);
-                        return;
+                            {
+                                let controller = controller.borrow();
+                                sync_ui(&window, controller.state());
+                            }
+
+                            return;
+                        }
                     }
 
-                    web_view.paint();
+                    let _painted = web_view.paint_if_available();
                 }
             }
             RenderingState::RenderingTeardown => {
@@ -215,19 +220,21 @@ fn apply_pending_browser_events(
     state_changed
 }
 
-fn dispatch_pending_commands(
+fn dispatch_pending_commands<W: TalariaWebView>(
     controller: &RefCell<BrowserController>,
-    web_view: &mut ServoWebView,
-) -> Result<(), ServoWebViewError> {
-    loop {
+    web_view: &mut W,
+) -> Result<bool, W::Error> {
+    for _ in 0..MAX_COMMANDS_PER_FRAME {
         let command = { controller.borrow_mut().next_command() };
 
         let Some(command) = command else {
-            return Ok(());
+            return Ok(false);
         };
 
         dispatch_command(web_view, command)?;
     }
+
+    Ok(controller.borrow().has_pending_commands())
 }
 
 fn sync_ui(window: &MainWindow, state: &BrowserState) {
@@ -236,15 +243,31 @@ fn sync_ui(window: &MainWindow, state: &BrowserState) {
     window.set_can_go_back(state.can_go_back());
     window.set_can_go_forward(state.can_go_forward());
     window.set_is_loading(matches!(state.load_state(), LoadState::Loading));
+    window.set_web_view_visible(
+        !state.url().is_empty() && !matches!(state.load_state(), LoadState::Failed { .. }),
+    );
 
-    let content_message = match state.load_state() {
-        LoadState::Idle => "Servo runtime initialized. Waiting for WebView.",
-        LoadState::Loading => "The page is loading.",
-        LoadState::Loaded => "",
-        LoadState::Failed { message } => message.as_str(),
+    let content_message = if state.url().is_empty() {
+        "Type an address or search with DuckDuckGo."
+    } else {
+        match state.load_state() {
+            LoadState::Idle => "Servo runtime initialized. Waiting for WebView.",
+            LoadState::Loading => "The page is loading.",
+            LoadState::Loaded => "",
+            LoadState::Failed { message } => message.as_str(),
+        }
     };
 
     window.set_content_message(content_message.into());
+}
+
+fn pointer_button_from_ui(button: WebViewPointerButton) -> PointerButton {
+    match button {
+        WebViewPointerButton::Left => PointerButton::Left,
+        WebViewPointerButton::Middle => PointerButton::Middle,
+        WebViewPointerButton::Right => PointerButton::Right,
+        WebViewPointerButton::Other => PointerButton::Other,
+    }
 }
 
 fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserController>>) {
@@ -259,21 +282,14 @@ fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserContr
             return;
         };
 
-        match navigation_result {
-            Ok(()) => {
-                window.set_web_view_visible(true);
-            }
-            Err(error) => {
-                navigate_controller
-                    .borrow_mut()
-                    .handle_event(BrowserEvent::LoadStateChanged {
-                        state: LoadState::Failed {
-                            message: error.to_string(),
-                        },
-                    });
-
-                window.set_web_view_visible(false);
-            }
+        if let Err(error) = navigation_result {
+            navigate_controller
+                .borrow_mut()
+                .handle_event(BrowserEvent::LoadStateChanged {
+                    state: LoadState::Failed {
+                        message: error.to_string(),
+                    },
+                });
         }
 
         {
@@ -322,11 +338,135 @@ fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserContr
             window.window().request_redraw();
         }
     });
+
+    let pointer_moved_controller = Rc::clone(&controller);
+    let pointer_moved_window = window.as_weak();
+
+    window.on_web_view_pointer_moved(move |x, y| {
+        pointer_moved_controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::PointerMoved { x, y });
+
+        if let Some(window) = pointer_moved_window.upgrade() {
+            window.window().request_redraw();
+        }
+    });
+
+    let pointer_button_controller = Rc::clone(&controller);
+    let pointer_button_window = window.as_weak();
+
+    window.on_web_view_pointer_button(move |button, pressed, x, y| {
+        let action = if pressed {
+            PointerButtonAction::Down
+        } else {
+            PointerButtonAction::Up
+        };
+
+        pointer_button_controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::PointerButton {
+                action,
+                button: pointer_button_from_ui(button),
+                x,
+                y,
+            });
+
+        if let Some(window) = pointer_button_window.upgrade() {
+            window.window().request_redraw();
+        }
+    });
+
+    let scroll_controller = Rc::clone(&controller);
+    let scroll_window = window.as_weak();
+
+    window.on_web_view_scrolled(move |delta_x, delta_y, x, y| {
+        scroll_controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::Scrolled {
+                delta_x,
+                delta_y,
+                x,
+                y,
+            });
+
+        if let Some(window) = scroll_window.upgrade() {
+            window.window().request_redraw();
+        }
+    });
+
+    let focus_controller = Rc::clone(&controller);
+    let focus_window = window.as_weak();
+
+    window.on_web_view_focus_changed(move |focused| {
+        focus_controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::FocusChanged { focused });
+
+        if let Some(window) = focus_window.upgrade() {
+            window.window().request_redraw();
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use super::*;
+
+    #[derive(Default)]
+    struct CountingWebView {
+        reload_count: usize,
+    }
+
+    impl TalariaWebView for CountingWebView {
+        type Error = Infallible;
+
+        fn navigate(&mut self, _url: &str) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn go_back(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn go_forward(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn reload(&mut self) -> Result<(), Self::Error> {
+            self.reload_count += 1;
+            Ok(())
+        }
+
+        fn pointer_moved(&mut self, _x: f32, _y: f32) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn pointer_button(
+            &mut self,
+            _action: PointerButtonAction,
+            _button: PointerButton,
+            _x: f32,
+            _y: f32,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn scroll(
+            &mut self,
+            _delta_x: f32,
+            _delta_y: f32,
+            _x: f32,
+            _y: f32,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn set_focus(&mut self, _focused: bool) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn pending_browser_events_are_applied_in_order() {
@@ -355,5 +495,49 @@ mod tests {
         let (_sender, receiver) = mpsc::channel();
 
         assert!(!apply_pending_browser_events(&controller, &receiver));
+    }
+
+    #[test]
+    fn ui_pointer_buttons_map_to_core_pointer_buttons() {
+        assert_eq!(
+            pointer_button_from_ui(WebViewPointerButton::Left),
+            PointerButton::Left
+        );
+        assert_eq!(
+            pointer_button_from_ui(WebViewPointerButton::Middle),
+            PointerButton::Middle
+        );
+        assert_eq!(
+            pointer_button_from_ui(WebViewPointerButton::Right),
+            PointerButton::Right
+        );
+        assert_eq!(
+            pointer_button_from_ui(WebViewPointerButton::Other),
+            PointerButton::Other
+        );
+    }
+
+    #[test]
+    fn command_dispatch_is_limited_per_frame() {
+        let controller = RefCell::new(BrowserController::default());
+        let mut web_view = CountingWebView::default();
+
+        for _ in 0..=MAX_COMMANDS_PER_FRAME {
+            controller
+                .borrow_mut()
+                .queue_command(BrowserCommand::Reload);
+        }
+
+        let has_pending_commands = dispatch_pending_commands(&controller, &mut web_view)
+            .expect("the fake WebView should not fail");
+
+        assert!(has_pending_commands);
+        assert_eq!(web_view.reload_count, MAX_COMMANDS_PER_FRAME);
+
+        let has_pending_commands = dispatch_pending_commands(&controller, &mut web_view)
+            .expect("the fake WebView should not fail");
+
+        assert!(!has_pending_commands);
+        assert_eq!(web_view.reload_count, MAX_COMMANDS_PER_FRAME + 1);
     }
 }

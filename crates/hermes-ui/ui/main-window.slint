@@ -1,3 +1,10 @@
+export enum WebViewPointerButton {
+    left,
+    middle,
+    right,
+    other,
+}
+
 component ChromeButton inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
@@ -27,19 +34,23 @@ component ChromeButton inherits Rectangle {
 
 export component MainWindow inherits Window {
     in property <string> page-title: "New tab";
-    in-out property <string> address: "https://servo.org";
+    in-out property <string> address: "";
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
     in property <bool> is-loading: false;
     in property <bool> web-view-visible: false;
     out property <length> web-view-width: web-view-area.width;
     out property <length> web-view-height: web-view-area.height;
-    in property <string> content-message: "The Servo WebView will be rendered in this area.";
+    in property <string> content-message: "Type an address or search with DuckDuckGo.";
 
     callback navigate(string);
     callback go-back;
     callback go-forward;
     callback reload;
+    callback web-view-pointer-moved(float, float);
+    callback web-view-pointer-button(WebViewPointerButton, bool, float, float);
+    callback web-view-scrolled(float, float, float, float);
+    callback web-view-focus-changed(bool);
 
     title: page-title + " — Hermes Browser";
     preferred-width: 1100px;
@@ -198,6 +209,92 @@ export component MainWindow inherits Window {
                     font-size: 14px;
                     horizontal-alignment: center;
                     wrap: word-wrap;
+                }
+            }
+
+            web-view-focus := FocusScope {
+                enabled: root.web-view-visible;
+                focus-on-click: false;
+                focus-on-tab-navigation: false;
+
+                focus-gained => {
+                    root.web-view-focus-changed(true);
+                }
+
+                focus-lost => {
+                    root.web-view-focus-changed(false);
+                }
+
+                web-view-input := TouchArea {
+                    enabled: root.web-view-visible;
+
+                    property <WebViewPointerButton> active-button: WebViewPointerButton.other;
+
+                    function map-pointer-button(
+                        button: PointerEventButton,
+                    ) -> WebViewPointerButton {
+                        if button == PointerEventButton.left {
+                            return WebViewPointerButton.left;
+                        }
+
+                        if button == PointerEventButton.middle {
+                            return WebViewPointerButton.middle;
+                        }
+
+                        if button == PointerEventButton.right {
+                            return WebViewPointerButton.right;
+                        }
+
+                        return WebViewPointerButton.other;
+                    }
+
+                    pointer-event(event) => {
+                        if event.kind == PointerEventKind.move {
+                            root.web-view-pointer-moved(
+                                self.mouse-x / 1px,
+                                self.mouse-y / 1px,
+                            );
+                        } else if event.kind == PointerEventKind.down {
+                            web-view-focus.focus();
+                            self.active-button = self.map-pointer-button(event.button);
+
+                            root.web-view-pointer-button(
+                                self.active-button,
+                                true,
+                                self.mouse-x / 1px,
+                                self.mouse-y / 1px,
+                            );
+                        } else if event.kind == PointerEventKind.up {
+                            root.web-view-pointer-button(
+                                self.map-pointer-button(event.button),
+                                false,
+                                self.mouse-x / 1px,
+                                self.mouse-y / 1px,
+                            );
+
+                            self.active-button = WebViewPointerButton.other;
+                        } else if event.kind == PointerEventKind.cancel {
+                            root.web-view-pointer-button(
+                                self.active-button,
+                                false,
+                                self.mouse-x / 1px,
+                                self.mouse-y / 1px,
+                            );
+
+                            self.active-button = WebViewPointerButton.other;
+                        }
+                    }
+
+                    scroll-event(event) => {
+                        root.web-view-scrolled(
+                            event.delta-x / 1px,
+                            event.delta-y / 1px,
+                            self.mouse-x / 1px,
+                            self.mouse-y / 1px,
+                        );
+
+                        accept
+                    }
                 }
             }
         }

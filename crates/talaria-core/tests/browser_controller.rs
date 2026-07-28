@@ -7,6 +7,7 @@ use talaria_core::{
 fn default_controller_starts_without_pending_commands() {
     let mut controller = BrowserController::default();
 
+    assert!(!controller.has_pending_commands());
     assert_eq!(controller.next_command(), None);
 }
 
@@ -107,4 +108,80 @@ fn invalid_navigation_does_not_change_state_or_queue_command() {
     assert!(matches!(result, Err(AddressResolutionError::EmptyInput)));
     assert_eq!(controller.state().url(), original_url);
     assert_eq!(controller.next_command(), None);
+}
+
+#[test]
+fn consecutive_pointer_moves_keep_only_the_latest_position() {
+    let mut controller = BrowserController::default();
+
+    controller.queue_command(BrowserCommand::PointerMoved { x: 10.0, y: 20.0 });
+    controller.queue_command(BrowserCommand::PointerMoved { x: 30.0, y: 40.0 });
+
+    assert_eq!(
+        controller.next_command(),
+        Some(BrowserCommand::PointerMoved { x: 30.0, y: 40.0 })
+    );
+    assert_eq!(controller.next_command(), None);
+}
+
+#[test]
+fn consecutive_scrolls_accumulate_delta_at_the_latest_position() {
+    let mut controller = BrowserController::default();
+
+    controller.queue_command(BrowserCommand::Scrolled {
+        delta_x: 1.0,
+        delta_y: 2.0,
+        x: 10.0,
+        y: 20.0,
+    });
+    controller.queue_command(BrowserCommand::Scrolled {
+        delta_x: 3.0,
+        delta_y: 4.0,
+        x: 30.0,
+        y: 40.0,
+    });
+
+    assert_eq!(
+        controller.next_command(),
+        Some(BrowserCommand::Scrolled {
+            delta_x: 4.0,
+            delta_y: 6.0,
+            x: 30.0,
+            y: 40.0,
+        })
+    );
+    assert_eq!(controller.next_command(), None);
+}
+
+#[test]
+fn input_commands_are_not_coalesced_across_an_ordering_boundary() {
+    let mut controller = BrowserController::default();
+
+    controller.queue_command(BrowserCommand::PointerMoved { x: 10.0, y: 20.0 });
+    controller.queue_command(BrowserCommand::Reload);
+    controller.queue_command(BrowserCommand::PointerMoved { x: 30.0, y: 40.0 });
+
+    assert_eq!(
+        controller.next_command(),
+        Some(BrowserCommand::PointerMoved { x: 10.0, y: 20.0 })
+    );
+    assert_eq!(controller.next_command(), Some(BrowserCommand::Reload));
+    assert_eq!(
+        controller.next_command(),
+        Some(BrowserCommand::PointerMoved { x: 30.0, y: 40.0 })
+    );
+}
+
+#[test]
+fn consecutive_focus_changes_keep_only_the_latest_state() {
+    let mut controller = BrowserController::default();
+
+    controller.queue_command(BrowserCommand::FocusChanged { focused: true });
+    controller.queue_command(BrowserCommand::FocusChanged { focused: false });
+
+    assert_eq!(
+        controller.next_command(),
+        Some(BrowserCommand::FocusChanged { focused: false })
+    );
+    assert!(!controller.has_pending_commands());
 }

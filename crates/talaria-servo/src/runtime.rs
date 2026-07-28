@@ -1,27 +1,41 @@
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::time::Instant;
 
 use euclid::Scale;
+use log::info;
 use rustls::crypto::CryptoProvider;
 use servo::{LoadStatus, RenderingContext, ServoBuilder, WebViewBuilder};
 use talaria_core::{BrowserEvent, LoadState};
 use url::Url;
 
+use crate::frame_ready::FrameReadySignal;
+use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::{ServoWebView, ServoWebViewError, SharedOpenGlContext};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
 
+pub const NEW_TAB_URL: &str = "about:blank";
+
 #[derive(Clone)]
 pub struct EventLoopWaker {
     callback: Arc<WakeCallback>,
+    wake_pending: Arc<AtomicBool>,
 }
 
 impl EventLoopWaker {
     pub fn new(callback: impl Fn() + Send + Sync + 'static) -> Self {
         Self {
             callback: Arc::new(callback),
+            wake_pending: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn acknowledge(&self) {
+        self.wake_pending.store(false, Ordering::Release);
     }
 }
 
@@ -31,7 +45,13 @@ impl servo::EventLoopWaker for EventLoopWaker {
     }
 
     fn wake(&self) {
-        (self.callback)();
+        if self
+            .wake_pending
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            (self.callback)();
+        }
     }
 }
 
@@ -48,6 +68,7 @@ impl ServoRuntime {
         let inner = ServoBuilder::default()
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
+        inner.setup_logging();
 
         Self {
             inner,
@@ -64,9 +85,12 @@ impl ServoRuntime {
     ) -> Result<ServoWebView, ServoWebViewError> {
         let initial_url = Url::parse(initial_url)?;
         let rendering_context: Rc<dyn RenderingContext> = rendering_context;
+        let frame_ready = FrameReadySignal::default();
         let delegate = Rc::new(BrowserDelegate {
             event_loop_waker: self.redraw_waker.clone(),
             browser_event_sender,
+            frame_ready: frame_ready.clone(),
+            load_metrics: RefCell::new(PageLoadMetrics::default()),
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -75,10 +99,11 @@ impl ServoRuntime {
             .delegate(delegate)
             .build();
 
-        Ok(ServoWebView::new(inner))
+        Ok(ServoWebView::new(inner, frame_ready))
     }
 
     pub fn spin_event_loop(&self) {
+        self.redraw_waker.acknowledge();
         self.inner.spin_event_loop();
     }
 }
@@ -86,18 +111,35 @@ impl ServoRuntime {
 struct BrowserDelegate {
     event_loop_waker: EventLoopWaker,
     browser_event_sender: Sender<BrowserEvent>,
+    frame_ready: FrameReadySignal,
+    load_metrics: RefCell<PageLoadMetrics>,
 }
 
 impl BrowserDelegate {
     fn send_browser_event(&self, event: BrowserEvent) {
         let _send_result = self.browser_event_sender.send(event);
     }
+
+    fn record_load_milestone(&self, milestone: LoadMilestone) {
+        let elapsed = self
+            .load_metrics
+            .borrow_mut()
+            .record(milestone, Instant::now());
+
+        if let Some(elapsed) = elapsed {
+            info!(
+                "page load milestone: {} at {:.1} ms",
+                milestone.label(),
+                elapsed.as_secs_f64() * 1_000.0
+            );
+        }
+    }
 }
 
 impl servo::WebViewDelegate for BrowserDelegate {
     fn notify_url_changed(&self, _web_view: servo::WebView, url: Url) {
         self.send_browser_event(BrowserEvent::AddressChanged {
-            url: url.to_string(),
+            url: display_url(&url),
         });
     }
 
@@ -106,6 +148,15 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn notify_load_status_changed(&self, _web_view: servo::WebView, status: LoadStatus) {
+        match status {
+            LoadStatus::Started => {
+                self.load_metrics.borrow_mut().start(Instant::now());
+                info!("page load started");
+            }
+            LoadStatus::HeadParsed => self.record_load_milestone(LoadMilestone::HeadParsed),
+            LoadStatus::Complete => self.record_load_milestone(LoadMilestone::Complete),
+        }
+
         self.send_browser_event(BrowserEvent::LoadStateChanged {
             state: load_state_from_servo(status),
         });
@@ -116,6 +167,8 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn notify_new_frame_ready(&self, _web_view: servo::WebView) {
+        self.record_load_milestone(LoadMilestone::FirstFrame);
+        self.frame_ready.mark_ready();
         servo::EventLoopWaker::wake(&self.event_loop_waker);
     }
 
@@ -128,6 +181,14 @@ impl servo::WebViewDelegate for BrowserDelegate {
         self.send_browser_event(BrowserEvent::LoadStateChanged {
             state: LoadState::Failed { message: reason },
         });
+    }
+}
+
+fn display_url(url: &Url) -> String {
+    if url.as_str() == NEW_TAB_URL {
+        String::new()
+    } else {
+        url.to_string()
     }
 }
 
@@ -222,5 +283,19 @@ mod tests {
                 can_go_forward: false,
             }
         );
+    }
+
+    #[test]
+    fn new_tab_url_is_hidden_from_the_address_bar() {
+        let url = Url::parse(NEW_TAB_URL).expect("the new tab URL should be valid");
+
+        assert_eq!(display_url(&url), "");
+    }
+
+    #[test]
+    fn regular_url_is_preserved_for_the_address_bar() {
+        let url = Url::parse("https://example.com/path").expect("the test URL should be valid");
+
+        assert_eq!(display_url(&url), "https://example.com/path");
     }
 }

@@ -105,7 +105,7 @@ fn event_loop_waker_invokes_its_callback() {
 }
 
 #[test]
-fn cloned_event_loop_waker_shares_the_same_callback() {
+fn repeated_wakes_are_coalesced_until_acknowledged() {
     let call_count = Arc::new(AtomicUsize::new(0));
     let callback_call_count = Arc::clone(&call_count);
     let waker = EventLoopWaker::new(move || {
@@ -114,6 +114,11 @@ fn cloned_event_loop_waker_shares_the_same_callback() {
     let cloned_waker = ServoEventLoopWaker::clone_box(&waker);
 
     ServoEventLoopWaker::wake(&waker);
+    cloned_waker.wake();
+
+    assert_eq!(call_count.load(Ordering::Relaxed), 1);
+
+    waker.acknowledge();
     cloned_waker.wake();
 
     assert_eq!(call_count.load(Ordering::Relaxed), 2);

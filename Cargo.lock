@@ -9166,6 +9166,7 @@ dependencies = [
  "euclid",
  "gleam",
  "glow",
+ "log",
  "rustls",
  "servo",
  "surfman",

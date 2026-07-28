@@ -8,6 +8,7 @@ dpi.workspace = true
 euclid.workspace = true
 gleam.workspace = true
 glow.workspace = true
+log.workspace = true
 rustls.workspace = true
 servo.workspace = true
 surfman.workspace = true

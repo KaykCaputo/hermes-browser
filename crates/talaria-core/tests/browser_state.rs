@@ -5,7 +5,7 @@ fn default_state_describes_the_initial_page() {
     let state = BrowserState::default();
 
     assert_eq!(state.page_title(), "New Tab");
-    assert_eq!(state.url(), "https://servo.org");
+    assert_eq!(state.url(), "");
     assert_eq!(state.load_state(), &LoadState::Idle);
     assert!(!state.can_go_back());
     assert!(!state.can_go_forward());

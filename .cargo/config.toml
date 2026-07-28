@@ -1,0 +1,3 @@
+[env]
+# Stylo's 512 KiB default can overflow in debug builds during hover-driven style updates.
+SERVO_STYLE_THREAD_STACK_SIZE_KB = "2048"

@@ -7,15 +7,17 @@ use servo::{
 use talaria_core::{PointerButton, PointerButtonAction, WebView as TalariaWebView};
 use url::Url;
 
+use crate::frame_ready::FrameReadySignal;
 use crate::{ServoWebViewError, ViewportSize};
 
 pub struct ServoWebView {
     inner: servo::WebView,
+    frame_ready: FrameReadySignal,
 }
 
 impl ServoWebView {
-    pub fn new(inner: servo::WebView) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: servo::WebView, frame_ready: FrameReadySignal) -> Self {
+        Self { inner, frame_ready }
     }
 
     pub fn resize(&self, size: ViewportSize) {
@@ -27,8 +29,13 @@ impl ServoWebView {
         self.inner.set_hidpi_scale_factor(Scale::new(scale_factor));
     }
 
-    pub fn paint(&self) {
+    pub fn paint_if_available(&self) -> bool {
+        if !self.frame_ready.has_frame() {
+            return false;
+        }
+
         self.inner.paint();
+        true
     }
 }
 

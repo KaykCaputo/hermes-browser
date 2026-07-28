@@ -6,6 +6,7 @@ CARGO ?= cargo
 RUSTUP ?= rustup
 APP_PACKAGE ?= hermes-desktop
 ARGS ?=
+RUST_LOG ?= talaria_servo=info,servo=warn
 
 .PHONY: \
 	help \
@@ -123,10 +124,10 @@ build-release:
 	"$(CARGO)" build --workspace --release
 
 run:
-	"$(CARGO)" run --package "$(APP_PACKAGE)" -- $(ARGS)
+	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" -- $(ARGS)
 
 run-release:
-	"$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)
+	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)
 
 docs:
 	"$(CARGO)" doc --workspace --no-deps
