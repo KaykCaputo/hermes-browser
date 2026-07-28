@@ -4,9 +4,12 @@ use std::rc::Rc;
 
 use hermes_ui::MainWindow;
 use slint::{ComponentHandle, GraphicsAPI, RenderingState};
-use talaria_core::{BrowserCommand, BrowserController, BrowserState, LoadState};
+use talaria_core::{
+    BrowserCommand, BrowserController, BrowserEvent, BrowserState, LoadState, dispatch_command,
+};
 use talaria_servo::{
-    EventLoopWaker, ServoRuntime, ServoWebView, SharedOpenGlContext, ViewportSize,
+    EventLoopWaker, ServoRuntime, ServoWebView, ServoWebViewError, SharedOpenGlContext,
+    ViewportSize,
 };
 
 const INITIAL_URL: &str = "https://servo.org";
@@ -15,7 +18,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let window = MainWindow::new()?;
     let controller = Rc::new(RefCell::new(BrowserController::default()));
 
-    connect_servo_runtime(&window)?;
+    connect_servo_runtime(&window, Rc::clone(&controller))?;
     {
         let controller = controller.borrow();
         sync_ui(&window, controller.state());
@@ -26,7 +29,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn connect_servo_runtime(window: &MainWindow) -> Result<(), slint::SetRenderingNotifierError> {
+fn connect_servo_runtime(
+    window: &MainWindow,
+    controller: Rc<RefCell<BrowserController>>,
+) -> Result<(), slint::SetRenderingNotifierError> {
     let weak_window_for_waker = window.as_weak();
 
     let event_loop_waker = EventLoopWaker::new(move || {
@@ -151,7 +157,25 @@ fn connect_servo_runtime(window: &MainWindow) -> Result<(), slint::SetRenderingN
                     }
                 }
 
-                if let Some(web_view) = web_view.as_ref() {
+                if let Some(web_view) = web_view.as_mut() {
+                    if let Err(error) = dispatch_pending_commands(&controller, web_view) {
+                        controller
+                            .borrow_mut()
+                            .handle_event(BrowserEvent::LoadStateChanged {
+                                state: LoadState::Failed {
+                                    message: error.to_string(),
+                                },
+                            });
+
+                        {
+                            let controller = controller.borrow();
+                            sync_ui(&window, controller.state());
+                        }
+
+                        window.set_web_view_visible(false);
+                        return;
+                    }
+
                     web_view.paint();
                 }
             }
@@ -163,6 +187,21 @@ fn connect_servo_runtime(window: &MainWindow) -> Result<(), slint::SetRenderingN
             }
             _ => {}
         })
+}
+
+fn dispatch_pending_commands(
+    controller: &RefCell<BrowserController>,
+    web_view: &mut ServoWebView,
+) -> Result<(), ServoWebViewError> {
+    loop {
+        let command = { controller.borrow_mut().next_command() };
+
+        let Some(command) = command else {
+            return Ok(());
+        };
+
+        dispatch_command(web_view, command)?;
+    }
 }
 
 fn sync_ui(window: &MainWindow, state: &BrowserState) {
@@ -184,36 +223,77 @@ fn sync_ui(window: &MainWindow, state: &BrowserState) {
 
 fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserController>>) {
     let navigate_controller = Rc::clone(&controller);
+    let navigate_window = window.as_weak();
 
     window.on_navigate(move |address| {
-        navigate_controller
-            .borrow_mut()
-            .queue_command(BrowserCommand::Navigate {
-                url: address.to_string(),
-            });
+        let address = address.to_string();
+        let navigation_result = { navigate_controller.borrow_mut().queue_navigation(&address) };
+
+        let Some(window) = navigate_window.upgrade() else {
+            return;
+        };
+
+        match navigation_result {
+            Ok(()) => {
+                window.set_web_view_visible(true);
+            }
+            Err(error) => {
+                navigate_controller
+                    .borrow_mut()
+                    .handle_event(BrowserEvent::LoadStateChanged {
+                        state: LoadState::Failed {
+                            message: error.to_string(),
+                        },
+                    });
+
+                window.set_web_view_visible(false);
+            }
+        }
+
+        {
+            let controller = navigate_controller.borrow();
+            sync_ui(&window, controller.state());
+        }
+
+        window.window().request_redraw();
     });
 
     let back_controller = Rc::clone(&controller);
+    let back_window = window.as_weak();
 
     window.on_go_back(move || {
         back_controller
             .borrow_mut()
             .queue_command(BrowserCommand::GoBack);
+
+        if let Some(window) = back_window.upgrade() {
+            window.window().request_redraw();
+        }
     });
 
     let forward_controller = Rc::clone(&controller);
+    let forward_window = window.as_weak();
 
     window.on_go_forward(move || {
         forward_controller
             .borrow_mut()
             .queue_command(BrowserCommand::GoForward);
+
+        if let Some(window) = forward_window.upgrade() {
+            window.window().request_redraw();
+        }
     });
 
     let reload_controller = Rc::clone(&controller);
+    let reload_window = window.as_weak();
 
     window.on_reload(move || {
         reload_controller
             .borrow_mut()
             .queue_command(BrowserCommand::Reload);
+
+        if let Some(window) = reload_window.upgrade() {
+            window.window().request_redraw();
+        }
     });
 }

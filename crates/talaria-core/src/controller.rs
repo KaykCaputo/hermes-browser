@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 
+use crate::address::{AddressResolutionError, resolve_address};
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
 
 #[derive(Debug)]
@@ -14,6 +15,15 @@ impl BrowserController {
             state,
             command_queue: VecDeque::new(),
         }
+    }
+
+    pub fn queue_navigation(&mut self, input: &str) -> Result<(), AddressResolutionError> {
+        let url = resolve_address(input)?.to_string();
+        self.state
+            .apply(BrowserEvent::AddressChanged { url: url.clone() });
+        self.command_queue
+            .push_back(BrowserCommand::Navigate { url });
+        Ok(())
     }
 
     pub fn state(&self) -> &BrowserState {
