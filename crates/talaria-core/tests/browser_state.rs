@@ -1,4 +1,4 @@
-use talaria_core::{BrowserEvent, BrowserState, LoadState};
+use talaria_core::{BrowserEvent, BrowserState, LoadState, PageIcon};
 
 #[test]
 fn default_state_describes_the_initial_page() {
@@ -6,6 +6,7 @@ fn default_state_describes_the_initial_page() {
 
     assert_eq!(state.page_title(), "New Tab");
     assert_eq!(state.url(), "");
+    assert_eq!(state.page_icon(), None);
     assert_eq!(state.load_state(), &LoadState::Idle);
     assert!(!state.can_go_back());
     assert!(!state.can_go_forward());
@@ -31,6 +32,64 @@ fn page_title_changed_uses_the_received_title() {
     });
 
     assert_eq!(state.page_title(), "Example Domain");
+}
+
+#[test]
+fn page_icon_changed_uses_the_received_icon() {
+    let mut state = BrowserState::default();
+    let icon =
+        PageIcon::from_rgba(1, 1, vec![10, 20, 30, 255]).expect("the test icon should be valid");
+
+    state.apply(BrowserEvent::PageIconChanged {
+        icon: Some(icon.clone()),
+    });
+
+    assert_eq!(state.page_icon(), Some(&icon));
+}
+
+#[test]
+fn page_icon_can_be_cleared() {
+    let mut state = BrowserState::default();
+    let icon =
+        PageIcon::from_rgba(1, 1, vec![10, 20, 30, 255]).expect("the test icon should be valid");
+
+    state.apply(BrowserEvent::PageIconChanged { icon: Some(icon) });
+    state.apply(BrowserEvent::PageIconChanged { icon: None });
+
+    assert_eq!(state.page_icon(), None);
+}
+
+#[test]
+fn navigating_to_a_different_address_clears_the_previous_icon() {
+    let mut state = BrowserState::default();
+    let icon =
+        PageIcon::from_rgba(1, 1, vec![10, 20, 30, 255]).expect("the test icon should be valid");
+
+    state.apply(BrowserEvent::PageIconChanged { icon: Some(icon) });
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://example.com".to_owned(),
+    });
+
+    assert_eq!(state.page_icon(), None);
+}
+
+#[test]
+fn receiving_the_same_address_preserves_the_current_icon() {
+    let mut state = BrowserState::default();
+    let icon =
+        PageIcon::from_rgba(1, 1, vec![10, 20, 30, 255]).expect("the test icon should be valid");
+
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://example.com".to_owned(),
+    });
+    state.apply(BrowserEvent::PageIconChanged {
+        icon: Some(icon.clone()),
+    });
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://example.com".to_owned(),
+    });
+
+    assert_eq!(state.page_icon(), Some(&icon));
 }
 
 #[test]

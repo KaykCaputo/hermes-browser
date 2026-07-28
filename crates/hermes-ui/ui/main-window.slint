@@ -32,12 +32,30 @@ component ChromeButton inherits Rectangle {
     }
 }
 
+component TabIcon inherits Rectangle {
+    in property <image> source;
+
+    width: 18px;
+    background: transparent;
+
+    Image {
+        y: (parent.height - self.height) / 2;
+        width: 18px;
+        height: 18px;
+        source: root.source;
+        image-fit: contain;
+    }
+}
+
 export component MainWindow inherits Window {
     in property <string> page-title: "New tab";
     in-out property <string> address: "";
+    in property <image> page-icon;
+    in property <bool> has-page-icon: false;
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
     in property <bool> is-loading: false;
+    in property <bool> is-new-tab: true;
     in property <bool> web-view-visible: false;
     out property <length> web-view-width: web-view-area.width;
     out property <length> web-view-height: web-view-area.height;
@@ -53,9 +71,10 @@ export component MainWindow inherits Window {
     callback web-view-focus-changed(bool);
 
     title: page-title + " — Hermes Browser";
+    icon: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
     preferred-width: 1100px;
     preferred-height: 720px;
-    min-width: 720px;
+    min-width: 480px;
     min-height: 480px;
     background: #f5f6fa;
 
@@ -82,11 +101,12 @@ export component MainWindow inherits Window {
                         padding-right: 12px;
                         spacing: 8px;
 
-                        Text {
-                            text: "⌁";
-                            color: #6957d9;
-                            font-size: 19px;
-                            vertical-alignment: center;
+                        if root.has-page-icon: TabIcon {
+                            source: root.page-icon;
+                        }
+
+                        if !root.has-page-icon: TabIcon {
+                            source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
                         }
 
                         Text {
@@ -189,19 +209,117 @@ export component MainWindow inherits Window {
                 background: #6957d9;
             }
 
-            if !root.web-view-visible: VerticalLayout {
+            if root.is-new-tab: Rectangle {
+                background: #ffffff;
+
+                new-tab-content := Rectangle {
+                    width: parent.width < 680px ? parent.width - 48px : 616px;
+                    height: 330px;
+                    x: (parent.width - self.width) / 2;
+                    y: Math.max(24px, (parent.height - self.height) / 2 - 28px);
+
+                    VerticalLayout {
+                        spacing: 12px;
+
+                        HorizontalLayout {
+                            alignment: center;
+                            height: 112px;
+
+                            Image {
+                                width: 112px;
+                                height: 112px;
+                                source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
+                                image-fit: contain;
+                            }
+                        }
+
+                        Text {
+                            text: "Hermes Browser";
+                            color: #202537;
+                            font-size: 30px;
+                            font-weight: 650;
+                            horizontal-alignment: center;
+                        }
+
+                        Text {
+                            text: "Fast, lightweight and private by default";
+                            color: #74798b;
+                            font-size: 14px;
+                            horizontal-alignment: center;
+                        }
+
+                        Rectangle {
+                            height: 48px;
+                            border-radius: 14px;
+                            border-width: 1px;
+                            border-color: new-tab-search.has-focus ? #0a6fd3 : #d5dce8;
+                            background: #f8faff;
+
+                            if new-tab-search.text == "": Text {
+                                x: 18px;
+                                width: parent.width - 82px;
+                                height: parent.height;
+                                text: "Search with DuckDuckGo or enter an address";
+                                color: #949aac;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            new-tab-search := TextInput {
+                                x: 18px;
+                                width: parent.width - 82px;
+                                height: parent.height;
+                                color: #252938;
+                                font-size: 14px;
+                                vertical-alignment: center;
+                                single-line: true;
+
+                                accepted => {
+                                    root.navigate(self.text);
+                                }
+                            }
+
+                            search-button := Rectangle {
+                                x: parent.width - 52px;
+                                y: 6px;
+                                width: 42px;
+                                height: 36px;
+                                border-radius: 10px;
+                                background: search-touch.has-hover ? #095fb4 : #0a6fd3;
+
+                                Text {
+                                    text: "→";
+                                    color: #ffffff;
+                                    font-size: 20px;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+
+                                search-touch := TouchArea {
+                                    clicked => {
+                                        root.navigate(new-tab-search.text);
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: root.content-message;
+                            color: #8a90a1;
+                            font-size: 12px;
+                            horizontal-alignment: center;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+            }
+
+            if !root.web-view-visible && !root.is-new-tab: VerticalLayout {
                 alignment: center;
                 spacing: 10px;
                 padding-left: 32px;
                 padding-right: 32px;
-
-                Text {
-                    text: "Hermes Browser";
-                    color: #252938;
-                    font-size: 28px;
-                    font-weight: 600;
-                    horizontal-alignment: center;
-                }
 
                 Text {
                     text: root.content-message;

@@ -66,6 +66,15 @@ fn viewport_size_converts_logical_dimensions_to_physical_pixels() {
 }
 
 #[test]
+fn viewport_size_does_not_enforce_an_aspect_ratio() {
+    let size = ViewportSize::from_logical(913.0, 583.0, 1.0)
+        .expect("an arbitrary positive viewport should be accepted");
+
+    assert_eq!(size.width(), 913);
+    assert_eq!(size.height(), 583);
+}
+
+#[test]
 fn viewport_size_rounds_fractional_physical_pixels() {
     let size = ViewportSize::from_logical(100.25, 100.5, 1.5)
         .expect("positive fractional dimensions should be converted");

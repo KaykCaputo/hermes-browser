@@ -1,3 +1,5 @@
+use crate::PageIcon;
+
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
 const INITIAL_ADDRESS: &str = "";
 
@@ -60,6 +62,9 @@ pub enum BrowserEvent {
     PageTitleChanged {
         title: Option<String>,
     },
+    PageIconChanged {
+        icon: Option<PageIcon>,
+    },
     LoadStateChanged {
         state: LoadState,
     },
@@ -73,6 +78,7 @@ pub enum BrowserEvent {
 pub struct BrowserState {
     url: String,
     page_title: String,
+    page_icon: Option<PageIcon>,
     load_state: LoadState,
     can_go_back: bool,
     can_go_forward: bool,
@@ -83,6 +89,7 @@ impl Default for BrowserState {
         Self {
             url: INITIAL_ADDRESS.to_owned(),
             page_title: DEFAULT_PAGE_TITLE.to_owned(),
+            page_icon: None,
             load_state: LoadState::Idle,
             can_go_back: false,
             can_go_forward: false,
@@ -97,6 +104,9 @@ impl BrowserState {
     pub fn url(&self) -> &str {
         &self.url
     }
+    pub fn page_icon(&self) -> Option<&PageIcon> {
+        self.page_icon.as_ref()
+    }
     pub fn load_state(&self) -> &LoadState {
         &self.load_state
     }
@@ -110,12 +120,18 @@ impl BrowserState {
     pub fn apply(&mut self, event: BrowserEvent) {
         match event {
             BrowserEvent::AddressChanged { url } => {
-                self.url = url;
+                if self.url != url {
+                    self.url = url;
+                    self.page_icon = None;
+                }
             }
             BrowserEvent::PageTitleChanged { title } => {
                 self.page_title = title
                     .filter(|title| !title.trim().is_empty())
                     .unwrap_or_else(|| DEFAULT_PAGE_TITLE.to_owned());
+            }
+            BrowserEvent::PageIconChanged { icon } => {
+                self.page_icon = icon;
             }
             BrowserEvent::LoadStateChanged { state } => {
                 self.load_state = state;

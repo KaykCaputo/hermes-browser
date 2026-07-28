@@ -4,10 +4,10 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 
 use hermes_ui::{MainWindow, WebViewPointerButton};
-use slint::{ComponentHandle, GraphicsAPI, RenderingState};
+use slint::{ComponentHandle, GraphicsAPI, Image, RenderingState, Rgba8Pixel, SharedPixelBuffer};
 use talaria_core::{
-    BrowserCommand, BrowserController, BrowserEvent, BrowserState, LoadState, PointerButton,
-    PointerButtonAction, WebView as TalariaWebView, dispatch_command,
+    BrowserCommand, BrowserController, BrowserEvent, BrowserState, LoadState, PageIcon,
+    PointerButton, PointerButtonAction, WebView as TalariaWebView, dispatch_command,
 };
 use talaria_servo::{
     EventLoopWaker, NEW_TAB_URL, ServoRuntime, ServoWebView, SharedOpenGlContext, ViewportSize,
@@ -131,10 +131,13 @@ fn connect_servo_runtime(
                 };
 
                 if current_viewport_size != Some(viewport_size) {
-                    rendering_context.resize(viewport_size);
-
                     if let Some(web_view) = web_view.as_ref() {
+                        // Servo must own the complete resize operation after the WebView exists.
+                        // Resizing the context first makes Servo treat the resize as a no-op and
+                        // leaves the CSS viewport and WebRender document at their previous size.
                         web_view.resize(viewport_size);
+                    } else {
+                        rendering_context.resize(viewport_size);
                     }
 
                     current_viewport_size = Some(viewport_size);
@@ -240,6 +243,7 @@ fn dispatch_pending_commands<W: TalariaWebView>(
 fn sync_ui(window: &MainWindow, state: &BrowserState) {
     window.set_page_title(state.page_title().into());
     window.set_address(state.url().into());
+    window.set_is_new_tab(state.url().is_empty());
     window.set_can_go_back(state.can_go_back());
     window.set_can_go_forward(state.can_go_forward());
     window.set_is_loading(matches!(state.load_state(), LoadState::Loading));
@@ -247,18 +251,29 @@ fn sync_ui(window: &MainWindow, state: &BrowserState) {
         !state.url().is_empty() && !matches!(state.load_state(), LoadState::Failed { .. }),
     );
 
-    let content_message = if state.url().is_empty() {
-        "Type an address or search with DuckDuckGo."
+    if let Some(icon) = state.page_icon() {
+        window.set_page_icon(slint_image_from_page_icon(icon));
+        window.set_has_page_icon(true);
     } else {
-        match state.load_state() {
-            LoadState::Idle => "Servo runtime initialized. Waiting for WebView.",
-            LoadState::Loading => "The page is loading.",
-            LoadState::Loaded => "",
-            LoadState::Failed { message } => message.as_str(),
-        }
+        window.set_page_icon(Image::default());
+        window.set_has_page_icon(false);
+    }
+
+    let content_message = match state.load_state() {
+        LoadState::Failed { message } => message.as_str(),
+        _ if state.url().is_empty() => "Search privately with DuckDuckGo.",
+        LoadState::Idle => "Servo runtime initialized. Waiting for WebView.",
+        LoadState::Loading => "The page is loading.",
+        LoadState::Loaded => "",
     };
 
     window.set_content_message(content_message.into());
+}
+
+fn slint_image_from_page_icon(icon: &PageIcon) -> Image {
+    let mut pixel_buffer = SharedPixelBuffer::<Rgba8Pixel>::new(icon.width(), icon.height());
+    pixel_buffer.make_mut_bytes().copy_from_slice(icon.rgba());
+    Image::from_rgba8(pixel_buffer)
 }
 
 fn pointer_button_from_ui(button: WebViewPointerButton) -> PointerButton {
@@ -515,6 +530,21 @@ mod tests {
             pointer_button_from_ui(WebViewPointerButton::Other),
             PointerButton::Other
         );
+    }
+
+    #[test]
+    fn page_icon_pixels_are_preserved_when_converted_for_slint() {
+        let icon =
+            PageIcon::from_rgba(1, 1, vec![10, 20, 30, 40]).expect("the test icon should be valid");
+
+        let image = slint_image_from_page_icon(&icon);
+        let pixels = image
+            .to_rgba8()
+            .expect("an embedded RGBA image should remain CPU-readable");
+
+        assert_eq!(pixels.width(), 1);
+        assert_eq!(pixels.height(), 1);
+        assert_eq!(pixels.as_bytes(), &[10, 20, 30, 40]);
     }
 
     #[test]

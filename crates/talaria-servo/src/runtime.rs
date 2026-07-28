@@ -8,8 +8,8 @@ use std::time::Instant;
 use euclid::Scale;
 use log::info;
 use rustls::crypto::CryptoProvider;
-use servo::{LoadStatus, RenderingContext, ServoBuilder, WebViewBuilder};
-use talaria_core::{BrowserEvent, LoadState};
+use servo::{LoadStatus, PixelFormat, RenderingContext, ServoBuilder, WebViewBuilder};
+use talaria_core::{BrowserEvent, LoadState, PageIcon};
 use url::Url;
 
 use crate::frame_ready::FrameReadySignal;
@@ -147,6 +147,19 @@ impl servo::WebViewDelegate for BrowserDelegate {
         self.send_browser_event(BrowserEvent::PageTitleChanged { title });
     }
 
+    fn notify_favicon_changed(&self, web_view: servo::WebView) {
+        let icon = web_view.favicon().and_then(|favicon| {
+            page_icon_from_pixels(
+                favicon.width,
+                favicon.height,
+                favicon.format,
+                favicon.data(),
+            )
+        });
+
+        self.send_browser_event(BrowserEvent::PageIconChanged { icon });
+    }
+
     fn notify_load_status_changed(&self, _web_view: servo::WebView, status: LoadStatus) {
         match status {
             LoadStatus::Started => {
@@ -190,6 +203,53 @@ fn display_url(url: &Url) -> String {
     } else {
         url.to_string()
     }
+}
+
+fn page_icon_from_pixels(
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    pixels: &[u8],
+) -> Option<PageIcon> {
+    let pixel_count = width.checked_mul(height)? as usize;
+    let channel_count = match format {
+        PixelFormat::K8 => 1,
+        PixelFormat::KA8 => 2,
+        PixelFormat::RGB8 => 3,
+        PixelFormat::RGBA8 | PixelFormat::BGRA8 => 4,
+    };
+
+    if width == 0 || height == 0 || pixels.len() != pixel_count.checked_mul(channel_count)? {
+        return None;
+    }
+
+    let mut rgba = Vec::with_capacity(pixel_count.checked_mul(4)?);
+
+    match format {
+        PixelFormat::K8 => {
+            for &luminance in pixels {
+                rgba.extend_from_slice(&[luminance, luminance, luminance, 255]);
+            }
+        }
+        PixelFormat::KA8 => {
+            for pixel in pixels.chunks_exact(2) {
+                rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
+            }
+        }
+        PixelFormat::RGB8 => {
+            for pixel in pixels.chunks_exact(3) {
+                rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
+            }
+        }
+        PixelFormat::RGBA8 => rgba.extend_from_slice(pixels),
+        PixelFormat::BGRA8 => {
+            for pixel in pixels.chunks_exact(4) {
+                rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+            }
+        }
+    }
+
+    PageIcon::from_rgba(width, height, rgba)
 }
 
 fn load_state_from_servo(status: LoadStatus) -> LoadState {
@@ -297,5 +357,53 @@ mod tests {
         let url = Url::parse("https://example.com/path").expect("the test URL should be valid");
 
         assert_eq!(display_url(&url), "https://example.com/path");
+    }
+
+    #[test]
+    fn rgba_favicon_pixels_are_preserved() {
+        let icon = page_icon_from_pixels(1, 1, PixelFormat::RGBA8, &[10, 20, 30, 40])
+            .expect("valid RGBA pixels should create an icon");
+
+        assert_eq!(icon.rgba(), &[10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn bgra_favicon_pixels_are_converted_to_rgba() {
+        let icon = page_icon_from_pixels(1, 1, PixelFormat::BGRA8, &[30, 20, 10, 40])
+            .expect("valid BGRA pixels should create an icon");
+
+        assert_eq!(icon.rgba(), &[10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn rgb_favicon_pixels_receive_an_opaque_alpha_channel() {
+        let icon = page_icon_from_pixels(1, 1, PixelFormat::RGB8, &[10, 20, 30])
+            .expect("valid RGB pixels should create an icon");
+
+        assert_eq!(icon.rgba(), &[10, 20, 30, 255]);
+    }
+
+    #[test]
+    fn luminance_favicon_pixels_expand_to_rgb() {
+        let icon = page_icon_from_pixels(1, 1, PixelFormat::K8, &[42])
+            .expect("valid luminance pixels should create an icon");
+
+        assert_eq!(icon.rgba(), &[42, 42, 42, 255]);
+    }
+
+    #[test]
+    fn luminance_alpha_favicon_pixels_expand_to_rgba() {
+        let icon = page_icon_from_pixels(1, 1, PixelFormat::KA8, &[42, 128])
+            .expect("valid luminance-alpha pixels should create an icon");
+
+        assert_eq!(icon.rgba(), &[42, 42, 42, 128]);
+    }
+
+    #[test]
+    fn favicon_pixels_with_an_invalid_length_are_rejected() {
+        assert_eq!(
+            page_icon_from_pixels(1, 1, PixelFormat::RGBA8, &[10, 20, 30]),
+            None
+        );
     }
 }
