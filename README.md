@@ -155,6 +155,9 @@ The release workflow produces:
 - `hermes-browser-linux-x86_64.tar.gz` with a SHA-256 checksum;
 - `hermes-browser-windows-x86_64.zip` with a SHA-256 checksum.
 
+The Linux executable is built on Ubuntu 22.04 and targets glibc 2.35 or newer.
+The workflow verifies this compatibility baseline before publishing the package.
+
 Manual workflow runs keep both packages as downloadable Actions artifacts without publishing a release. Current packages are intended for testing and are not universal installers.
 
 ## Roadmap
@@ -177,7 +180,7 @@ The current version is an engineering preview with known limitations:
 - The browser currently runs a single window without multiprocess site isolation.
 - Persistence, downloads, permission prompts, extensions, and private profiles are not implemented yet.
 - Background tabs are throttled but are not yet suspended or discarded.
-- Linux packages currently target x86-64 and depend on compatible system libraries.
+- Linux packages currently target x86-64, glibc 2.35 or newer, and compatible system libraries.
 
 When a page exposes an engine-level failure, reproduce it in Servo's `servoshell` before maintaining a Hermes-specific engine patch.
 

@@ -22,8 +22,17 @@ env:
 jobs:
   build-linux:
     name: Linux x86-64
-    runs-on: ubuntu-24.04
+    # Build against glibc 2.35 so the release also runs on distributions older
+    # than the runner used to publish it. Linux binaries cannot use an older
+    # glibc than the one they were linked against.
+    runs-on: ubuntu-22.04
     timeout-minutes: 120
+    env:
+      # Keep bindgen's clang executable and dynamically loaded libclang on the
+      # same version. The runner also ships Clang 15, and mixing its libclang
+      # with Clang 14's headers breaks mozangle's generated bindings.
+      CLANG_PATH: /usr/bin/clang-14
+      LIBCLANG_PATH: /usr/lib/llvm-14/lib
 
     steps:
       - name: Check out the repository
@@ -64,8 +73,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes \
             build-essential \
+            clang-14 \
             cmake \
-            libclang-dev \
+            libclang-14-dev \
             libfontconfig1-dev \
             libx11-dev \
             libx11-xcb-dev \
@@ -74,6 +84,10 @@ jobs:
             ninja-build \
             pkg-config \
             xinput
+
+          test -x "${CLANG_PATH}"
+          test -e "${LIBCLANG_PATH}/libclang.so"
+          "${CLANG_PATH}" --version
 
       - name: Run quality checks
         shell: bash
@@ -103,11 +117,42 @@ jobs:
             --release \
             --package hermes-desktop
 
-      - name: Inspect dynamic dependencies
+      - name: Verify Linux compatibility
         shell: bash
         run: |
           set -euo pipefail
-          ldd target/release/hermes-desktop
+
+          executable="target/release/hermes-desktop"
+          maximum_glibc="GLIBC_2.35"
+
+          ldd "${executable}"
+
+          required_glibc="$(
+            readelf --version-info "${executable}" |
+              grep --only-matching --extended-regexp 'GLIBC_[0-9]+(\.[0-9]+)+' |
+              sort --version-sort --unique |
+              tail --lines=1
+          )"
+
+          if [[ -z "${required_glibc}" ]]; then
+            echo "Unable to determine the executable's glibc requirement." >&2
+            exit 1
+          fi
+
+          echo "Maximum required glibc symbol: ${required_glibc}"
+
+          newest_glibc="$(
+            printf '%s\n%s\n' "${maximum_glibc}" "${required_glibc}" |
+              sort --version-sort |
+              tail --lines=1
+          )"
+
+          if [[ "${newest_glibc}" != "${maximum_glibc}" ]]; then
+            echo \
+              "The executable requires ${required_glibc}; the supported maximum is ${maximum_glibc}." \
+              >&2
+            exit 1
+          fi
 
       - name: Create Linux archive
         shell: bash
@@ -156,7 +201,7 @@ jobs:
           test -f "${checksum}"
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hermes-browser-linux-x86_64
           path: |
@@ -255,7 +300,7 @@ jobs:
           }
 
       - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hermes-browser-windows-x86_64
           path: |
@@ -278,7 +323,7 @@ jobs:
 
     steps:
       - name: Download release artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -293,6 +338,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
