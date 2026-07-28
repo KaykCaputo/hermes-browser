@@ -193,4 +193,6 @@ make qa
 
 ## License
 
-No open-source license has been selected yet. Until a license file is added, the source code remains under its authors' default copyright.
+Hermes Browser's original source code and project assets are available under the [Mozilla Public License 2.0](LICENSE).
+
+The MPL-2.0 allows commercial use and combination with code under other licenses while requiring modifications to MPL-covered files to remain available under the same license. Third-party dependencies and bundled filter lists remain subject to their respective licenses and notices.

@@ -2,6 +2,7 @@
 name = "hermes-desktop"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 hermes-ui = { path = "../../crates/hermes-ui" }
