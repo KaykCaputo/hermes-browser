@@ -1,42 +1,134 @@
 <p align="center">
-  <img src="apps/hermes-desktop/resources/hermes-browser.svg" width="128" alt="Hermes Browser winged sandal logo">
+  <img src="apps/hermes-desktop/resources/hermes-browser.svg" width="112" alt="Hermes Browser winged sandal logo">
 </p>
 
 <h1 align="center">Hermes Browser</h1>
 
 <p align="center">
-  An experimental desktop browser built with Rust, Servo, and Slint.
+  <strong>A focused, independent browser powered by Rust and Servo.</strong>
 </p>
 
-> [!WARNING]
-> Hermes Browser is an early engineering prototype. It is not yet suitable for daily use or for handling sensitive data. Privacy protections such as Talaria Guard are planned, but are not implemented yet.
+<p align="center">
+  Fast by design. Private by default. Built without the weight of a traditional browser stack.
+</p>
 
-## About
+<p align="center">
+  <img src="docs/screenshots/hermes-new-tab.png" width="100%" alt="Hermes Browser new tab page">
+</p>
 
-Hermes Browser explores how a lightweight, privacy-oriented desktop browser can be built around the [Servo Web Engine](https://servo.org/) while keeping the browser shell independent from engine internals.
+> [!IMPORTANT]
+> Hermes is an early technical preview. It is ready for experimentation and development, but not yet for daily use or sensitive browsing.
 
-The product is named after Hermes, the Greek messenger associated with speed, travel, and communication. Its browser core is called **Talaria**, after Hermes' winged sandals.
+## A lighter path to the web
 
-The project is also a practical Rust learning environment. The code favors explicit state, small modules, typed errors, event-driven communication, and testable boundaries.
+Hermes is a desktop browser that combines the memory safety of Rust, the parallel architecture of the [Servo Web Engine](https://servo.org/), and a lightweight native interface built with [Slint](https://slint.dev/).
 
-## Current capabilities
+The project is designed around three principles:
 
-- Servo-powered HTML, CSS, and JavaScript rendering
-- Asynchronous networking and script loading
-- GPU-accelerated WebRender, Canvas 2D, and browser interface
-- Native ad and tracker blocking powered by Brave's adblock-rust engine
-- Slint desktop interface
-- Responsive browser viewport
-- Multiple tabs with one Servo WebView per tab
-- Background-tab throttling
-- Address navigation and DuckDuckGo search
-- Back, forward, and reload navigation
-- Mouse, wheel, keyboard, and IME input
-- Page titles, favicons, and loading state
-- Native light-weight new tab page
-- Linux (X11 and Wayland) and Windows build configuration
+| Performance | Privacy | Independence |
+| --- | --- | --- |
+| Asynchronous loading, GPU rendering, and aggressive background-tab throttling. | Native network-level ad and tracker blocking using Brave filter snapshots. | A browser shell with clean boundaries around Servo instead of deep engine coupling. |
 
-Keyboard shortcuts currently include:
+Hermes takes its name from the Greek messenger associated with speed and travel. Its browser core is called **Talaria**, after Hermes' winged sandals.
+
+## See Hermes in action
+
+<p align="center">
+  <img src="docs/screenshots/hermes-servo.png" width="100%" alt="Servo website rendered in Hermes Browser with multiple tabs">
+</p>
+
+<p align="center">
+  <em>Real web content rendered by Servo inside the Hermes tab and navigation experience.</em>
+</p>
+
+## Highlights
+
+- **Servo-powered browsing** — modern web content through an embeddable Rust engine
+- **GPU-accelerated experience** — WebRender, Vello Canvas 2D, and a native OpenGL interface
+- **Native content blocking** — ads and trackers are intercepted before network resources are loaded
+- **Responsive tabs** — one dedicated Servo WebView per tab with background throttling
+- **Fast navigation** — unified address and search input with DuckDuckGo search
+- **Desktop input** — mouse, wheel, keyboard, shortcuts, and IME composition
+- **Live page identity** — titles, favicons, navigation history, and loading feedback
+- **Cross-platform foundation** — Linux support through X11 and Wayland, plus Windows build configuration
+
+## Technology
+
+```text
+Hermes UI · Slint
+        │
+        │  commands and presentation state
+        ▼
+Talaria Core · Rust
+        │
+        │  engine-independent WebView contract
+        ▼
+Talaria Servo
+        │
+        ▼
+Servo Web Engine
+```
+
+| Component | Responsibility |
+| --- | --- |
+| `apps/hermes-desktop` | Application lifecycle, desktop window, and runtime composition |
+| `crates/hermes-ui` | Native Slint interface and presentation types |
+| `crates/talaria-core` | Tabs, browser state, commands, events, and navigation policies |
+| `crates/talaria-servo` | Servo integration, OpenGL rendering, metrics, and content blocking |
+
+The browser core can be tested with fake WebViews without starting Servo. UI code remains independent from Servo's internal types, keeping the product easier to evolve and the engine easier to upgrade.
+
+## Quick start
+
+Hermes uses the current stable Rust toolchain and the Rust 2024 edition.
+
+```bash
+git clone https://github.com/KaykCaputo/hermes-browser.git
+cd hermes-browser
+make install-linux-deps
+make setup
+make run
+```
+
+`make install-linux-deps` currently supports Debian- and Ubuntu-based Linux distributions. Other distributions need equivalent compiler, Fontconfig, X11, Wayland, and `pkg-config` dependencies.
+
+For an optimized runtime build:
+
+```bash
+make run-release
+```
+
+### Windows
+
+Build on 64-bit Windows 10 or 11 with:
+
+- the `x86_64-pc-windows-msvc` Rust toolchain;
+- Visual Studio 2022 Build Tools with MSVC v143;
+- Windows 10 or 11 SDK 10.0.19041.0 or newer;
+- C++ ATL for the v143 x64 toolchain.
+
+See the [Servo Windows build requirements](https://book.servo.org/building/windows.html) for environment preparation details.
+
+## Everyday commands
+
+```bash
+make check          # Type-check every workspace target and feature
+make test           # Run the complete test suite
+make qa             # Formatting, Clippy, and tests
+make build          # Build the debug workspace
+make build-release  # Build the optimized workspace
+make run            # Run the development build
+make run-release    # Run the optimized build
+make package-linux  # Create a Linux archive and checksum
+```
+
+Runtime logging can be customized without changing project files:
+
+```bash
+make run RUST_LOG="talaria_servo=debug,servo=warn"
+```
+
+## Keyboard shortcuts
 
 | Shortcut | Action |
 | --- | --- |
@@ -49,151 +141,55 @@ Keyboard shortcuts currently include:
 | `Alt+Left` | Go back |
 | `Alt+Right` | Go forward |
 
-## Architecture
+## Release builds
 
-```text
-Hermes UI (Slint)
-        |
-        | commands and presentation state
-        v
-Talaria Core
-        |
-        | WebView contract and browser events
-        v
-Talaria Servo
-        |
-        v
-Servo Web Engine
-```
-
-The workspace currently contains:
-
-```text
-apps/
-  hermes-desktop/   Desktop executable and application composition
-
-crates/
-  hermes-ui/        Slint components and presentation types
-  talaria-core/     Tabs, browser state, commands, events, and policies
-  talaria-servo/    The only crate coupled directly to Servo
-```
-
-`talaria-core` can be tested with fake WebViews and does not need to start Servo. UI code does not depend on Servo's internal types.
-
-## Requirements
-
-Use a current stable Rust toolchain. The project uses the Rust 2024 edition.
-
-### Linux
-
-The Linux build uses Slint's Winit backend with X11 and Wayland support. The development helper prepares the X11 toolchain and native libraries with:
-
-```bash
-make install-linux-deps
-```
-
-This helper currently supports Debian- and Ubuntu-based distributions. Other distributions need equivalent window-system, Fontconfig, compiler, and `pkg-config` packages.
-
-### Windows
-
-Build on 64-bit Windows 10 or 11 with:
-
-- Rust using the `x86_64-pc-windows-msvc` toolchain
-- Visual Studio 2022 Build Tools with MSVC v143
-- Windows 10 or 11 SDK version 10.0.19041.0 or newer
-- C++ ATL for the v143 x64 toolchain
-
-See Servo's [Windows build requirements](https://book.servo.org/building/windows.html) when preparing a development machine.
-
-## Getting started
-
-```bash
-git clone <repository-url>
-cd hermes-browser
-make setup
-make run
-```
-
-`make setup` installs the Rust formatting and linting components and downloads locked dependencies. Run `make help` to list every available command.
-
-Common commands:
-
-```bash
-make check          # Type-check the workspace
-make test           # Run all tests
-make qa             # Formatting, Clippy, and tests
-make build          # Debug build
-make build-release  # Optimized build
-make run            # Run a debug build
-make run-release    # Run an optimized build
-```
-
-Logs can be customized without editing the Makefile:
-
-```bash
-make run RUST_LOG="talaria_servo=debug,servo=warn"
-```
-
-## Release packages
-
-Create a Linux x86-64 archive and SHA-256 checksum locally:
-
-```bash
-make package-linux
-```
-
-The files are written to `dist/`.
-
-Linux and Windows release packages are also built on native GitHub-hosted runners. Push a version tag to create a GitHub Release:
+Linux and Windows packages are built on native GitHub-hosted runners. Version tags create a GitHub Release automatically:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow can also be started manually from the repository's **Actions** page. A manual run keeps both packages as workflow artifacts without creating a GitHub Release.
-
 The release workflow produces:
 
-- `hermes-browser-linux-x86_64.tar.gz`
-- `hermes-browser-linux-x86_64.tar.gz.sha256`
-- `hermes-browser-windows-x86_64.zip`
-- `hermes-browser-windows-x86_64.zip.sha256`
+- `hermes-browser-linux-x86_64.tar.gz` with a SHA-256 checksum;
+- `hermes-browser-windows-x86_64.zip` with a SHA-256 checksum.
 
-The Linux executable is dynamically linked and expects compatible system libraries. Release artifacts are currently intended for testing, not as universal installers.
+Manual workflow runs keep both packages as downloadable Actions artifacts without publishing a release. Current packages are intended for testing and are not universal installers.
 
-## Planned work
+## Roadmap
 
-- Talaria Guard advertisement and tracker blocking
-- Tab suspension and memory-pressure discarding
-- Session, history, bookmark, and settings persistence
-- Downloads, permissions, and site controls
-- Media and daily-use Web API validation
-- Native Linux and Windows installers
-- Broader compatibility testing and Servo upstream contributions
+- Complete media playback through a production GStreamer backend
+- Add permission prompts, downloads, native form controls, and site information
+- Persist sessions, history, bookmarks, cookies, and settings
+- Introduce multiprocess execution, sandboxing, and crash recovery
+- Add per-site content-blocking controls and cosmetic filtering
+- Suspend and discard tabs under memory pressure
+- Expand automated compatibility testing and upstream Servo contributions
+- Ship signed native installers and an update channel
 
-## Quality policy
+## Project status
 
-Before a change is considered ready:
+The current version is an engineering preview with known limitations:
 
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
-```
-
-The same checks are available through `make qa`.
-
-## Known limitations
-
-- Web compatibility is limited by Servo's current implementation.
-- Complex pages can expose engine-level crashes or rendering defects.
-- Only one browser window is supported.
+- Web compatibility follows Servo's current implementation maturity.
+- Multimedia playback does not yet use the production GStreamer backend.
+- The browser currently runs a single window without multiprocess site isolation.
+- Persistence, downloads, permission prompts, extensions, and private profiles are not implemented yet.
 - Background tabs are throttled but are not yet suspended or discarded.
-- Ad and tracker blocking, persistence, downloads, and extensions are not implemented.
 - Linux packages currently target x86-64 and depend on compatible system libraries.
 
-When a page fails in the engine, reproduce it in Servo's `servoshell` before maintaining a Hermes-specific engine patch.
+When a page exposes an engine-level failure, reproduce it in Servo's `servoshell` before maintaining a Hermes-specific engine patch.
+
+## Contributing
+
+Hermes is a practical space for exploring browser engineering in Rust. Focused bug reports, compatibility reproductions, tests, documentation improvements, and well-scoped pull requests are welcome.
+
+Before submitting a change, run:
+
+```bash
+make qa
+```
 
 ## License
 
