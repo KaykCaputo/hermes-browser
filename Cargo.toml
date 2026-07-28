@@ -12,6 +12,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+adblock = "=0.13.2"
+content-security-policy = "0.8"
 dpi = "0.1"
 euclid = "0.22"
 gleam = "0.15"
@@ -33,6 +35,9 @@ url = "2.5"
 # Keep Hermes crates easy to debug while optimizing the browser-engine hotspots used at runtime.
 # Targeting the complete dependency graph would also rebuild large native build tools such as
 # SpiderMonkey and ANGLE whenever this profile changes.
+[profile.dev.package.adblock]
+opt-level = 2
+
 [profile.dev.package.servo]
 opt-level = 2
 

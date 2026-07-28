@@ -19,15 +19,18 @@ component ChromeButton inherits Rectangle {
     callback clicked;
 
     width: 36px;
-    height: 32px;
-    border-radius: 8px;
-    background: button-area.has-hover && root.enabled ? #e6e9f2 : transparent;
-    opacity: root.enabled ? 1 : 0.38;
+    height: 34px;
+    border-radius: 7px;
+    background: button-area.pressed && root.enabled
+        ? #222d39
+        : button-area.has-hover && root.enabled ? #19222c : transparent;
+    opacity: root.enabled ? 1 : 0.32;
 
     Text {
         text: root.label;
-        color: #363b4d;
+        color: button-area.has-hover && root.enabled ? #71c5ff : #9aa6b5;
         font-size: 17px;
+        font-weight: 500;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
@@ -61,11 +64,21 @@ component BrowserTabButton inherits Rectangle {
     callback selected;
     callback closed;
 
-    min-width: 96px;
-    max-width: 240px;
+    min-width: 112px;
+    max-width: 248px;
     horizontal-stretch: 1;
-    border-radius: 9px;
-    background: root.tab.active ? #f5f6fa : tab-touch.has-hover ? #dfe2eb : transparent;
+    border-radius: 8px;
+    background: root.tab.active
+        ? #161e28
+        : tab-touch.has-hover ? #111820 : transparent;
+
+    if root.tab.active: Rectangle {
+        x: 14px;
+        y: parent.height - 2px;
+        width: parent.width - 28px;
+        height: 2px;
+        background: #62bfff;
+    }
 
     tab-touch := TouchArea {
         clicked => {
@@ -74,9 +87,9 @@ component BrowserTabButton inherits Rectangle {
     }
 
     HorizontalLayout {
-        padding-left: 10px;
-        padding-right: 7px;
-        spacing: 7px;
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 8px;
 
         if root.tab.has-icon: TabIcon {
             source: root.tab.icon;
@@ -89,8 +102,9 @@ component BrowserTabButton inherits Rectangle {
         Text {
             horizontal-stretch: 1;
             text: root.tab.title;
-            color: #252938;
+            color: root.tab.active ? #edf4fa : #8b98a8;
             font-size: 13px;
+            font-weight: root.tab.active ? 550 : 450;
             overflow: elide;
             vertical-alignment: center;
         }
@@ -99,18 +113,20 @@ component BrowserTabButton inherits Rectangle {
             width: 6px;
             height: 6px;
             border-radius: 3px;
-            background: #6957d9;
+            background: #62bfff;
         }
 
         if root.closable: Rectangle {
             width: 22px;
             height: 22px;
             border-radius: 6px;
-            background: close-touch.has-hover ? #cfd3df : transparent;
+            background: close-touch.pressed
+                ? #2b3744
+                : close-touch.has-hover ? #222c37 : transparent;
 
             Text {
                 text: "×";
-                color: #5c6172;
+                color: close-touch.has-hover ? #edf4fa : #7f8c9c;
                 font-size: 15px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -161,43 +177,44 @@ export component MainWindow inherits Window {
             0px,
             Math.max(
                 tab-strip.width - tab-strip.viewport-width,
-                -root.active-tab-index * 180px,
+                -root.active-tab-index * 190px,
             ),
         );
     }
 
     title: page-title + " — Hermes Browser";
     icon: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
-    preferred-width: 1100px;
-    preferred-height: 720px;
+    preferred-width: 1180px;
+    preferred-height: 760px;
     min-width: 480px;
     min-height: 480px;
-    background: #f5f6fa;
+    background: #0b0f14;
 
     VerticalLayout {
         spacing: 0px;
 
         Rectangle {
-            height: 40px;
-            background: #e9ebf2;
+            height: 48px;
+            background: #0b0f14;
 
             HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                padding-top: 6px;
-                padding-bottom: 0px;
+                padding-left: 10px;
+                padding-right: 14px;
+                padding-top: 7px;
+                padding-bottom: 3px;
+                spacing: 8px;
 
                 tab-strip := Flickable {
                     horizontal-stretch: 1;
-                    viewport-width: Math.max(self.width, root.tabs.length * 180px);
+                    viewport-width: Math.max(self.width, root.tabs.length * 190px);
                     viewport-height: self.height;
 
                     HorizontalLayout {
                         width: tab-strip.viewport-width;
-                        spacing: 4px;
+                        spacing: 6px;
 
                         for tab[index] in root.tabs: BrowserTabButton {
-                            width: 176px;
+                            width: 184px;
                             tab: tab;
                             closable: root.tabs.length > 1;
 
@@ -213,8 +230,8 @@ export component MainWindow inherits Window {
                 }
 
                 ChromeButton {
-                    width: 32px;
-                    height: 28px;
+                    width: 34px;
+                    height: 34px;
                     label: "+";
                     clicked => {
                         root.new-tab();
@@ -224,15 +241,15 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
-            height: 54px;
-            background: #f5f6fa;
+            height: 60px;
+            background: #11171f;
 
             HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 12px;
-                padding-top: 10px;
-                padding-bottom: 10px;
-                spacing: 7px;
+                padding-left: 14px;
+                padding-right: 14px;
+                padding-top: 11px;
+                padding-bottom: 11px;
+                spacing: 8px;
 
                 ChromeButton {
                     label: "‹";
@@ -259,18 +276,18 @@ export component MainWindow inherits Window {
 
                 Rectangle {
                     horizontal-stretch: 1;
-                    height: 34px;
-                    border-radius: 10px;
+                    height: 38px;
+                    border-radius: 9px;
                     border-width: 1px;
-                    border-color: address-input.has-focus ? #6957d9 : #d5d8e3;
-                    background: #ffffff;
+                    border-color: address-input.has-focus ? #62bfff : #29323d;
+                    background: #1a222c;
 
                     address-input := TextInput {
-                        x: 13px;
-                        width: parent.width - 26px;
+                        x: 14px;
+                        width: parent.width - 28px;
                         height: parent.height;
                         text <=> root.address;
-                        color: #252938;
+                        color: #edf4fa;
                         font-size: 14px;
                         vertical-alignment: center;
                         single-line: true;
@@ -290,41 +307,42 @@ export component MainWindow inherits Window {
                 y: parent.height - 1px;
                 width: parent.width;
                 height: 1px;
-                background: #dfe2eb;
+                background: #202832;
             }
         }
 
         web-view-area := Rectangle {
             vertical-stretch: 1;
-            background: root.web-view-visible ? transparent : #ffffff;
+            background: root.web-view-visible ? transparent : #0c1117;
 
             if root.is-loading: Rectangle {
                 x: 0px;
                 y: 0px;
                 width: parent.width * 45%;
                 height: 2px;
-                background: #6957d9;
+                background: #62bfff;
             }
 
             if root.is-new-tab: Rectangle {
-                background: #ffffff;
+                background: #0c1117;
 
                 new-tab-content := Rectangle {
-                    width: parent.width < 680px ? parent.width - 48px : 616px;
-                    height: 330px;
+                    width: parent.width < 640px ? parent.width - 48px : 580px;
+                    height: 300px;
                     x: (parent.width - self.width) / 2;
-                    y: Math.max(24px, (parent.height - self.height) / 2 - 28px);
+                    y: Math.max(24px, (parent.height - self.height) / 2 - 24px);
+                    background: transparent;
 
                     VerticalLayout {
-                        spacing: 12px;
+                        spacing: 11px;
 
                         HorizontalLayout {
                             alignment: center;
-                            height: 112px;
+                            height: 84px;
 
                             Image {
-                                width: 112px;
-                                height: 112px;
+                                width: 80px;
+                                height: 80px;
                                 source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
                                 image-fit: contain;
                             }
@@ -332,32 +350,32 @@ export component MainWindow inherits Window {
 
                         Text {
                             text: "Hermes Browser";
-                            color: #202537;
-                            font-size: 30px;
+                            color: #edf4fa;
+                            font-size: 28px;
                             font-weight: 650;
                             horizontal-alignment: center;
                         }
 
                         Text {
                             text: "Fast, lightweight and private by default";
-                            color: #74798b;
+                            color: #8c99a9;
                             font-size: 14px;
                             horizontal-alignment: center;
                         }
 
                         Rectangle {
                             height: 48px;
-                            border-radius: 14px;
+                            border-radius: 10px;
                             border-width: 1px;
-                            border-color: new-tab-search.has-focus ? #0a6fd3 : #d5dce8;
-                            background: #f8faff;
+                            border-color: new-tab-search.has-focus ? #62bfff : #29333e;
+                            background: #171f29;
 
                             if new-tab-search.text == "": Text {
                                 x: 18px;
                                 width: parent.width - 82px;
                                 height: parent.height;
                                 text: "Search with DuckDuckGo or enter an address";
-                                color: #949aac;
+                                color: #717e8e;
                                 font-size: 14px;
                                 vertical-alignment: center;
                                 overflow: elide;
@@ -367,7 +385,7 @@ export component MainWindow inherits Window {
                                 x: 18px;
                                 width: parent.width - 82px;
                                 height: parent.height;
-                                color: #252938;
+                                color: #edf4fa;
                                 font-size: 14px;
                                 vertical-alignment: center;
                                 single-line: true;
@@ -382,12 +400,14 @@ export component MainWindow inherits Window {
                                 y: 6px;
                                 width: 42px;
                                 height: 36px;
-                                border-radius: 10px;
-                                background: search-touch.has-hover ? #095fb4 : #0a6fd3;
+                                border-radius: 8px;
+                                background: search-touch.pressed
+                                    ? #45a9ed
+                                    : search-touch.has-hover ? #78caff : #62bfff;
 
                                 Text {
                                     text: "→";
-                                    color: #ffffff;
+                                    color: #09131c;
                                     font-size: 20px;
                                     horizontal-alignment: center;
                                     vertical-alignment: center;
@@ -403,7 +423,7 @@ export component MainWindow inherits Window {
 
                         Text {
                             text: root.content-message;
-                            color: #8a90a1;
+                            color: #727f8f;
                             font-size: 12px;
                             horizontal-alignment: center;
                             wrap: word-wrap;
@@ -420,7 +440,7 @@ export component MainWindow inherits Window {
 
                 Text {
                     text: root.content-message;
-                    color: #74798b;
+                    color: #8c99a9;
                     font-size: 14px;
                     horizontal-alignment: center;
                     wrap: word-wrap;

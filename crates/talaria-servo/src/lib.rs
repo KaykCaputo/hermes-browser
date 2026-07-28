@@ -1,3 +1,4 @@
+mod adblocker;
 mod error;
 mod frame_ready;
 mod load_metrics;

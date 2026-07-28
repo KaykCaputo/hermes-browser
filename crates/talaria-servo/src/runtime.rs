@@ -12,6 +12,7 @@ use servo::{LoadStatus, PixelFormat, Preferences, RenderingContext, ServoBuilder
 use talaria_core::{BrowserEvent, LoadState, PageIcon, TabEvent, TabId};
 use url::Url;
 
+use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::{ServoWebView, ServoWebViewError, SharedOpenGlContext};
@@ -58,6 +59,7 @@ impl servo::EventLoopWaker for EventLoopWaker {
 pub struct ServoRuntime {
     inner: servo::Servo,
     redraw_waker: EventLoopWaker,
+    content_blocker: Rc<ContentBlocker>,
 }
 
 impl ServoRuntime {
@@ -70,10 +72,15 @@ impl ServoRuntime {
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
+        let content_blocker = Rc::new(ContentBlocker::new());
+        inner.set_delegate(Rc::new(BrowserServoDelegate {
+            content_blocker: Rc::clone(&content_blocker),
+        }));
 
         Self {
             inner,
             redraw_waker,
+            content_blocker,
         }
     }
 
@@ -94,6 +101,7 @@ impl ServoRuntime {
             browser_event_sender,
             frame_ready: frame_ready.clone(),
             load_metrics: RefCell::new(PageLoadMetrics::default()),
+            content_blocker: Rc::clone(&self.content_blocker),
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -112,6 +120,16 @@ impl ServoRuntime {
     }
 }
 
+struct BrowserServoDelegate {
+    content_blocker: Rc<ContentBlocker>,
+}
+
+impl servo::ServoDelegate for BrowserServoDelegate {
+    fn load_web_resource(&self, load: servo::WebResourceLoad) {
+        self.content_blocker.handle_web_resource_load(None, load);
+    }
+}
+
 fn hermes_preferences() -> Preferences {
     Preferences {
         dom_script_asynch: true,
@@ -126,6 +144,7 @@ struct BrowserDelegate {
     browser_event_sender: Sender<TabEvent>,
     frame_ready: FrameReadySignal,
     load_metrics: RefCell<PageLoadMetrics>,
+    content_blocker: Rc<ContentBlocker>,
 }
 
 impl BrowserDelegate {
@@ -153,6 +172,11 @@ impl BrowserDelegate {
 }
 
 impl servo::WebViewDelegate for BrowserDelegate {
+    fn load_web_resource(&self, web_view: servo::WebView, load: servo::WebResourceLoad) {
+        self.content_blocker
+            .handle_web_resource_load(Some(&web_view), load);
+    }
+
     fn notify_url_changed(&self, _web_view: servo::WebView, url: Url) {
         self.send_browser_event(BrowserEvent::AddressChanged {
             url: display_url(&url),

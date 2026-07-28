@@ -1,0 +1,175 @@
+! Title: Brave Specific
+! Expires: 2 days
+
+! Specific filters (Tracking or ads) for Brave
+||0.0.0.0^$third-party,domain=~[::]|~[::ffff:0:0]
+||[::]^$third-party,domain=~0.0.0.0|~[::ffff:0:0]
+||[::ffff:0:0]^$third-party,domain=~0.0.0.0|~[::]
+||localhost^$third-party,domain=~127.0.0.1|~[::1]|~[::ffff:7f00:1]
+||127.0.0.1^$third-party,domain=~localhost|~[::1]|~[::ffff:7f00:1]
+||[::1]^$third-party,domain=~localhost|~127.0.0.1|~[::ffff:7f00:1]
+||[::ffff:7f00:1]^$third-party,domain=~localhost|~127.0.0.1|~[::1]
+
+! Allow page views in Brave to be counted by statcounter.com. The scripts that match the first
+! two rules below have been audited to confirm they don't try to circumvent Brave's cross-site
+! or cross-profile tracking protections (e.g., they don't try to fingerprint users, or detect
+! private mode, etc.). Brave's other protections (storage partitioning, ephemeral
+! storage, etc.) prevent statcounter code from tracking or profiling users. 
+@@||secure.statcounter.com/counter$script
+@@||www.statcounter.com/counter$script
+@@||c.statcounter.com^$image,xhr
+
+! brave.com specfic filters
+@@||ads.brave.software^$first-party
+@@||ads-admin.bravesoftware.com^$first-party
+@@||ads.bravesoftware.com^$first-party
+@@||ads-admin.brave.com^$first-party
+@@||ads-admin.brave.software^$first-party
+@@||ads.brave.com^$first-party
+@@||brave.com^$image,stylesheet,first-party
+@@||go-updater.brave.com^
+! basicattentiontoken.org specfic filters
+@@||basicattentiontoken.org^$ghide
+@@||basicattentiontoken.org^$first-party
+
+! search.brave.com specific filters
+! https://github.com/uBlockOrigin/uAssets/blob/master/filters/privacy.txt#L207
+search.brave.com#@#+js(no-fetch-if, body:browser)
+search.brave.com###search-ad
+! This is to make sure EasyList removal doesn't mess us up.
+||search.brave.com/api/ads/
+
+! stats.brave.com
+@@||stats.brave.com^$ghide
+@@||stats.brave.com^$first-party
+! community.brave.app
+@@||community.brave.app^$ghide
+
+! Make sure the domain doesn't accidentally get added again.
+! Was accidentally blocked twice leading to widespread breakage.
+! See https://github.com/easylist/easylist/issues/22894
+||cnstrc.com^$badfilter
+
+! Generic blocks
+.com/cuid/?
+.top/cuid/?
+.shop/opf/
+.shop/cuid/
+.shop/gd/
+.shop/sbx/
+.click/tsk/
+.click/opf/
+.click/gd/
+.com/tsf/
+.top/gd/*?md=
+/push/i?clk
+/script/ut.js
+/suurl5.php?
+
+! linkedin mobile app recommendations
+linkedin.com##+js(trusted-set-session-storage-item, blocking-upsell, '"DISMISSED"')
+linkedin.com##+js(trusted-set-session-storage-item, blocking-upsell_lastUpdatedAt, $now$)
+
+! Rotten tomatoes app recommendations
+rottentomatoes.com##+js(trusted-set-session-storage-item, mobileAppModal, '{"wasClosed":true}')
+rottentomatoes.com##+js(trusted-set-session-storage-item, mobileAndroidBanner, '{"wasClosed":true}')
+rottentomatoes.com##+js(trusted-set-local-storage-item, RtAppManager, '{"nextOpen":9999999999999,"wasClosed":true}')
+
+! thegatewaypundit.com (images fix)
+@@||ruamupr.com^$script,domain=thegatewaypundit.com
+
+! Fix localhost block on Trezor Bridge/Connect
+! https://community.brave.app/t/bug-brave-shields-break-trezor-bridge-connect-when-accessing-wallet/219544/
+@@||127.0.0.1^$domain=trezor.io
+
+! https://github.com/brave/brave-browser/issues/43050
+@@||127.0.0.1^$domain=pcsupport.lenovo.com
+
+!!! START OF UBO EXCEPTIONS
+! https://github.com/uBlockOrigin/uAssets/issues/23456
+@@||127.0.0.1^$xhr,domain=figma.com
+!
+! https://github.com/uBlockOrigin/uAssets/issues/19005
+@@||127.0.0.1^$xhr,domain=battlelog.battlefield.com
+!
+! https://github.com/uBlockOrigin/uAssets/pull/20768
+@@||127.0.0.1^$3p,domain=musicbrainz.org
+!
+! https://github.com/uBlockOrigin/uAssets/pull/22475
+@@||127.0.0.1^$domain=client.foldingathome.org
+!
+! https://github.com/uBlockOrigin/uAssets/issues/21960
+@@||127.0.0.1^$domain=mega.nz
+!
+! https://github.com/uBlockOrigin/uAssets/commit/b0e28ffe
+@@||127.0.0.1^$domain=intel.cn|intel.co.id|intel.co.jp|intel.co.kr|intel.com|intel.com.br|intel.com.tw|intel.de|intel.fr|intel.la|intel.vn
+!
+! https://github.com/uBlockOrigin/uAssets/issues/23388
+@@||localhost^$domain=deutsche-rentenversicherung.de
+@@||127.0.0.1^$domain=bund.de|organspende-register.de|bayernportal.de|mv-serviceportal.de
+!
+! https://github.com/uBlockOrigin/uAssets/pull/24488
+@@||localhost^$websocket,domain=www.faceit.com
+
+! https://community.brave.app/t/filecrypt-co-functionality-is-broken-when-shields-are-up/597698/
+@@||127.0.0.1^$domain=filecrypt.co
+
+! apollographql.com
+@@||localhost^$domain=apollographql.com
+
+! https://driverhub.asus.com/en
+@@||127.0.0.1^$domain=driverhub.asus.com
+
+!!! END OF UBO EXCEPTIONS
+
+! AD-Shield fix
+||joviallysafely.com/script/
+||quietlythough.com/script/
+||noisilyinstantly.com/script/
+||annualrallybran.com/script/
+/alm73cDylLvk1rXd1brtznfe1baIUT5.js
+
+! De-AMP rule that uses the De-AMP scriptlet
+google.*##+js(de-amp)
+
+! uritransform work around
+embed.wcostream.com##+js(rpnt, script, )();, )();(()=>{if(!location.href.includes('://embed.wcostream.com/inc/embed/index.php?file='))return;const e=`/inc/embed/video-js-new.php${location.search}`;location.href=e})();, sedCount, 1)
+
+! YouTube theater mode fix scriptlet rule
+youtube.*##+js(brave-youtube-theater-fix)
+
+! Fixes open-in-app warning
+m.youtube.com##+js(trusted-click-element, button.yt-spec-button-shape-next[aria-label="Close"][aria-disabled="false"], , 2000)
+
+! Trusted open-in-app notices
+alltrails.com##+js(trusted-set-local-storage-item, banner-dismissal-date, $now$)
+
+! YouTube navigation fix scriptlet rule
+youtube.*##+js(brave-youtube-navigation-fix)
+
+! Youtube playback speed fix scriptlet rule
+www.youtube.*##+js(brave-youtube-playback-speed-fix)
+
+! pageview-api detection
+music.youtube.com##+js(brave-video-bg-play)
+broadcastify.com,101espn.com,1027espn.com,1045espn.com,10play.com.au,11alive.com,1430espnfresno.com,6play.fr,7plus.com.au,973espn.com,9now.com.au,abc7news.com,abcactionnews.com,abema.tv,acast.com,accuradio.com,accuweather.com,acorn.tv,airtelxstream.in,altitudenow.com,altt.co.in,amcplus.com,ancientfaith.com,app.hzp.co,app.idagio.com,ardmediathek.de,arte.tv,ascoltareradio.com,audacy.com,audible.com,awa.fm,ballysports.com,bandcamp.com,bbc.co.uk,beinsports.com,bestpodcasts.co.uk,bigeradio.com,bilibili.com,binge.com.au,bitchute.com,boomplay.com,brighteon.com,britbox.com,c-span.org,canalplus.com,captivate.fm,castbox.fm,channel4.com,charlestonsportsradio.com,cheddar.tv,classicalking.org,classicalradio.com,classicalwcrb.org,clickorlando.com,cnn.com,cpac.ca,crave.ca,crunchyroll.com,curiositystream.com,cwtv.com,dazn.com,deezer.com,detroitpbs.org,di.fm,digitalradioplus.com.au,directv.com,discoveryplus.com,disneyplus.com,docplay.com,dr.dk,dstv.com,earthcam.com,eska.tv,espn.com,espnlouisville.com,espnradio941.com,espnrichmond.com,espnsiouxfalls.com,espnur.com,fanatiz.com,fandango.com,fandor.com,filmin.es,filmin.pt,fmradiofree.com,fmstream.org,fountain.fm,fox13news.com,fox35orlando.com,foxla.com,foxsports.com,foxtel.com.au,foxweather.com,france.tv,free-radio.us,freefy.app,freely.co.uk,fubo.tv,gaana.com,gem.cbc.ca,getmeradio.com,globalplayer.com,goodpods.com,goplay.be,gpb.org,hayu.com,hellorayo.co.uk,hidive.com,hoichoi.tv,hotstar.com,hulu.com,idahoptv.org,ieradio.org,iheart.com,internet-radio.com,itv.com,iview.abc.net.au,jango.com,jiocinema.com,jiosaavn.com,jiotv.com,joyn.de,kanopy.com,kdfc.com,kera.org,kick.com,kijk.nl,kkrt.com,knowledge.ca,kpbs.org,kqed.org,kron4.com,ktvu.com,kusc.org,liferadio.ca,listennotes.com,listnr.com,littlive.com,live.mystreamplayer.com,live365.com,liveone.com,liveradio.uk,liveradiouk.com,loadedradio.com,local10.com,mainepublic.org,max.com,maxdome.de,megaphone.fm,metalheartradio.com,milehighsports.com,montanapbs.org,mubi.com,music.amazon.ca,music.amazon.co.jp,music.amazon.co.uk,music.amazon.com,music.amazon.com.au,music.amazon.de,music.amazon.es,music.amazon.fr,music.amazon.it,music.apple.com,music.youtube.com,mytuner-radio.com,nba.com,nbcbayarea.com,nbcboston.com,nbcmiami.com,nbcnews.com,nbcsports.com,nebula.tv,nederlandseradio.nl,neontv.co.nz,netflix.com,nettradionorge.com,newson.us,nfl.com,nicovideo.jp,northernpublicradio.org,nostv.pt,nowtv.com,npo.nl,npoklassiek.nl,nzherald.co.nz,odysee.com,onlineradio.pl,onlineradiobox.com,orange.es,overcast.fm,pandora.com,paramountplus.com,pbs12.org,pbsfm.org.au,pbskids.org,pbssocal.org,pbswisconsin.org,peacocktv.com,philo.com,play.anghami.com,play.asti.ga,play.xumo.com,player.amperwave.net,player.simplecast.com,player.fm,player.listenlive.co,player.pl,player.streamguys.com,playeur.com,plex.tv,plus.nasa.gov,pluto.tv,pocketcasts.com,podbay.fm,podcast24.fr,podcastaddict.com,podcasts-online.org,podcasts.apple.com,podcasts.feedspot.com,podcasts.nz,podimo.com,podtail.com,polsatboxgo.pl,primevideo.com,protonradio.com,qobuz.com,raddio.net,radiko.jp,radio-australia.org,radio-stations.co.nz,radio-uk.co.uk,radio.de,radio.garden,radio.net,radio.org.nz,radio.org.se,radio.pp.ru,radioau.net,radiolisten.de,radioonline.fm,radioparadise.com,radios.lu,radioside.com,radioswissclassic.ch,rakuten.tv,randa.tv,rcast.net,rnz.co.nz,rockradio.com,roku.com,rova.nz,rtve.es,rumble.com,sbs.com.au,securenetsystems.net,shudder.com,siriusxm.com,skygo.co.nz,slingtv.com,sonatica.fm,sonyliv.com,soundcloud.com,spectrumsportsnet.com,sportscapitoldc.com,sportsnet.ca,spotify.com,spreaker.com,stacktv.ca,stan.com.au,starplus.com,starz.com,streema.com,stuff.co.nz,ted.com,telenet.tv,tencentmusic.com,theclassicalstation.org,thegame730am.com,threenow.co.nz,tidal.com,tiktok.com,tntdrama.com,totallyradio.com.au,tsn.ca,tubitv.com,tunein.com,tuner.bonneville.com,tv.kakao.com,tv.naver.com,tving.com,tvn24.pl,tvnz.co.nz,twitch.tv,u.co.uk,ukonlineradio.com,ukradiolive.com,viaplay.com,video.cascadepbs.org,video.unext.jp,video.vermontpublic.org,videoland.com,viki.com,vimeo.com,vix.com,watch.att.com,watch.jme.tv,wavve.com,wcmu.org,weather.com,wesh.com,wfmt.com,wfmu.org,wgbh.org,wibw.com,wlbt.com,wlxg.com,wmtv15news.com,wned.org,wnyc.org,wondery.com,worldchannel.org,wowow.co.jp,wowtv.de,wpbf.com,wptv.com,wqxr.org,wynk.in,xfinity.com,yourclassical.org,zdf.de##+js(brave-disable-pageview-api)
+
+! music/media annoyances
+! https://community.brave.app/t/websites-playing-sounds-only-if-ad-blocking-is-enabled-plus-flamecomics-is-a-nightmare/600105
+! flamecomics.xyz radio
+||players.radioonlinehd.net^$domain=flamecomics.xyz
+! gear4music.com music
+||assetscdn-wchat.freshchat.com/static/assets/$media
+
+
+! Used for Brave QA tests
+?335962573013224749$image,xhr,domain=dev-pages.brave.software|dev-pages.bravesoftware.com
+! Rules for testing cosmetic filters in frames
+dev-pages.brave.software,dev-pages.bravesoftware.com##+js(set, window.BRAVE_TEST_VALUE, true)
+
+! Fixing paywall scroll issue on scmp.com
+@@||c2.piano.io/xbuilder/experience/$xhr,domain=scmp.com
+@@||cdn.tinypass.com/api/tinypass.min.js$script,domain=scmp.com
+
+! Youtube sabr delay fix
+m.youtube.*##+js(brave-yt-sabr-fix)

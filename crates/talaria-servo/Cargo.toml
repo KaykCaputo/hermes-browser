@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+adblock.workspace = true
+content-security-policy.workspace = true
 dpi.workspace = true
 euclid.workspace = true
 gleam.workspace = true
@@ -14,3 +16,6 @@ servo.workspace = true
 surfman.workspace = true
 talaria-core = { path = "../talaria-core" }
 url.workspace = true
+
+[build-dependencies]
+adblock.workspace = true
