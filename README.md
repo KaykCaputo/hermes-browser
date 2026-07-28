@@ -22,6 +22,8 @@ The project is also a practical Rust learning environment. The code favors expli
 ## Current capabilities
 
 - Servo-powered HTML, CSS, and JavaScript rendering
+- Asynchronous networking and script loading
+- GPU-accelerated WebRender, Canvas 2D, and browser interface
 - Slint desktop interface
 - Responsive browser viewport
 - Multiple tabs with one Servo WebView per tab

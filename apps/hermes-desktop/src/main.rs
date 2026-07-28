@@ -7,8 +7,8 @@ use std::sync::mpsc::{self, Receiver};
 use hermes_ui::{BrowserTab, MainWindow, WebViewPointerButton};
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{
-    ComponentHandle, GraphicsAPI, Image, ModelRc, RenderingState, Rgba8Pixel, SharedPixelBuffer,
-    VecModel,
+    BackendSelector, ComponentHandle, GraphicsAPI, Image, ModelRc, RenderingState, Rgba8Pixel,
+    SharedPixelBuffer, VecModel,
 };
 use talaria_core::{
     BrowserCommand, BrowserController, BrowserEvent, CompositionState, ImeInput, KeyLocation,
@@ -25,6 +25,8 @@ use winit::keyboard::{Key, KeyLocation as WinitKeyLocation, ModifiersState, Phys
 const MAX_COMMANDS_PER_FRAME: usize = 128;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    select_hardware_accelerated_backend()?;
+
     let window = MainWindow::new()?;
     let controller = Rc::new(RefCell::new(BrowserController::default()));
     let web_view_focused = Rc::new(Cell::new(false));
@@ -44,6 +46,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     window.run()?;
     Ok(())
+}
+
+fn select_hardware_accelerated_backend() -> Result<(), slint::platform::PlatformError> {
+    BackendSelector::new()
+        .backend_name("winit".to_owned())
+        .renderer_name("femtovg".to_owned())
+        .require_opengl()
+        .select()
 }
 
 fn connect_servo_runtime(
@@ -144,6 +154,7 @@ fn connect_servo_runtime(
                     (active_tab_id, tab_ids)
                 };
                 web_views.retain(|tab_id, _| tab_ids.contains(tab_id));
+                let mut active_web_view_was_created = false;
 
                 for tab_id in tab_ids {
                     if web_views.contains_key(&tab_id) {
@@ -159,7 +170,7 @@ fn connect_servo_runtime(
                     ) {
                         Ok(created_web_view) => {
                             created_web_view.hide();
-                            created_web_view.set_throttled(tab_id != active_tab_id);
+                            active_web_view_was_created |= tab_id == active_tab_id;
                             web_views.insert(tab_id, created_web_view);
                         }
                         Err(error) => {
@@ -180,7 +191,12 @@ fn connect_servo_runtime(
                     }
 
                     if let Some(active_web_view) = web_views.get_mut(&active_tab_id) {
-                        active_web_view.set_throttled(false);
+                        // New WebViews start unthrottled. Waiting until a later event-loop turn
+                        // avoids sending SetWebViewThrottled before Servo has installed the new
+                        // top-level browsing context.
+                        if !active_web_view_was_created {
+                            active_web_view.set_throttled(false);
+                        }
                         active_web_view.show();
                         let _focus_result = active_web_view.set_focus(web_view_focused.get());
                     }

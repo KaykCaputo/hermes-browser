@@ -8,7 +8,7 @@ use std::time::Instant;
 use euclid::Scale;
 use log::info;
 use rustls::crypto::CryptoProvider;
-use servo::{LoadStatus, PixelFormat, RenderingContext, ServoBuilder, WebViewBuilder};
+use servo::{LoadStatus, PixelFormat, Preferences, RenderingContext, ServoBuilder, WebViewBuilder};
 use talaria_core::{BrowserEvent, LoadState, PageIcon, TabEvent, TabId};
 use url::Url;
 
@@ -66,6 +66,7 @@ impl ServoRuntime {
 
         let redraw_waker = event_loop_waker.clone();
         let inner = ServoBuilder::default()
+            .preferences(hermes_preferences())
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
@@ -108,6 +109,14 @@ impl ServoRuntime {
     pub fn spin_event_loop(&self) {
         self.redraw_waker.acknowledge();
         self.inner.spin_event_loop();
+    }
+}
+
+fn hermes_preferences() -> Preferences {
+    Preferences {
+        dom_script_asynch: true,
+        dom_canvas_backend: "vello".to_owned(),
+        ..Preferences::default()
     }
 }
 
@@ -287,6 +296,15 @@ fn ensure_crypto_provider() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hermes_enables_async_scripts_and_gpu_canvas_by_default() {
+        let preferences = hermes_preferences();
+
+        assert!(preferences.dom_script_asynch);
+        assert!(!preferences.dom_servoparser_async_html_tokenizer_enabled);
+        assert_eq!(preferences.dom_canvas_backend, "vello");
+    }
 
     #[test]
     fn started_and_head_parsed_are_loading_states() {
