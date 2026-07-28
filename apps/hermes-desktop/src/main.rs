@@ -1,31 +1,47 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::error::Error;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 
-use hermes_ui::{MainWindow, WebViewPointerButton};
-use slint::{ComponentHandle, GraphicsAPI, Image, RenderingState, Rgba8Pixel, SharedPixelBuffer};
+use hermes_ui::{BrowserTab, MainWindow, WebViewPointerButton};
+use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
+use slint::{
+    ComponentHandle, GraphicsAPI, Image, ModelRc, RenderingState, Rgba8Pixel, SharedPixelBuffer,
+    VecModel,
+};
 use talaria_core::{
-    BrowserCommand, BrowserController, BrowserEvent, BrowserState, LoadState, PageIcon,
-    PointerButton, PointerButtonAction, WebView as TalariaWebView, dispatch_command,
+    BrowserCommand, BrowserController, BrowserEvent, CompositionState, ImeInput, KeyLocation,
+    KeyState, KeyboardInput, KeyboardModifiers, LoadState, PageIcon, PointerButton,
+    PointerButtonAction, TabEvent, TabId, WebView as TalariaWebView, dispatch_command,
 };
 use talaria_servo::{
-    EventLoopWaker, NEW_TAB_URL, ServoRuntime, ServoWebView, SharedOpenGlContext, ViewportSize,
+    EventLoopWaker, NEW_TAB_URL, ServoRuntime, ServoWebView, ServoWebViewError,
+    SharedOpenGlContext, ViewportSize,
 };
+use winit::event::{ElementState, Ime, WindowEvent};
+use winit::keyboard::{Key, KeyLocation as WinitKeyLocation, ModifiersState, PhysicalKey};
 
 const MAX_COMMANDS_PER_FRAME: usize = 128;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let window = MainWindow::new()?;
     let controller = Rc::new(RefCell::new(BrowserController::default()));
+    let web_view_focused = Rc::new(Cell::new(false));
 
-    connect_servo_runtime(&window, Rc::clone(&controller))?;
-    {
-        let controller = controller.borrow();
-        sync_ui(&window, controller.state());
-    }
+    connect_servo_runtime(
+        &window,
+        Rc::clone(&controller),
+        Rc::clone(&web_view_focused),
+    )?;
+    sync_ui(&window, &controller.borrow());
+    connect_ui_callbacks(
+        &window,
+        Rc::clone(&controller),
+        Rc::clone(&web_view_focused),
+    );
+    connect_native_keyboard_input(&window, controller, web_view_focused);
 
-    connect_ui_callbacks(&window, Rc::clone(&controller));
     window.run()?;
     Ok(())
 }
@@ -33,9 +49,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn connect_servo_runtime(
     window: &MainWindow,
     controller: Rc<RefCell<BrowserController>>,
+    web_view_focused: Rc<Cell<bool>>,
 ) -> Result<(), slint::SetRenderingNotifierError> {
     let weak_window_for_waker = window.as_weak();
-
     let event_loop_waker = EventLoopWaker::new(move || {
         let _wake_result = weak_window_for_waker.upgrade_in_event_loop(|window| {
             window.window().request_redraw();
@@ -45,10 +61,11 @@ fn connect_servo_runtime(
     let runtime = ServoRuntime::new(event_loop_waker);
     let weak_window_for_rendering = window.as_weak();
     let mut rendering_context: Option<Rc<SharedOpenGlContext>> = None;
-    let mut web_view: Option<ServoWebView> = None;
+    let mut web_views = HashMap::<TabId, ServoWebView>::new();
+    let mut visible_tab_id: Option<TabId> = None;
     let mut current_viewport_size: Option<ViewportSize> = None;
     let mut current_scale_factor: Option<f32> = None;
-    let (browser_event_sender, browser_event_receiver) = mpsc::channel::<BrowserEvent>();
+    let (browser_event_sender, browser_event_receiver) = mpsc::channel::<TabEvent>();
 
     window
         .window()
@@ -61,7 +78,6 @@ fn connect_servo_runtime(
                 let Some(window) = weak_window_for_rendering.upgrade() else {
                     return;
                 };
-
                 window.set_web_view_visible(false);
 
                 let GraphicsAPI::NativeOpenGL { get_proc_address } = graphics_api else {
@@ -70,19 +86,16 @@ fn connect_servo_runtime(
                     );
                     return;
                 };
-
                 let window_size = window.window().size();
-
                 let Some(viewport_size) = ViewportSize::new(window_size.width, window_size.height)
                 else {
                     window
                         .set_content_message("The OpenGL viewport has invalid dimensions.".into());
                     return;
                 };
-                // SAFETY:
-                // Slint guarantees that its OpenGL context is current while the
-                // rendering notifier is running. The wrapper is released during
-                // RenderingTeardown, before Slint destroys the native context.
+
+                // SAFETY: Slint guarantees that its OpenGL context is current while this
+                // notifier runs. The wrapper is dropped during RenderingTeardown.
                 let context =
                     match unsafe { SharedOpenGlContext::new(viewport_size, get_proc_address) } {
                         Ok(context) => context,
@@ -95,7 +108,6 @@ fn connect_servo_runtime(
                     };
 
                 rendering_context = Some(Rc::new(context));
-
                 window.set_content_message(
                     "OpenGL context initialized. Waiting for Servo WebView.".into(),
                 );
@@ -107,18 +119,13 @@ fn connect_servo_runtime(
                     return;
                 };
 
-                let state_changed =
-                    apply_pending_browser_events(&controller, &browser_event_receiver);
-
-                if state_changed {
-                    let controller = controller.borrow();
-                    sync_ui(&window, controller.state());
+                if apply_pending_browser_events(&controller, &browser_event_receiver) {
+                    sync_ui(&window, &controller.borrow());
                 }
 
                 let Some(rendering_context) = rendering_context.as_ref() else {
                     return;
                 };
-
                 let scale_factor = window.window().scale_factor();
                 let Some(viewport_size) = ViewportSize::from_logical(
                     window.get_web_view_width(),
@@ -130,77 +137,92 @@ fn connect_servo_runtime(
                     return;
                 };
 
-                if current_viewport_size != Some(viewport_size) {
-                    if let Some(web_view) = web_view.as_ref() {
-                        // Servo must own the complete resize operation after the WebView exists.
-                        // Resizing the context first makes Servo treat the resize as a no-op and
-                        // leaves the CSS viewport and WebRender document at their previous size.
-                        web_view.resize(viewport_size);
-                    } else {
-                        rendering_context.resize(viewport_size);
+                let (active_tab_id, tab_ids) = {
+                    let controller = controller.borrow();
+                    let active_tab_id = controller.active_tab_id();
+                    let tab_ids = controller.tabs().map(|tab| tab.id()).collect::<Vec<_>>();
+                    (active_tab_id, tab_ids)
+                };
+                web_views.retain(|tab_id, _| tab_ids.contains(tab_id));
+
+                for tab_id in tab_ids {
+                    if web_views.contains_key(&tab_id) {
+                        continue;
                     }
 
-                    current_viewport_size = Some(viewport_size);
-                }
-
-                if current_scale_factor != Some(scale_factor) {
-                    if let Some(web_view) = web_view.as_ref() {
-                        web_view.set_scale_factor(scale_factor);
-                    }
-
-                    current_scale_factor = Some(scale_factor);
-                }
-
-                if web_view.is_none() {
                     match runtime.create_web_view(
                         Rc::clone(rendering_context),
                         NEW_TAB_URL,
                         scale_factor,
+                        tab_id,
                         browser_event_sender.clone(),
                     ) {
                         Ok(created_web_view) => {
-                            web_view = Some(created_web_view);
+                            created_web_view.hide();
+                            created_web_view.set_throttled(tab_id != active_tab_id);
+                            web_views.insert(tab_id, created_web_view);
                         }
                         Err(error) => {
-                            window.set_content_message(
-                                format!("Failed to create Servo WebView: {error}").into(),
-                            );
+                            report_web_view_error(&window, &controller, tab_id, &error);
                             return;
                         }
                     }
                 }
 
-                if let Some(web_view) = web_view.as_mut() {
-                    match dispatch_pending_commands(&controller, web_view) {
-                        Ok(has_pending_commands) => {
-                            if has_pending_commands {
-                                window.window().request_redraw();
-                            }
-                        }
-                        Err(error) => {
-                            controller
-                                .borrow_mut()
-                                .handle_event(BrowserEvent::LoadStateChanged {
-                                    state: LoadState::Failed {
-                                        message: error.to_string(),
-                                    },
-                                });
-
-                            {
-                                let controller = controller.borrow();
-                                sync_ui(&window, controller.state());
-                            }
-
-                            return;
-                        }
+                let active_tab_changed = visible_tab_id != Some(active_tab_id);
+                if active_tab_changed {
+                    if let Some(previous_tab_id) = visible_tab_id
+                        && let Some(previous_web_view) = web_views.get_mut(&previous_tab_id)
+                    {
+                        let _focus_result = previous_web_view.set_focus(false);
+                        previous_web_view.hide();
+                        previous_web_view.set_throttled(true);
                     }
 
-                    let _painted = web_view.paint_if_available();
+                    if let Some(active_web_view) = web_views.get_mut(&active_tab_id) {
+                        active_web_view.set_throttled(false);
+                        active_web_view.show();
+                        let _focus_result = active_web_view.set_focus(web_view_focused.get());
+                    }
+                    visible_tab_id = Some(active_tab_id);
+                }
+
+                if current_scale_factor != Some(scale_factor) {
+                    for web_view in web_views.values() {
+                        web_view.set_scale_factor(scale_factor);
+                    }
+                    current_scale_factor = Some(scale_factor);
+                }
+
+                if (active_tab_changed || current_viewport_size != Some(viewport_size))
+                    && let Some(active_web_view) = web_views.get(&active_tab_id)
+                {
+                    // Each Servo WebView owns its resize notification. Resizing the shared
+                    // context directly would skip Servo's CSS viewport update.
+                    active_web_view.resize(viewport_size);
+                    current_viewport_size = Some(viewport_size);
+                }
+
+                match dispatch_pending_commands(&controller, &mut web_views) {
+                    Ok(has_pending_commands) => {
+                        if has_pending_commands {
+                            window.window().request_redraw();
+                        }
+                    }
+                    Err((tab_id, error)) => {
+                        report_web_view_error(&window, &controller, tab_id, &error);
+                        return;
+                    }
+                }
+
+                if let Some(active_web_view) = web_views.get(&active_tab_id) {
+                    let _painted = active_web_view.paint_if_available();
                 }
             }
             RenderingState::RenderingTeardown => {
-                drop(web_view.take());
+                web_views.clear();
                 drop(rendering_context.take());
+                visible_tab_id = None;
                 current_viewport_size = None;
                 current_scale_factor = None;
             }
@@ -208,16 +230,33 @@ fn connect_servo_runtime(
         })
 }
 
+fn report_web_view_error(
+    window: &MainWindow,
+    controller: &RefCell<BrowserController>,
+    tab_id: TabId,
+    error: &ServoWebViewError,
+) {
+    controller.borrow_mut().handle_event(
+        tab_id,
+        BrowserEvent::LoadStateChanged {
+            state: LoadState::Failed {
+                message: error.to_string(),
+            },
+        },
+    );
+    sync_ui(window, &controller.borrow());
+}
+
 fn apply_pending_browser_events(
     controller: &RefCell<BrowserController>,
-    receiver: &Receiver<BrowserEvent>,
+    receiver: &Receiver<TabEvent>,
 ) -> bool {
     let mut state_changed = false;
     let mut controller = controller.borrow_mut();
 
-    for event in receiver.try_iter() {
-        controller.handle_event(event);
-        state_changed = true;
+    for tab_event in receiver.try_iter() {
+        let tab_id = tab_event.tab_id();
+        state_changed |= controller.handle_event(tab_id, tab_event.into_event());
     }
 
     state_changed
@@ -225,22 +264,26 @@ fn apply_pending_browser_events(
 
 fn dispatch_pending_commands<W: TalariaWebView>(
     controller: &RefCell<BrowserController>,
-    web_view: &mut W,
-) -> Result<bool, W::Error> {
+    web_views: &mut HashMap<TabId, W>,
+) -> Result<bool, (TabId, W::Error)> {
     for _ in 0..MAX_COMMANDS_PER_FRAME {
-        let command = { controller.borrow_mut().next_command() };
-
-        let Some(command) = command else {
+        let queued = { controller.borrow_mut().next_command() };
+        let Some(queued) = queued else {
             return Ok(false);
         };
+        let tab_id = queued.tab_id();
+        let Some(web_view) = web_views.get_mut(&tab_id) else {
+            continue;
+        };
 
-        dispatch_command(web_view, command)?;
+        dispatch_command(web_view, queued.into_command()).map_err(|error| (tab_id, error))?;
     }
 
     Ok(controller.borrow().has_pending_commands())
 }
 
-fn sync_ui(window: &MainWindow, state: &BrowserState) {
+fn sync_ui(window: &MainWindow, controller: &BrowserController) {
+    let state = controller.active_state();
     window.set_page_title(state.page_title().into());
     window.set_address(state.url().into());
     window.set_is_new_tab(state.url().is_empty());
@@ -251,13 +294,33 @@ fn sync_ui(window: &MainWindow, state: &BrowserState) {
         !state.url().is_empty() && !matches!(state.load_state(), LoadState::Failed { .. }),
     );
 
-    if let Some(icon) = state.page_icon() {
-        window.set_page_icon(slint_image_from_page_icon(icon));
-        window.set_has_page_icon(true);
-    } else {
-        window.set_page_icon(Image::default());
-        window.set_has_page_icon(false);
-    }
+    let active_tab_id = controller.active_tab_id();
+    let mut active_tab_index = 0;
+    let tabs = controller
+        .tabs()
+        .enumerate()
+        .map(|(index, tab)| {
+            let state = tab.state();
+            if tab.id() == active_tab_id {
+                active_tab_index = index;
+            }
+            let (icon, has_icon) = match state.page_icon() {
+                Some(icon) => (slint_image_from_page_icon(icon), true),
+                None => (Image::default(), false),
+            };
+
+            BrowserTab {
+                title: state.page_title().into(),
+                icon,
+                has_icon,
+                active: tab.id() == active_tab_id,
+                loading: matches!(state.load_state(), LoadState::Loading),
+            }
+        })
+        .collect::<Vec<_>>();
+    window.set_tabs(ModelRc::new(VecModel::from(tabs)));
+    window.set_active_tab_index(i32::try_from(active_tab_index).unwrap_or(i32::MAX));
+    window.invoke_reveal_active_tab();
 
     let content_message = match state.load_state() {
         LoadState::Failed { message } => message.as_str(),
@@ -266,7 +329,6 @@ fn sync_ui(window: &MainWindow, state: &BrowserState) {
         LoadState::Loading => "The page is loading.",
         LoadState::Loaded => "",
     };
-
     window.set_content_message(content_message.into());
 }
 
@@ -285,44 +347,42 @@ fn pointer_button_from_ui(button: WebViewPointerButton) -> PointerButton {
     }
 }
 
-fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserController>>) {
+fn connect_ui_callbacks(
+    window: &MainWindow,
+    controller: Rc<RefCell<BrowserController>>,
+    web_view_focused: Rc<Cell<bool>>,
+) {
     let navigate_controller = Rc::clone(&controller);
     let navigate_window = window.as_weak();
-
     window.on_navigate(move |address| {
-        let address = address.to_string();
-        let navigation_result = { navigate_controller.borrow_mut().queue_navigation(&address) };
-
+        let result = navigate_controller
+            .borrow_mut()
+            .queue_navigation(address.as_str());
         let Some(window) = navigate_window.upgrade() else {
             return;
         };
 
-        if let Err(error) = navigation_result {
-            navigate_controller
-                .borrow_mut()
-                .handle_event(BrowserEvent::LoadStateChanged {
+        if let Err(error) = result {
+            let tab_id = navigate_controller.borrow().active_tab_id();
+            navigate_controller.borrow_mut().handle_event(
+                tab_id,
+                BrowserEvent::LoadStateChanged {
                     state: LoadState::Failed {
                         message: error.to_string(),
                     },
-                });
+                },
+            );
         }
-
-        {
-            let controller = navigate_controller.borrow();
-            sync_ui(&window, controller.state());
-        }
-
+        sync_ui(&window, &navigate_controller.borrow());
         window.window().request_redraw();
     });
 
     let back_controller = Rc::clone(&controller);
     let back_window = window.as_weak();
-
     window.on_go_back(move || {
         back_controller
             .borrow_mut()
             .queue_command(BrowserCommand::GoBack);
-
         if let Some(window) = back_window.upgrade() {
             window.window().request_redraw();
         }
@@ -330,12 +390,10 @@ fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserContr
 
     let forward_controller = Rc::clone(&controller);
     let forward_window = window.as_weak();
-
     window.on_go_forward(move || {
         forward_controller
             .borrow_mut()
             .queue_command(BrowserCommand::GoForward);
-
         if let Some(window) = forward_window.upgrade() {
             window.window().request_redraw();
         }
@@ -343,25 +401,59 @@ fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserContr
 
     let reload_controller = Rc::clone(&controller);
     let reload_window = window.as_weak();
-
     window.on_reload(move || {
         reload_controller
             .borrow_mut()
             .queue_command(BrowserCommand::Reload);
-
         if let Some(window) = reload_window.upgrade() {
+            window.window().request_redraw();
+        }
+    });
+
+    let new_tab_controller = Rc::clone(&controller);
+    let new_tab_window = window.as_weak();
+    window.on_new_tab(move || {
+        new_tab_controller.borrow_mut().open_tab();
+        if let Some(window) = new_tab_window.upgrade() {
+            sync_ui(&window, &new_tab_controller.borrow());
+            window.window().request_redraw();
+        }
+    });
+
+    let select_tab_controller = Rc::clone(&controller);
+    let select_tab_window = window.as_weak();
+    window.on_select_tab(move |index| {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if select_tab_controller.borrow_mut().select_tab_at(index)
+            && let Some(window) = select_tab_window.upgrade()
+        {
+            sync_ui(&window, &select_tab_controller.borrow());
+            window.window().request_redraw();
+        }
+    });
+
+    let close_tab_controller = Rc::clone(&controller);
+    let close_tab_window = window.as_weak();
+    window.on_close_tab(move |index| {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if close_tab_controller.borrow_mut().close_tab_at(index)
+            && let Some(window) = close_tab_window.upgrade()
+        {
+            sync_ui(&window, &close_tab_controller.borrow());
             window.window().request_redraw();
         }
     });
 
     let pointer_moved_controller = Rc::clone(&controller);
     let pointer_moved_window = window.as_weak();
-
     window.on_web_view_pointer_moved(move |x, y| {
         pointer_moved_controller
             .borrow_mut()
             .queue_command(BrowserCommand::PointerMoved { x, y });
-
         if let Some(window) = pointer_moved_window.upgrade() {
             window.window().request_redraw();
         }
@@ -369,14 +461,12 @@ fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserContr
 
     let pointer_button_controller = Rc::clone(&controller);
     let pointer_button_window = window.as_weak();
-
     window.on_web_view_pointer_button(move |button, pressed, x, y| {
         let action = if pressed {
             PointerButtonAction::Down
         } else {
             PointerButtonAction::Up
         };
-
         pointer_button_controller
             .borrow_mut()
             .queue_command(BrowserCommand::PointerButton {
@@ -385,7 +475,6 @@ fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserContr
                 x,
                 y,
             });
-
         if let Some(window) = pointer_button_window.upgrade() {
             window.window().request_redraw();
         }
@@ -393,7 +482,6 @@ fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserContr
 
     let scroll_controller = Rc::clone(&controller);
     let scroll_window = window.as_weak();
-
     window.on_web_view_scrolled(move |delta_x, delta_y, x, y| {
         scroll_controller
             .borrow_mut()
@@ -403,24 +491,297 @@ fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserContr
                 x,
                 y,
             });
-
         if let Some(window) = scroll_window.upgrade() {
             window.window().request_redraw();
         }
     });
 
-    let focus_controller = Rc::clone(&controller);
+    let focus_controller = controller;
     let focus_window = window.as_weak();
-
     window.on_web_view_focus_changed(move |focused| {
+        web_view_focused.set(focused);
         focus_controller
             .borrow_mut()
             .queue_command(BrowserCommand::FocusChanged { focused });
-
         if let Some(window) = focus_window.upgrade() {
+            let _native_window = window
+                .window()
+                .with_winit_window(|native_window| native_window.set_ime_allowed(focused));
             window.window().request_redraw();
         }
     });
+}
+
+fn connect_native_keyboard_input(
+    window: &MainWindow,
+    controller: Rc<RefCell<BrowserController>>,
+    web_view_focused: Rc<Cell<bool>>,
+) {
+    let weak_window = window.as_weak();
+    let mut modifiers = ModifiersState::empty();
+    let mut composition_tab_id: Option<TabId> = None;
+
+    window
+        .window()
+        .on_winit_window_event(move |_slint_window, event| {
+            let Some(window) = weak_window.upgrade() else {
+                return EventResult::Propagate;
+            };
+
+            match event {
+                WindowEvent::ModifiersChanged(changed) => {
+                    modifiers = changed.state();
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if handle_browser_shortcut(
+                        &window,
+                        &controller,
+                        &web_view_focused,
+                        event,
+                        modifiers,
+                    ) {
+                        return EventResult::PreventDefault;
+                    }
+
+                    if web_view_focused.get() {
+                        let active_tab_id = controller.borrow().active_tab_id();
+                        let keyboard_input = keyboard_input_from_winit(
+                            event,
+                            modifiers,
+                            composition_tab_id == Some(active_tab_id),
+                        );
+                        controller
+                            .borrow_mut()
+                            .queue_command(BrowserCommand::KeyboardInput(keyboard_input));
+                        window.window().request_redraw();
+                    }
+                }
+                WindowEvent::Ime(ime) if web_view_focused.get() || composition_tab_id.is_some() => {
+                    queue_ime_input(&controller, &mut composition_tab_id, ime);
+                    window.window().request_redraw();
+                }
+                WindowEvent::Focused(false) => {
+                    dismiss_composition(&controller, &mut composition_tab_id);
+                }
+                _ => {}
+            }
+
+            EventResult::Propagate
+        });
+}
+
+fn handle_browser_shortcut(
+    window: &MainWindow,
+    controller: &RefCell<BrowserController>,
+    web_view_focused: &Cell<bool>,
+    event: &winit::event::KeyEvent,
+    modifiers: ModifiersState,
+) -> bool {
+    let primary = modifiers.control_key() || modifiers.super_key();
+    let character = match &event.logical_key {
+        Key::Character(character) => Some(character.to_ascii_lowercase()),
+        _ => None,
+    };
+    let is_pressed = event.state == ElementState::Pressed;
+
+    let shortcut = if primary && character.as_deref() == Some("l") {
+        if is_pressed {
+            if web_view_focused.replace(false) {
+                controller
+                    .borrow_mut()
+                    .queue_command(BrowserCommand::FocusChanged { focused: false });
+            }
+            window.invoke_focus_address_bar();
+        }
+        true
+    } else if primary && character.as_deref() == Some("t") {
+        if is_pressed {
+            if web_view_focused.replace(false) {
+                controller
+                    .borrow_mut()
+                    .queue_command(BrowserCommand::FocusChanged { focused: false });
+            }
+            controller.borrow_mut().open_tab();
+            sync_ui(window, &controller.borrow());
+            window.invoke_focus_address_bar();
+        }
+        true
+    } else if primary && character.as_deref() == Some("w") {
+        if is_pressed {
+            let active_tab_id = controller.borrow().active_tab_id();
+            controller.borrow_mut().close_tab(active_tab_id);
+            sync_ui(window, &controller.borrow());
+        }
+        true
+    } else if primary
+        && matches!(
+            event.logical_key,
+            Key::Named(winit::keyboard::NamedKey::Tab)
+        )
+    {
+        if is_pressed {
+            controller
+                .borrow_mut()
+                .select_next_tab(modifiers.shift_key());
+            sync_ui(window, &controller.borrow());
+        }
+        true
+    } else if (primary && character.as_deref() == Some("r"))
+        || matches!(event.logical_key, Key::Named(winit::keyboard::NamedKey::F5))
+    {
+        if is_pressed {
+            controller
+                .borrow_mut()
+                .queue_command(BrowserCommand::Reload);
+        }
+        true
+    } else if modifiers.alt_key()
+        && matches!(
+            event.logical_key,
+            Key::Named(winit::keyboard::NamedKey::ArrowLeft)
+        )
+    {
+        if is_pressed {
+            controller
+                .borrow_mut()
+                .queue_command(BrowserCommand::GoBack);
+        }
+        true
+    } else if modifiers.alt_key()
+        && matches!(
+            event.logical_key,
+            Key::Named(winit::keyboard::NamedKey::ArrowRight)
+        )
+    {
+        if is_pressed {
+            controller
+                .borrow_mut()
+                .queue_command(BrowserCommand::GoForward);
+        }
+        true
+    } else {
+        false
+    };
+
+    if shortcut && is_pressed {
+        window.window().request_redraw();
+    }
+    shortcut
+}
+
+fn keyboard_input_from_winit(
+    event: &winit::event::KeyEvent,
+    modifiers: ModifiersState,
+    is_composing: bool,
+) -> KeyboardInput {
+    KeyboardInput {
+        state: match event.state {
+            ElementState::Pressed => KeyState::Down,
+            ElementState::Released => KeyState::Up,
+        },
+        key: logical_key_string(&event.logical_key),
+        code: physical_key_string(event.physical_key),
+        location: match event.location {
+            WinitKeyLocation::Standard => KeyLocation::Standard,
+            WinitKeyLocation::Left => KeyLocation::Left,
+            WinitKeyLocation::Right => KeyLocation::Right,
+            WinitKeyLocation::Numpad => KeyLocation::Numpad,
+        },
+        modifiers: KeyboardModifiers {
+            alt: modifiers.alt_key(),
+            control: modifiers.control_key(),
+            meta: modifiers.super_key(),
+            shift: modifiers.shift_key(),
+        },
+        repeat: event.repeat,
+        is_composing,
+    }
+}
+
+fn physical_key_string(key: PhysicalKey) -> String {
+    match key {
+        PhysicalKey::Code(winit::keyboard::KeyCode::SuperLeft) => "MetaLeft".to_owned(),
+        PhysicalKey::Code(winit::keyboard::KeyCode::SuperRight) => "MetaRight".to_owned(),
+        PhysicalKey::Code(winit::keyboard::KeyCode::Meta) => "Super".to_owned(),
+        PhysicalKey::Code(code) => format!("{code:?}"),
+        PhysicalKey::Unidentified(_) => "Unidentified".to_owned(),
+    }
+}
+
+fn logical_key_string(key: &Key) -> String {
+    match key {
+        Key::Character(character) => character.to_string(),
+        Key::Named(winit::keyboard::NamedKey::Space) => " ".to_owned(),
+        Key::Named(named) => format!("{named:?}"),
+        Key::Dead(_) => "Dead".to_owned(),
+        Key::Unidentified(_) => "Unidentified".to_owned(),
+    }
+}
+
+fn queue_ime_input(
+    controller: &RefCell<BrowserController>,
+    composition_tab_id: &mut Option<TabId>,
+    ime: &Ime,
+) {
+    match ime {
+        Ime::Enabled => {}
+        Ime::Preedit(data, _) => {
+            let tab_id = *composition_tab_id.get_or_insert_with(|| {
+                let tab_id = controller.borrow().active_tab_id();
+                controller.borrow_mut().queue_command_for(
+                    tab_id,
+                    BrowserCommand::ImeInput(ImeInput::Composition {
+                        state: CompositionState::Start,
+                        data: String::new(),
+                    }),
+                );
+                tab_id
+            });
+            controller.borrow_mut().queue_command_for(
+                tab_id,
+                BrowserCommand::ImeInput(ImeInput::Composition {
+                    state: CompositionState::Update,
+                    data: data.clone(),
+                }),
+            );
+        }
+        Ime::Commit(data) => {
+            let (tab_id, needs_start) = match composition_tab_id.take() {
+                Some(tab_id) => (tab_id, false),
+                None => (controller.borrow().active_tab_id(), true),
+            };
+            if needs_start {
+                controller.borrow_mut().queue_command_for(
+                    tab_id,
+                    BrowserCommand::ImeInput(ImeInput::Composition {
+                        state: CompositionState::Start,
+                        data: String::new(),
+                    }),
+                );
+            }
+            controller.borrow_mut().queue_command_for(
+                tab_id,
+                BrowserCommand::ImeInput(ImeInput::Composition {
+                    state: CompositionState::End,
+                    data: data.clone(),
+                }),
+            );
+        }
+        Ime::Disabled => {
+            dismiss_composition(controller, composition_tab_id);
+        }
+    }
+}
+
+fn dismiss_composition(
+    controller: &RefCell<BrowserController>,
+    composition_tab_id: &mut Option<TabId>,
+) {
+    if let Some(tab_id) = composition_tab_id.take() {
+        controller
+            .borrow_mut()
+            .queue_command_for(tab_id, BrowserCommand::ImeInput(ImeInput::Dismissed));
+    }
 }
 
 #[cfg(test)]
@@ -440,24 +801,19 @@ mod tests {
         fn navigate(&mut self, _url: &str) -> Result<(), Self::Error> {
             Ok(())
         }
-
         fn go_back(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
-
         fn go_forward(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
-
         fn reload(&mut self) -> Result<(), Self::Error> {
             self.reload_count += 1;
             Ok(())
         }
-
         fn pointer_moved(&mut self, _x: f32, _y: f32) -> Result<(), Self::Error> {
             Ok(())
         }
-
         fn pointer_button(
             &mut self,
             _action: PointerButtonAction,
@@ -467,7 +823,6 @@ mod tests {
         ) -> Result<(), Self::Error> {
             Ok(())
         }
-
         fn scroll(
             &mut self,
             _delta_x: f32,
@@ -477,59 +832,95 @@ mod tests {
         ) -> Result<(), Self::Error> {
             Ok(())
         }
-
         fn set_focus(&mut self, _focused: bool) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn keyboard_input(&mut self, _event: KeyboardInput) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn ime_input(&mut self, _event: ImeInput) -> Result<(), Self::Error> {
             Ok(())
         }
     }
 
     #[test]
-    fn pending_browser_events_are_applied_in_order() {
+    fn pending_browser_events_are_routed_to_their_tabs() {
         let controller = RefCell::new(BrowserController::default());
+        let first_tab_id = controller.borrow().active_tab_id();
+        let second_tab_id = controller.borrow_mut().open_tab();
         let (sender, receiver) = mpsc::channel();
 
         sender
-            .send(BrowserEvent::AddressChanged {
-                url: "https://example.com".to_owned(),
-            })
+            .send(TabEvent::new(
+                first_tab_id,
+                BrowserEvent::PageTitleChanged {
+                    title: Some("First".to_owned()),
+                },
+            ))
             .expect("the event receiver should be connected");
         sender
-            .send(BrowserEvent::PageTitleChanged {
-                title: Some("Example Domain".to_owned()),
-            })
+            .send(TabEvent::new(
+                second_tab_id,
+                BrowserEvent::PageTitleChanged {
+                    title: Some("Second".to_owned()),
+                },
+            ))
             .expect("the event receiver should be connected");
 
         assert!(apply_pending_browser_events(&controller, &receiver));
-        assert_eq!(controller.borrow().state().url(), "https://example.com");
-        assert_eq!(controller.borrow().state().page_title(), "Example Domain");
+        let controller = controller.borrow();
+        let titles = controller
+            .tabs()
+            .map(|tab| tab.state().page_title())
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec!["First", "Second"]);
     }
 
     #[test]
-    fn empty_browser_event_channel_does_not_report_a_state_change() {
+    fn commands_are_dispatched_to_their_own_web_views() {
         let controller = RefCell::new(BrowserController::default());
-        let (_sender, receiver) = mpsc::channel();
+        let first_tab_id = controller.borrow().active_tab_id();
+        controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::Reload);
+        let second_tab_id = controller.borrow_mut().open_tab();
+        controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::Reload);
+        let mut web_views = HashMap::from([
+            (first_tab_id, CountingWebView::default()),
+            (second_tab_id, CountingWebView::default()),
+        ]);
 
-        assert!(!apply_pending_browser_events(&controller, &receiver));
+        let pending = dispatch_pending_commands(&controller, &mut web_views)
+            .expect("fake WebViews should not fail");
+
+        assert!(!pending);
+        assert_eq!(web_views[&first_tab_id].reload_count, 1);
+        assert_eq!(web_views[&second_tab_id].reload_count, 1);
     }
 
     #[test]
-    fn ui_pointer_buttons_map_to_core_pointer_buttons() {
-        assert_eq!(
-            pointer_button_from_ui(WebViewPointerButton::Left),
-            PointerButton::Left
+    fn command_dispatch_is_limited_per_frame() {
+        let controller = RefCell::new(BrowserController::default());
+        let tab_id = controller.borrow().active_tab_id();
+        let mut web_views = HashMap::from([(tab_id, CountingWebView::default())]);
+        for _ in 0..=MAX_COMMANDS_PER_FRAME {
+            controller
+                .borrow_mut()
+                .queue_command(BrowserCommand::Reload);
+        }
+
+        assert!(
+            dispatch_pending_commands(&controller, &mut web_views)
+                .expect("the fake WebView should not fail")
         );
-        assert_eq!(
-            pointer_button_from_ui(WebViewPointerButton::Middle),
-            PointerButton::Middle
+        assert_eq!(web_views[&tab_id].reload_count, MAX_COMMANDS_PER_FRAME);
+        assert!(
+            !dispatch_pending_commands(&controller, &mut web_views)
+                .expect("the fake WebView should not fail")
         );
-        assert_eq!(
-            pointer_button_from_ui(WebViewPointerButton::Right),
-            PointerButton::Right
-        );
-        assert_eq!(
-            pointer_button_from_ui(WebViewPointerButton::Other),
-            PointerButton::Other
-        );
+        assert_eq!(web_views[&tab_id].reload_count, MAX_COMMANDS_PER_FRAME + 1);
     }
 
     #[test]
@@ -537,8 +928,7 @@ mod tests {
         let icon =
             PageIcon::from_rgba(1, 1, vec![10, 20, 30, 40]).expect("the test icon should be valid");
 
-        let image = slint_image_from_page_icon(&icon);
-        let pixels = image
+        let pixels = slint_image_from_page_icon(&icon)
             .to_rgba8()
             .expect("an embedded RGBA image should remain CPU-readable");
 
@@ -548,26 +938,99 @@ mod tests {
     }
 
     #[test]
-    fn command_dispatch_is_limited_per_frame() {
+    fn logical_keys_use_web_keyboard_event_values() {
+        assert_eq!(logical_key_string(&Key::Character("ç".into())), "ç");
+        assert_eq!(
+            logical_key_string(&Key::Named(winit::keyboard::NamedKey::Enter)),
+            "Enter"
+        );
+        assert_eq!(
+            logical_key_string(&Key::Named(winit::keyboard::NamedKey::Space)),
+            " "
+        );
+        assert_eq!(logical_key_string(&Key::Dead(Some('´'))), "Dead");
+    }
+
+    #[test]
+    fn physical_keys_use_web_keyboard_event_code_values() {
+        use winit::keyboard::KeyCode;
+
+        assert_eq!(physical_key_string(KeyCode::KeyA.into()), "KeyA");
+        assert_eq!(physical_key_string(KeyCode::SuperLeft.into()), "MetaLeft");
+        assert_eq!(physical_key_string(KeyCode::SuperRight.into()), "MetaRight");
+        assert_eq!(physical_key_string(KeyCode::Meta.into()), "Super");
+    }
+
+    #[test]
+    fn ime_preedit_and_commit_form_one_composition_sequence() {
         let controller = RefCell::new(BrowserController::default());
-        let mut web_view = CountingWebView::default();
+        let tab_id = controller.borrow().active_tab_id();
+        let mut composition_tab_id = None;
 
-        for _ in 0..=MAX_COMMANDS_PER_FRAME {
-            controller
-                .borrow_mut()
-                .queue_command(BrowserCommand::Reload);
-        }
+        queue_ime_input(
+            &controller,
+            &mut composition_tab_id,
+            &Ime::Preedit("aç".to_owned(), Some((2, 2))),
+        );
+        queue_ime_input(
+            &controller,
+            &mut composition_tab_id,
+            &Ime::Commit("ação".to_owned()),
+        );
 
-        let has_pending_commands = dispatch_pending_commands(&controller, &mut web_view)
-            .expect("the fake WebView should not fail");
+        let commands =
+            std::iter::from_fn(|| controller.borrow_mut().next_command()).collect::<Vec<_>>();
+        assert_eq!(commands.len(), 3);
+        assert!(commands.iter().all(|command| command.tab_id() == tab_id));
+        assert_eq!(
+            commands[0].command(),
+            &BrowserCommand::ImeInput(ImeInput::Composition {
+                state: CompositionState::Start,
+                data: String::new(),
+            })
+        );
+        assert_eq!(
+            commands[1].command(),
+            &BrowserCommand::ImeInput(ImeInput::Composition {
+                state: CompositionState::Update,
+                data: "aç".to_owned(),
+            })
+        );
+        assert_eq!(
+            commands[2].command(),
+            &BrowserCommand::ImeInput(ImeInput::Composition {
+                state: CompositionState::End,
+                data: "ação".to_owned(),
+            })
+        );
+        assert_eq!(composition_tab_id, None);
+    }
 
-        assert!(has_pending_commands);
-        assert_eq!(web_view.reload_count, MAX_COMMANDS_PER_FRAME);
+    #[test]
+    fn ime_dismissal_stays_with_the_tab_that_started_composition() {
+        let controller = RefCell::new(BrowserController::default());
+        let composing_tab_id = controller.borrow().active_tab_id();
+        let mut composition_tab_id = None;
+        queue_ime_input(
+            &controller,
+            &mut composition_tab_id,
+            &Ime::Preedit("her".to_owned(), None),
+        );
+        controller.borrow_mut().open_tab();
 
-        let has_pending_commands = dispatch_pending_commands(&controller, &mut web_view)
-            .expect("the fake WebView should not fail");
+        queue_ime_input(&controller, &mut composition_tab_id, &Ime::Disabled);
 
-        assert!(!has_pending_commands);
-        assert_eq!(web_view.reload_count, MAX_COMMANDS_PER_FRAME + 1);
+        let commands =
+            std::iter::from_fn(|| controller.borrow_mut().next_command()).collect::<Vec<_>>();
+        assert!(
+            commands
+                .iter()
+                .all(|command| command.tab_id() == composing_tab_id)
+        );
+        assert_eq!(
+            commands.last().map(|command| command.command()),
+            Some(&BrowserCommand::ImeInput(ImeInput::Dismissed))
+        );
+        assert_eq!(composition_tab_id, None);
     }
 }

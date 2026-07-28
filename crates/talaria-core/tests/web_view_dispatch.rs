@@ -1,4 +1,7 @@
-use talaria_core::{BrowserCommand, PointerButton, PointerButtonAction, WebView, dispatch_command};
+use talaria_core::{
+    BrowserCommand, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput,
+    KeyboardModifiers, PointerButton, PointerButtonAction, WebView, dispatch_command,
+};
 
 #[derive(Debug, PartialEq)]
 enum FakeCall {
@@ -23,6 +26,8 @@ enum FakeCall {
         y: f32,
     },
     FocusChanged(bool),
+    KeyboardInput(KeyboardInput),
+    ImeInput(ImeInput),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -100,6 +105,14 @@ impl WebView for FakeWebView {
 
     fn set_focus(&mut self, focused: bool) -> Result<(), Self::Error> {
         self.record(FakeCall::FocusChanged(focused))
+    }
+
+    fn keyboard_input(&mut self, event: KeyboardInput) -> Result<(), Self::Error> {
+        self.record(FakeCall::KeyboardInput(event))
+    }
+
+    fn ime_input(&mut self, event: ImeInput) -> Result<(), Self::Error> {
+        self.record(FakeCall::ImeInput(event))
     }
 }
 
@@ -230,6 +243,42 @@ fn focus_changed_command_forwards_focus_state() {
 
     assert_eq!(result, Ok(()));
     assert_eq!(web_view.calls, vec![FakeCall::FocusChanged(true)]);
+}
+
+#[test]
+fn keyboard_command_preserves_physical_and_logical_key_data() {
+    let mut web_view = FakeWebView::default();
+    let event = KeyboardInput {
+        state: KeyState::Down,
+        key: "ç".to_owned(),
+        code: "Semicolon".to_owned(),
+        location: KeyLocation::Standard,
+        modifiers: KeyboardModifiers {
+            shift: true,
+            ..KeyboardModifiers::default()
+        },
+        repeat: false,
+        is_composing: false,
+    };
+
+    let result = dispatch_command(&mut web_view, BrowserCommand::KeyboardInput(event.clone()));
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(web_view.calls, vec![FakeCall::KeyboardInput(event)]);
+}
+
+#[test]
+fn ime_command_preserves_composition_state_and_text() {
+    let mut web_view = FakeWebView::default();
+    let event = ImeInput::Composition {
+        state: CompositionState::Update,
+        data: "ação".to_owned(),
+    };
+
+    let result = dispatch_command(&mut web_view, BrowserCommand::ImeInput(event.clone()));
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(web_view.calls, vec![FakeCall::ImeInput(event)]);
 }
 
 #[test]

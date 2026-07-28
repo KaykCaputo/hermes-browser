@@ -1,0 +1,134 @@
+name: Release builds
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    name: Linux x86-64
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            cmake \
+            libclang-dev \
+            libfontconfig1-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcursor-dev \
+            libxkbcommon-x11-dev \
+            ninja-build \
+            pkg-config \
+            xinput
+
+      - name: Run quality checks
+        run: make qa
+
+      - name: Build release executable
+        run: cargo build --locked --release --package hermes-desktop
+
+      - name: Create Linux archive
+        shell: bash
+        run: |
+          package="hermes-browser-linux-x86_64"
+          mkdir -p "dist/${package}"
+          install -m 0755 target/release/hermes-desktop "dist/${package}/hermes-browser"
+          strip --strip-unneeded "dist/${package}/hermes-browser"
+          cp README.md "dist/${package}/README.md"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+          cd dist
+          sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-browser-linux-x86_64
+          path: |
+            dist/hermes-browser-linux-x86_64.tar.gz
+            dist/hermes-browser-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+
+  build-windows:
+    name: Windows x86-64
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup update stable
+          rustup default stable
+
+      - name: Build release executable
+        shell: pwsh
+        run: cargo build --locked --release --package hermes-desktop
+
+      - name: Create Windows archive
+        shell: pwsh
+        run: |
+          $package = "hermes-browser-windows-x86_64"
+          New-Item -ItemType Directory -Force "dist/$package" | Out-Null
+          Copy-Item "target/release/hermes-desktop.exe" "dist/$package/hermes-browser.exe"
+          Copy-Item "README.md" "dist/$package/README.md"
+          Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip" -Force
+          $hash = (Get-FileHash "dist/$package.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $package.zip" | Set-Content -Encoding ascii "dist/$package.zip.sha256"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-browser-windows-x86_64
+          path: |
+            dist/hermes-browser-windows-x86_64.zip
+            dist/hermes-browser-windows-x86_64.zip.sha256
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build-linux
+      - build-windows
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber

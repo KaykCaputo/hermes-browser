@@ -1,10 +1,16 @@
 use dpi::PhysicalSize;
 use euclid::{Point2D, Scale};
 use servo::{
-    InputEvent, MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseMoveEvent,
+    Code, CompositionEvent as ServoCompositionEvent, CompositionState as ServoCompositionState,
+    ImeEvent as ServoImeEvent, InputEvent, Key, KeyState as ServoKeyState,
+    KeyboardEvent as ServoKeyboardEvent, Location, Modifiers,
+    MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
     WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
-use talaria_core::{PointerButton, PointerButtonAction, WebView as TalariaWebView};
+use talaria_core::{
+    CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
+    PointerButtonAction, TabId, WebView as TalariaWebView,
+};
 use url::Url;
 
 use crate::frame_ready::FrameReadySignal;
@@ -13,11 +19,16 @@ use crate::{ServoWebViewError, ViewportSize};
 pub struct ServoWebView {
     inner: servo::WebView,
     frame_ready: FrameReadySignal,
+    tab_id: TabId,
 }
 
 impl ServoWebView {
-    pub(crate) fn new(inner: servo::WebView, frame_ready: FrameReadySignal) -> Self {
-        Self { inner, frame_ready }
+    pub(crate) fn new(inner: servo::WebView, frame_ready: FrameReadySignal, tab_id: TabId) -> Self {
+        Self {
+            inner,
+            frame_ready,
+            tab_id,
+        }
     }
 
     pub fn resize(&self, size: ViewportSize) {
@@ -36,6 +47,24 @@ impl ServoWebView {
 
         self.inner.paint();
         true
+    }
+
+    pub fn show(&self) {
+        self.inner.show();
+    }
+
+    pub fn hide(&self) {
+        self.inner.hide();
+    }
+
+    pub fn set_throttled(&self, throttled: bool) {
+        self.inner.set_throttled(throttled);
+    }
+}
+
+impl Drop for ServoWebView {
+    fn drop(&mut self) {
+        log::info!("closing Servo WebView for tab {}", self.tab_id.value());
     }
 }
 
@@ -117,6 +146,82 @@ impl TalariaWebView for ServoWebView {
 
         Ok(())
     }
+
+    fn keyboard_input(&mut self, event: KeyboardInput) -> Result<(), Self::Error> {
+        let keyboard_event = ServoKeyboardEvent::new_without_event(
+            servo_key_state(event.state),
+            event
+                .key
+                .parse()
+                .unwrap_or(Key::Named(NamedKey::Unidentified)),
+            event.code.parse().unwrap_or(Code::Unidentified),
+            servo_key_location(event.location),
+            servo_modifiers(event.modifiers),
+            event.repeat,
+            event.is_composing,
+        );
+        let _event_id = self
+            .inner
+            .notify_input_event(InputEvent::Keyboard(keyboard_event));
+        Ok(())
+    }
+
+    fn ime_input(&mut self, event: ImeInput) -> Result<(), Self::Error> {
+        let event = match event {
+            ImeInput::Composition { state, data } => {
+                ServoImeEvent::Composition(ServoCompositionEvent {
+                    state: servo_composition_state(state),
+                    data,
+                })
+            }
+            ImeInput::Dismissed => ServoImeEvent::Dismissed,
+        };
+        let _event_id = self.inner.notify_input_event(InputEvent::Ime(event));
+        Ok(())
+    }
+}
+
+fn servo_key_state(state: KeyState) -> ServoKeyState {
+    match state {
+        KeyState::Down => ServoKeyState::Down,
+        KeyState::Up => ServoKeyState::Up,
+    }
+}
+
+fn servo_key_location(location: KeyLocation) -> Location {
+    match location {
+        KeyLocation::Standard => Location::Standard,
+        KeyLocation::Left => Location::Left,
+        KeyLocation::Right => Location::Right,
+        KeyLocation::Numpad => Location::Numpad,
+    }
+}
+
+fn servo_modifiers(modifiers: talaria_core::KeyboardModifiers) -> Modifiers {
+    let mut servo_modifiers = Modifiers::empty();
+
+    if modifiers.alt {
+        servo_modifiers.insert(Modifiers::ALT);
+    }
+    if modifiers.control {
+        servo_modifiers.insert(Modifiers::CONTROL);
+    }
+    if modifiers.meta {
+        servo_modifiers.insert(Modifiers::META);
+    }
+    if modifiers.shift {
+        servo_modifiers.insert(Modifiers::SHIFT);
+    }
+
+    servo_modifiers
+}
+
+fn servo_composition_state(state: CompositionState) -> ServoCompositionState {
+    match state {
+        CompositionState::Start => ServoCompositionState::Start,
+        CompositionState::Update => ServoCompositionState::Update,
+        CompositionState::End => ServoCompositionState::End,
+    }
 }
 
 fn web_view_point(x: f32, y: f32) -> WebViewPoint {
@@ -180,6 +285,41 @@ mod tests {
         assert_eq!(
             servo_mouse_button(PointerButton::Other),
             servo::MouseButton::Other(5)
+        );
+    }
+
+    #[test]
+    fn keyboard_state_location_and_modifiers_map_to_servo() {
+        assert_eq!(servo_key_state(KeyState::Down), ServoKeyState::Down);
+        assert_eq!(servo_key_state(KeyState::Up), ServoKeyState::Up);
+        assert_eq!(servo_key_location(KeyLocation::Numpad), Location::Numpad);
+
+        let modifiers = servo_modifiers(talaria_core::KeyboardModifiers {
+            alt: true,
+            control: true,
+            meta: false,
+            shift: true,
+        });
+
+        assert!(modifiers.contains(Modifiers::ALT));
+        assert!(modifiers.contains(Modifiers::CONTROL));
+        assert!(modifiers.contains(Modifiers::SHIFT));
+        assert!(!modifiers.contains(Modifiers::META));
+    }
+
+    #[test]
+    fn composition_states_map_to_servo() {
+        assert_eq!(
+            servo_composition_state(CompositionState::Start),
+            ServoCompositionState::Start
+        );
+        assert_eq!(
+            servo_composition_state(CompositionState::Update),
+            ServoCompositionState::Update
+        );
+        assert_eq!(
+            servo_composition_state(CompositionState::End),
+            ServoCompositionState::End
         );
     }
 }

@@ -5,6 +5,14 @@ export enum WebViewPointerButton {
     other,
 }
 
+export struct BrowserTab {
+    title: string,
+    icon: image,
+    has-icon: bool,
+    active: bool,
+    loading: bool,
+}
+
 component ChromeButton inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
@@ -47,11 +55,81 @@ component TabIcon inherits Rectangle {
     }
 }
 
+component BrowserTabButton inherits Rectangle {
+    in property <BrowserTab> tab;
+    in property <bool> closable;
+    callback selected;
+    callback closed;
+
+    min-width: 96px;
+    max-width: 240px;
+    horizontal-stretch: 1;
+    border-radius: 9px;
+    background: root.tab.active ? #f5f6fa : tab-touch.has-hover ? #dfe2eb : transparent;
+
+    tab-touch := TouchArea {
+        clicked => {
+            root.selected();
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 7px;
+        spacing: 7px;
+
+        if root.tab.has-icon: TabIcon {
+            source: root.tab.icon;
+        }
+
+        if !root.tab.has-icon: TabIcon {
+            source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
+        }
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.tab.title;
+            color: #252938;
+            font-size: 13px;
+            overflow: elide;
+            vertical-alignment: center;
+        }
+
+        if root.tab.loading: Rectangle {
+            width: 6px;
+            height: 6px;
+            border-radius: 3px;
+            background: #6957d9;
+        }
+
+        if root.closable: Rectangle {
+            width: 22px;
+            height: 22px;
+            border-radius: 6px;
+            background: close-touch.has-hover ? #cfd3df : transparent;
+
+            Text {
+                text: "×";
+                color: #5c6172;
+                font-size: 15px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            close-touch := TouchArea {
+                clicked => {
+                    root.closed();
+                }
+            }
+        }
+    }
+}
+
 export component MainWindow inherits Window {
+    in property <[BrowserTab]> tabs;
+    in property <int> active-tab-index: 0;
     in property <string> page-title: "New tab";
     in-out property <string> address: "";
-    in property <image> page-icon;
-    in property <bool> has-page-icon: false;
     in property <bool> can-go-back: false;
     in property <bool> can-go-forward: false;
     in property <bool> is-loading: false;
@@ -65,10 +143,28 @@ export component MainWindow inherits Window {
     callback go-back;
     callback go-forward;
     callback reload;
+    callback new-tab;
+    callback select-tab(int);
+    callback close-tab(int);
     callback web-view-pointer-moved(float, float);
     callback web-view-pointer-button(WebViewPointerButton, bool, float, float);
     callback web-view-scrolled(float, float, float, float);
     callback web-view-focus-changed(bool);
+
+    public function focus-address-bar() {
+        address-input.focus();
+        address-input.select-all();
+    }
+
+    public function reveal-active-tab() {
+        tab-strip.viewport-x = Math.min(
+            0px,
+            Math.max(
+                tab-strip.width - tab-strip.viewport-width,
+                -root.active-tab-index * 180px,
+            ),
+        );
+    }
 
     title: page-title + " — Hermes Browser";
     icon: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
@@ -91,37 +187,38 @@ export component MainWindow inherits Window {
                 padding-top: 6px;
                 padding-bottom: 0px;
 
-                Rectangle {
-                    width: 250px;
-                    border-radius: 9px;
-                    background: #f5f6fa;
+                tab-strip := Flickable {
+                    horizontal-stretch: 1;
+                    viewport-width: Math.max(self.width, root.tabs.length * 180px);
+                    viewport-height: self.height;
 
                     HorizontalLayout {
-                        padding-left: 12px;
-                        padding-right: 12px;
-                        spacing: 8px;
+                        width: tab-strip.viewport-width;
+                        spacing: 4px;
 
-                        if root.has-page-icon: TabIcon {
-                            source: root.page-icon;
-                        }
+                        for tab[index] in root.tabs: BrowserTabButton {
+                            width: 176px;
+                            tab: tab;
+                            closable: root.tabs.length > 1;
 
-                        if !root.has-page-icon: TabIcon {
-                            source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
-                        }
+                            selected => {
+                                root.select-tab(index);
+                            }
 
-                        Text {
-                            text: root.page-title;
-                            color: #252938;
-                            font-size: 13px;
-                            overflow: elide;
-                            vertical-alignment: center;
+                            closed => {
+                                root.close-tab(index);
+                            }
                         }
                     }
                 }
 
-                Rectangle {
-                    horizontal-stretch: 1;
-                    background: transparent;
+                ChromeButton {
+                    width: 32px;
+                    height: 28px;
+                    label: "+";
+                    clicked => {
+                        root.new-tab();
+                    }
                 }
             }
         }

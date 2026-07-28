@@ -1,4 +1,4 @@
-use crate::PageIcon;
+use crate::{ImeInput, KeyboardInput, PageIcon};
 
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
 const INITIAL_ADDRESS: &str = "";
@@ -52,6 +52,8 @@ pub enum BrowserCommand {
     FocusChanged {
         focused: bool,
     },
+    KeyboardInput(KeyboardInput),
+    ImeInput(ImeInput),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

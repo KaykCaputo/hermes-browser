@@ -9,7 +9,7 @@ use euclid::Scale;
 use log::info;
 use rustls::crypto::CryptoProvider;
 use servo::{LoadStatus, PixelFormat, RenderingContext, ServoBuilder, WebViewBuilder};
-use talaria_core::{BrowserEvent, LoadState, PageIcon};
+use talaria_core::{BrowserEvent, LoadState, PageIcon, TabEvent, TabId};
 use url::Url;
 
 use crate::frame_ready::FrameReadySignal;
@@ -81,13 +81,15 @@ impl ServoRuntime {
         rendering_context: Rc<SharedOpenGlContext>,
         initial_url: &str,
         scale_factor: f32,
-        browser_event_sender: Sender<BrowserEvent>,
+        tab_id: TabId,
+        browser_event_sender: Sender<TabEvent>,
     ) -> Result<ServoWebView, ServoWebViewError> {
         let initial_url = Url::parse(initial_url)?;
         let rendering_context: Rc<dyn RenderingContext> = rendering_context;
         let frame_ready = FrameReadySignal::default();
         let delegate = Rc::new(BrowserDelegate {
             event_loop_waker: self.redraw_waker.clone(),
+            tab_id,
             browser_event_sender,
             frame_ready: frame_ready.clone(),
             load_metrics: RefCell::new(PageLoadMetrics::default()),
@@ -99,7 +101,8 @@ impl ServoRuntime {
             .delegate(delegate)
             .build();
 
-        Ok(ServoWebView::new(inner, frame_ready))
+        info!("created Servo WebView for tab {}", tab_id.value());
+        Ok(ServoWebView::new(inner, frame_ready, tab_id))
     }
 
     pub fn spin_event_loop(&self) {
@@ -110,14 +113,17 @@ impl ServoRuntime {
 
 struct BrowserDelegate {
     event_loop_waker: EventLoopWaker,
-    browser_event_sender: Sender<BrowserEvent>,
+    tab_id: TabId,
+    browser_event_sender: Sender<TabEvent>,
     frame_ready: FrameReadySignal,
     load_metrics: RefCell<PageLoadMetrics>,
 }
 
 impl BrowserDelegate {
     fn send_browser_event(&self, event: BrowserEvent) {
-        let _send_result = self.browser_event_sender.send(event);
+        let _send_result = self
+            .browser_event_sender
+            .send(TabEvent::new(self.tab_id, event));
     }
 
     fn record_load_milestone(&self, milestone: LoadMilestone) {
@@ -128,7 +134,8 @@ impl BrowserDelegate {
 
         if let Some(elapsed) = elapsed {
             info!(
-                "page load milestone: {} at {:.1} ms",
+                "tab {}: page load milestone: {} at {:.1} ms",
+                self.tab_id.value(),
                 milestone.label(),
                 elapsed.as_secs_f64() * 1_000.0
             );
@@ -164,7 +171,7 @@ impl servo::WebViewDelegate for BrowserDelegate {
         match status {
             LoadStatus::Started => {
                 self.load_metrics.borrow_mut().start(Instant::now());
-                info!("page load started");
+                info!("tab {}: page load started", self.tab_id.value());
             }
             LoadStatus::HeadParsed => self.record_load_milestone(LoadMilestone::HeadParsed),
             LoadStatus::Complete => self.record_load_milestone(LoadMilestone::Complete),

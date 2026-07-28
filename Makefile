@@ -4,9 +4,14 @@ SHELL := /bin/sh
 
 CARGO ?= cargo
 RUSTUP ?= rustup
+STRIP ?= strip
 APP_PACKAGE ?= hermes-desktop
 ARGS ?=
 RUST_LOG ?= talaria_servo=info,servo=warn
+DIST_DIR ?= dist
+PROJECT_VERSION ?= 0.1.0
+LINUX_PACKAGE_NAME := hermes-browser-v$(PROJECT_VERSION)-linux-x86_64
+LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 
 .PHONY: \
 	help \
@@ -22,6 +27,7 @@ RUST_LOG ?= talaria_servo=info,servo=warn
 	qa \
 	build \
 	build-release \
+	package-linux \
 	run \
 	run-release \
 	docs \
@@ -44,6 +50,7 @@ help:
 		'qa' 'Run formatting, linting, and tests.' \
 		'build' 'Build the complete workspace in debug mode.' \
 		'build-release' 'Build the complete workspace in release mode.' \
+		'package-linux' 'Build and package the Linux x86-64 release.' \
 		'run' 'Run Hermes Desktop in debug mode.' \
 		'run-release' 'Run Hermes Desktop in release mode.' \
 		'docs' 'Build the workspace documentation.' \
@@ -122,6 +129,14 @@ build:
 
 build-release:
 	"$(CARGO)" build --workspace --release
+
+package-linux: build-release
+	mkdir -p "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)"
+	cp "target/release/$(APP_PACKAGE)" "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/hermes-browser"
+	"$(STRIP)" --strip-unneeded "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/hermes-browser"
+	cp README.md "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/README.md"
+	tar -C "$(DIST_DIR)" -czf "$(DIST_DIR)/$(LINUX_ARCHIVE)" "$(LINUX_PACKAGE_NAME)"
+	cd "$(DIST_DIR)" && sha256sum "$(LINUX_ARCHIVE)" > "$(LINUX_ARCHIVE).sha256"
 
 run:
 	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" -- $(ARGS)

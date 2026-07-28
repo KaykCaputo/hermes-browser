@@ -1,4 +1,5 @@
 use crate::browser::{BrowserCommand, PointerButton, PointerButtonAction};
+use crate::{ImeInput, KeyboardInput};
 
 pub trait WebView {
     type Error;
@@ -17,6 +18,8 @@ pub trait WebView {
     ) -> Result<(), Self::Error>;
     fn scroll(&mut self, delta_x: f32, delta_y: f32, x: f32, y: f32) -> Result<(), Self::Error>;
     fn set_focus(&mut self, focused: bool) -> Result<(), Self::Error>;
+    fn keyboard_input(&mut self, event: KeyboardInput) -> Result<(), Self::Error>;
+    fn ime_input(&mut self, event: ImeInput) -> Result<(), Self::Error>;
 }
 
 pub fn dispatch_command<W>(web_view: &mut W, command: BrowserCommand) -> Result<(), W::Error>
@@ -42,5 +45,7 @@ where
             y,
         } => web_view.scroll(delta_x, delta_y, x, y),
         BrowserCommand::FocusChanged { focused } => web_view.set_focus(focused),
+        BrowserCommand::KeyboardInput(event) => web_view.keyboard_input(event),
+        BrowserCommand::ImeInput(event) => web_view.ime_input(event),
     }
 }
