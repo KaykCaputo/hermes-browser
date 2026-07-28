@@ -9154,6 +9154,9 @@ dependencies = [
 [[package]]
 name = "talaria-core"
 version = "0.1.0"
+dependencies = [
+ "url",
+]
 
 [[package]]
 name = "talaria-servo"
