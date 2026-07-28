@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -16,19 +20,29 @@ jobs:
   build-linux:
     name: Linux x86-64
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
 
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
 
       - name: Install Rust
+        shell: bash
         run: |
+          set -euo pipefail
+
           rustup update stable
           rustup default stable
           rustup component add clippy rustfmt
 
+          rustc --version
+          cargo --version
+
       - name: Install Linux dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
           sudo apt-get update
           sudo apt-get install --yes \
             build-essential \
@@ -44,22 +58,72 @@ jobs:
             xinput
 
       - name: Run quality checks
-        run: make qa
+        shell: bash
+        run: |
+          set -euo pipefail
+          make qa
 
       - name: Build release executable
-        run: cargo build --locked --release --package hermes-desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cargo build \
+            --locked \
+            --release \
+            --package hermes-desktop
+
+      - name: Inspect dynamic dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          ldd target/release/hermes-desktop
 
       - name: Create Linux archive
         shell: bash
         run: |
+          set -euo pipefail
+
           package="hermes-browser-linux-x86_64"
-          mkdir -p "dist/${package}"
-          install -m 0755 target/release/hermes-desktop "dist/${package}/hermes-browser"
-          strip --strip-unneeded "dist/${package}/hermes-browser"
-          cp README.md "dist/${package}/README.md"
-          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
-          cd dist
-          sha256sum "${package}.tar.gz" > "${package}.tar.gz.sha256"
+          executable="target/release/hermes-desktop"
+          output_directory="dist/${package}"
+          archive="dist/${package}.tar.gz"
+          checksum="${archive}.sha256"
+
+          test -f "${executable}"
+
+          mkdir -p "${output_directory}"
+
+          install \
+            -m 0755 \
+            "${executable}" \
+            "${output_directory}/hermes-browser"
+
+          strip --strip-unneeded \
+            "${output_directory}/hermes-browser"
+
+          cp README.md \
+            "${output_directory}/README.md"
+
+          if [[ -f LICENSE ]]; then
+            cp LICENSE \
+              "${output_directory}/LICENSE"
+          fi
+
+          tar \
+            -C dist \
+            -czf "${archive}" \
+            "${package}"
+
+          (
+            cd dist
+            sha256sum \
+              "${package}.tar.gz" \
+              > "${package}.tar.gz.sha256"
+          )
+
+          test -f "${archive}"
+          test -f "${checksum}"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
@@ -69,10 +133,12 @@ jobs:
             dist/hermes-browser-linux-x86_64.tar.gz
             dist/hermes-browser-linux-x86_64.tar.gz.sha256
           if-no-files-found: error
+          retention-days: 14
 
   build-windows:
     name: Windows x86-64
     runs-on: windows-latest
+    timeout-minutes: 120
 
     steps:
       - name: Check out the repository
@@ -81,23 +147,82 @@ jobs:
       - name: Install Rust
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           rustup update stable
           rustup default stable
 
+          rustc --version
+          cargo --version
+
       - name: Build release executable
         shell: pwsh
-        run: cargo build --locked --release --package hermes-desktop
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          cargo build `
+            --locked `
+            --release `
+            --package hermes-desktop
 
       - name: Create Windows archive
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+
           $package = "hermes-browser-windows-x86_64"
-          New-Item -ItemType Directory -Force "dist/$package" | Out-Null
-          Copy-Item "target/release/hermes-desktop.exe" "dist/$package/hermes-browser.exe"
-          Copy-Item "README.md" "dist/$package/README.md"
-          Compress-Archive -Path "dist/$package" -DestinationPath "dist/$package.zip" -Force
-          $hash = (Get-FileHash "dist/$package.zip" -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  $package.zip" | Set-Content -Encoding ascii "dist/$package.zip.sha256"
+          $executable = "target/release/hermes-desktop.exe"
+          $outputDirectory = "dist/$package"
+          $archive = "dist/$package.zip"
+          $checksum = "$archive.sha256"
+
+          if (-not (Test-Path $executable)) {
+              throw "Release executable not found: $executable"
+          }
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            $outputDirectory |
+            Out-Null
+
+          Copy-Item `
+            $executable `
+            "$outputDirectory/hermes-browser.exe"
+
+          Copy-Item `
+            "README.md" `
+            "$outputDirectory/README.md"
+
+          if (Test-Path "LICENSE") {
+              Copy-Item `
+                "LICENSE" `
+                "$outputDirectory/LICENSE"
+          }
+
+          Compress-Archive `
+            -Path $outputDirectory `
+            -DestinationPath $archive `
+            -Force
+
+          $hash = (
+              Get-FileHash `
+                $archive `
+                -Algorithm SHA256
+          ).Hash.ToLowerInvariant()
+
+          "$hash  $package.zip" |
+            Set-Content `
+              -Encoding ascii `
+              $checksum
+
+          if (-not (Test-Path $archive)) {
+              throw "Archive not found: $archive"
+          }
+
+          if (-not (Test-Path $checksum)) {
+              throw "Checksum not found: $checksum"
+          }
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -107,6 +232,7 @@ jobs:
             dist/hermes-browser-windows-x86_64.zip
             dist/hermes-browser-windows-x86_64.zip.sha256
           if-no-files-found: error
+          retention-days: 14
 
   publish-release:
     name: Publish GitHub Release
@@ -115,6 +241,8 @@ jobs:
       - build-linux
       - build-windows
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
     permissions:
       contents: write
 
@@ -125,10 +253,30 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: List release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -maxdepth 1 -type f -print
+
       - name: Create or update the GitHub Release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
-            gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
-          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          set -euo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+
+          if ! gh release view "${tag}" >/dev/null 2>&1; then
+            gh release create \
+              "${tag}" \
+              --verify-tag \
+              --generate-notes \
+              --title "${tag}"
+          fi
+
+          gh release upload \
+            "${tag}" \
+            dist/* \
+            --clobber
