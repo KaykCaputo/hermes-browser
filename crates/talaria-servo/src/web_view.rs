@@ -1,6 +1,10 @@
 use dpi::PhysicalSize;
-use euclid::Scale;
-use talaria_core::WebView as TalariaWebView;
+use euclid::{Point2D, Scale};
+use servo::{
+    InputEvent, MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseMoveEvent,
+    WebViewPoint, WheelDelta, WheelEvent, WheelMode,
+};
+use talaria_core::{PointerButton, PointerButtonAction, WebView as TalariaWebView};
 use url::Url;
 
 use crate::{ServoWebViewError, ViewportSize};
@@ -50,5 +54,125 @@ impl TalariaWebView for ServoWebView {
     fn reload(&mut self) -> Result<(), Self::Error> {
         self.inner.reload();
         Ok(())
+    }
+
+    fn pointer_moved(&mut self, x: f32, y: f32) -> Result<(), Self::Error> {
+        let _event_id = self
+            .inner
+            .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(web_view_point(
+                x, y,
+            ))));
+
+        Ok(())
+    }
+
+    fn pointer_button(
+        &mut self,
+        action: PointerButtonAction,
+        button: PointerButton,
+        x: f32,
+        y: f32,
+    ) -> Result<(), Self::Error> {
+        let _event_id =
+            self.inner
+                .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
+                    servo_mouse_button_action(action),
+                    servo_mouse_button(button),
+                    web_view_point(x, y),
+                )));
+
+        Ok(())
+    }
+
+    fn scroll(&mut self, delta_x: f32, delta_y: f32, x: f32, y: f32) -> Result<(), Self::Error> {
+        let delta = WheelDelta {
+            x: f64::from(delta_x),
+            y: f64::from(delta_y),
+            z: 0.0,
+            mode: WheelMode::DeltaPixel,
+        };
+        let _event_id = self
+            .inner
+            .notify_input_event(InputEvent::Wheel(WheelEvent::new(
+                delta,
+                web_view_point(x, y),
+            )));
+
+        Ok(())
+    }
+
+    fn set_focus(&mut self, focused: bool) -> Result<(), Self::Error> {
+        if focused {
+            self.inner.focus();
+        } else {
+            self.inner.blur();
+        }
+
+        Ok(())
+    }
+}
+
+fn web_view_point(x: f32, y: f32) -> WebViewPoint {
+    WebViewPoint::Page(Point2D::new(x, y))
+}
+
+fn servo_mouse_button_action(action: PointerButtonAction) -> ServoMouseButtonAction {
+    match action {
+        PointerButtonAction::Down => ServoMouseButtonAction::Down,
+        PointerButtonAction::Up => ServoMouseButtonAction::Up,
+    }
+}
+
+fn servo_mouse_button(button: PointerButton) -> servo::MouseButton {
+    match button {
+        PointerButton::Left => servo::MouseButton::Left,
+        PointerButton::Middle => servo::MouseButton::Middle,
+        PointerButton::Right => servo::MouseButton::Right,
+        PointerButton::Other => servo::MouseButton::Other(5),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logical_coordinates_become_page_coordinates() {
+        assert_eq!(
+            web_view_point(12.5, 24.0),
+            WebViewPoint::Page(Point2D::new(12.5, 24.0))
+        );
+    }
+
+    #[test]
+    fn pointer_button_actions_map_to_servo_actions() {
+        assert_eq!(
+            servo_mouse_button_action(PointerButtonAction::Down),
+            ServoMouseButtonAction::Down
+        );
+        assert_eq!(
+            servo_mouse_button_action(PointerButtonAction::Up),
+            ServoMouseButtonAction::Up
+        );
+    }
+
+    #[test]
+    fn pointer_buttons_map_to_servo_buttons() {
+        assert_eq!(
+            servo_mouse_button(PointerButton::Left),
+            servo::MouseButton::Left
+        );
+        assert_eq!(
+            servo_mouse_button(PointerButton::Middle),
+            servo::MouseButton::Middle
+        );
+        assert_eq!(
+            servo_mouse_button(PointerButton::Right),
+            servo::MouseButton::Right
+        );
+        assert_eq!(
+            servo_mouse_button(PointerButton::Other),
+            servo::MouseButton::Other(5)
+        );
     }
 }

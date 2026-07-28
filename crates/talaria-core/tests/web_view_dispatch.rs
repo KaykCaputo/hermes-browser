@@ -1,11 +1,28 @@
-use talaria_core::{BrowserCommand, WebView, dispatch_command};
+use talaria_core::{BrowserCommand, PointerButton, PointerButtonAction, WebView, dispatch_command};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 enum FakeCall {
     Navigate(String),
     GoBack,
     GoForward,
     Reload,
+    PointerMoved {
+        x: f32,
+        y: f32,
+    },
+    PointerButton {
+        action: PointerButtonAction,
+        button: PointerButton,
+        x: f32,
+        y: f32,
+    },
+    Scrolled {
+        delta_x: f32,
+        delta_y: f32,
+        x: f32,
+        y: f32,
+    },
+    FocusChanged(bool),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -51,6 +68,38 @@ impl WebView for FakeWebView {
 
     fn reload(&mut self) -> Result<(), Self::Error> {
         self.record(FakeCall::Reload)
+    }
+
+    fn pointer_moved(&mut self, x: f32, y: f32) -> Result<(), Self::Error> {
+        self.record(FakeCall::PointerMoved { x, y })
+    }
+
+    fn pointer_button(
+        &mut self,
+        action: PointerButtonAction,
+        button: PointerButton,
+        x: f32,
+        y: f32,
+    ) -> Result<(), Self::Error> {
+        self.record(FakeCall::PointerButton {
+            action,
+            button,
+            x,
+            y,
+        })
+    }
+
+    fn scroll(&mut self, delta_x: f32, delta_y: f32, x: f32, y: f32) -> Result<(), Self::Error> {
+        self.record(FakeCall::Scrolled {
+            delta_x,
+            delta_y,
+            x,
+            y,
+        })
+    }
+
+    fn set_focus(&mut self, focused: bool) -> Result<(), Self::Error> {
+        self.record(FakeCall::FocusChanged(focused))
     }
 }
 
@@ -100,6 +149,87 @@ fn reload_command_calls_reload() {
 
     assert_eq!(result, Ok(()));
     assert_eq!(web_view.calls, vec![FakeCall::Reload]);
+}
+
+#[test]
+fn pointer_moved_command_forwards_logical_coordinates() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(
+        &mut web_view,
+        BrowserCommand::PointerMoved { x: 12.5, y: 24.0 },
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        web_view.calls,
+        vec![FakeCall::PointerMoved { x: 12.5, y: 24.0 }]
+    );
+}
+
+#[test]
+fn pointer_button_command_forwards_action_button_and_coordinates() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(
+        &mut web_view,
+        BrowserCommand::PointerButton {
+            action: PointerButtonAction::Down,
+            button: PointerButton::Right,
+            x: 30.0,
+            y: 45.0,
+        },
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        web_view.calls,
+        vec![FakeCall::PointerButton {
+            action: PointerButtonAction::Down,
+            button: PointerButton::Right,
+            x: 30.0,
+            y: 45.0,
+        }]
+    );
+}
+
+#[test]
+fn scrolled_command_forwards_delta_and_pointer_coordinates() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(
+        &mut web_view,
+        BrowserCommand::Scrolled {
+            delta_x: -2.0,
+            delta_y: 18.0,
+            x: 100.0,
+            y: 200.0,
+        },
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        web_view.calls,
+        vec![FakeCall::Scrolled {
+            delta_x: -2.0,
+            delta_y: 18.0,
+            x: 100.0,
+            y: 200.0,
+        }]
+    );
+}
+
+#[test]
+fn focus_changed_command_forwards_focus_state() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(
+        &mut web_view,
+        BrowserCommand::FocusChanged { focused: true },
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(web_view.calls, vec![FakeCall::FocusChanged(true)]);
 }
 
 #[test]

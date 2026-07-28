@@ -9,12 +9,47 @@ pub enum LoadState {
     Failed { message: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerButton {
+    Left,
+    Middle,
+    Right,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerButtonAction {
+    Down,
+    Up,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum BrowserCommand {
-    Navigate { url: String },
+    Navigate {
+        url: String,
+    },
     GoBack,
     GoForward,
     Reload,
+    PointerMoved {
+        x: f32,
+        y: f32,
+    },
+    PointerButton {
+        action: PointerButtonAction,
+        button: PointerButton,
+        x: f32,
+        y: f32,
+    },
+    Scrolled {
+        delta_x: f32,
+        delta_y: f32,
+        x: f32,
+        y: f32,
+    },
+    FocusChanged {
+        focused: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
