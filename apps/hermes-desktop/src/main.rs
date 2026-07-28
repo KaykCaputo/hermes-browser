@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::error::Error;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver};
 
 use hermes_ui::MainWindow;
 use slint::{ComponentHandle, GraphicsAPI, RenderingState};
@@ -47,6 +48,7 @@ fn connect_servo_runtime(
     let mut web_view: Option<ServoWebView> = None;
     let mut current_viewport_size: Option<ViewportSize> = None;
     let mut current_scale_factor: Option<f32> = None;
+    let (browser_event_sender, browser_event_receiver) = mpsc::channel::<BrowserEvent>();
 
     window
         .window()
@@ -105,6 +107,14 @@ fn connect_servo_runtime(
                     return;
                 };
 
+                let state_changed =
+                    apply_pending_browser_events(&controller, &browser_event_receiver);
+
+                if state_changed {
+                    let controller = controller.borrow();
+                    sync_ui(&window, controller.state());
+                }
+
                 let Some(rendering_context) = rendering_context.as_ref() else {
                     return;
                 };
@@ -143,6 +153,7 @@ fn connect_servo_runtime(
                         Rc::clone(rendering_context),
                         INITIAL_URL,
                         scale_factor,
+                        browser_event_sender.clone(),
                     ) {
                         Ok(created_web_view) => {
                             web_view = Some(created_web_view);
@@ -187,6 +198,21 @@ fn connect_servo_runtime(
             }
             _ => {}
         })
+}
+
+fn apply_pending_browser_events(
+    controller: &RefCell<BrowserController>,
+    receiver: &Receiver<BrowserEvent>,
+) -> bool {
+    let mut state_changed = false;
+    let mut controller = controller.borrow_mut();
+
+    for event in receiver.try_iter() {
+        controller.handle_event(event);
+        state_changed = true;
+    }
+
+    state_changed
 }
 
 fn dispatch_pending_commands(
@@ -296,4 +322,38 @@ fn connect_ui_callbacks(window: &MainWindow, controller: Rc<RefCell<BrowserContr
             window.window().request_redraw();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_browser_events_are_applied_in_order() {
+        let controller = RefCell::new(BrowserController::default());
+        let (sender, receiver) = mpsc::channel();
+
+        sender
+            .send(BrowserEvent::AddressChanged {
+                url: "https://example.com".to_owned(),
+            })
+            .expect("the event receiver should be connected");
+        sender
+            .send(BrowserEvent::PageTitleChanged {
+                title: Some("Example Domain".to_owned()),
+            })
+            .expect("the event receiver should be connected");
+
+        assert!(apply_pending_browser_events(&controller, &receiver));
+        assert_eq!(controller.borrow().state().url(), "https://example.com");
+        assert_eq!(controller.borrow().state().page_title(), "Example Domain");
+    }
+
+    #[test]
+    fn empty_browser_event_channel_does_not_report_a_state_change() {
+        let controller = RefCell::new(BrowserController::default());
+        let (_sender, receiver) = mpsc::channel();
+
+        assert!(!apply_pending_browser_events(&controller, &receiver));
+    }
 }
