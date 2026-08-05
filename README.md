@@ -13,6 +13,12 @@
 </p>
 
 <p align="center">
+  <a href="https://kaykcaputo.github.io/hermes-browser/"><strong>Documentation</strong></a>
+  ·
+  <a href="https://github.com/KaykCaputo/hermes-browser/releases"><strong>Releases</strong></a>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/hermes-new-tab.png" width="100%" alt="Hermes Browser new tab page">
 </p>
 
@@ -148,6 +154,8 @@ make run RUST_LOG="talaria_servo=debug,servo=warn"
 ## Documentation
 
 Hermes keeps user and developer documentation together in one searchable MkDocs site:
+
+**Read the documentation at [kaykcaputo.github.io/hermes-browser](https://kaykcaputo.github.io/hermes-browser/).**
 
 - the **User Guide** covers installation, everyday browsing, media support, privacy, security, and troubleshooting;
 - the **Developer Guide** covers setup, architecture, Servo integration, testing, dependency patches, releases, and contributions.
