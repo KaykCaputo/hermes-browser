@@ -1,0 +1,100 @@
+site_name: Hermes Browser
+site_description: User and developer documentation for the Hermes Browser technical preview.
+site_author: Kayk Caputo
+site_url: https://kaykcaputo.github.io/hermes-browser/
+copyright: Copyright (c) 2026 Kayk Caputo
+
+repo_name: KaykCaputo/hermes-browser
+repo_url: https://github.com/KaykCaputo/hermes-browser
+edit_uri: edit/master/docs/
+
+docs_dir: docs
+site_dir: target/mkdocs
+
+theme:
+  name: material
+  language: en
+  icon:
+    logo: material/shoe-sneaker
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - content.action.edit
+    - content.code.copy
+    - content.tabs.link
+    - search.suggest
+    - search.share
+    - search.highlight
+    - toc.follow
+
+plugins:
+  - search:
+      lang: en
+
+nav:
+  - Home: index.md
+  - User Guide:
+      - user-guide/index.md
+      - Install Hermes: user-guide/installation.md
+      - Start browsing: user-guide/getting-started.md
+      - Tabs and shortcuts: user-guide/browsing.md
+      - Media playback: user-guide/media.md
+      - Privacy and security: user-guide/privacy-and-security.md
+      - Troubleshooting: user-guide/troubleshooting.md
+  - Developer Guide:
+      - developer-guide/index.md
+      - Development setup: developer-guide/setup.md
+      - Architecture: developer-guide/architecture.md
+      - Servo integration: developer-guide/servo-integration.md
+      - Testing and quality: developer-guide/testing.md
+      - Vendored patches: developer-guide/vendored-patches.md
+      - Releases: developer-guide/releases.md
+      - Contributing: developer-guide/contributing.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - meta
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/KaykCaputo/hermes-browser

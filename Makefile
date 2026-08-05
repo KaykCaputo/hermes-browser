@@ -3,6 +3,8 @@ SHELL := /bin/sh
 .DEFAULT_GOAL := help
 
 CARGO ?= cargo
+MKDOCS ?= mkdocs
+PYTHON ?= python3
 RUSTUP ?= rustup
 STRIP ?= strip
 APP_PACKAGE ?= hermes-desktop
@@ -30,8 +32,11 @@ LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 	package-linux \
 	run \
 	run-release \
+	docs-install \
 	docs \
-	docs-open \
+	docs-serve \
+	rust-docs \
+	rust-docs-open \
 	tree \
 	clean
 
@@ -53,8 +58,11 @@ help:
 		'package-linux' 'Build and package the Linux x86-64 release.' \
 		'run' 'Run Hermes Desktop in debug mode.' \
 		'run-release' 'Run Hermes Desktop in release mode.' \
-		'docs' 'Build the workspace documentation.' \
-		'docs-open' 'Build and open the workspace documentation.' \
+		'docs-install' 'Install the MkDocs documentation dependencies.' \
+		'docs' 'Build the MkDocs site with strict validation.' \
+		'docs-serve' 'Serve the MkDocs site with live reload.' \
+		'rust-docs' 'Build the Rust API documentation.' \
+		'rust-docs-open' 'Build and open the Rust API documentation.' \
 		'tree' 'Display the dependency tree.' \
 		'clean' 'Remove Cargo build artifacts.'
 
@@ -157,10 +165,19 @@ run:
 run-release:
 	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)
 
+docs-install:
+	"$(PYTHON)" -m pip install -r docs/requirements.txt
+
 docs:
+	"$(MKDOCS)" build --strict
+
+docs-serve:
+	"$(MKDOCS)" serve
+
+rust-docs:
 	"$(CARGO)" doc --workspace --no-deps
 
-docs-open:
+rust-docs-open:
 	"$(CARGO)" doc --workspace --no-deps --open
 
 tree:

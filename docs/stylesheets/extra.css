@@ -1,0 +1,59 @@
+:root {
+  --hermes-warm: #ffb300;
+  --hermes-violet: #5e35b1;
+}
+
+.md-header,
+.md-tabs {
+  background: linear-gradient(110deg, #311b92, #5e35b1 58%, #7e57c2);
+}
+
+.hermes-hero {
+  margin: 1rem 0 2rem;
+  padding: clamp(1.5rem, 4vw, 3.5rem);
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--hermes-violet) 35%, transparent);
+  border-radius: 1.25rem;
+  background:
+    radial-gradient(circle at 88% 18%, rgba(255, 179, 0, 0.2), transparent 28%),
+    linear-gradient(135deg, rgba(94, 53, 177, 0.16), rgba(49, 27, 146, 0.04));
+}
+
+.hermes-hero h1 {
+  margin-bottom: 0.5rem;
+  font-size: clamp(2rem, 6vw, 3.6rem);
+  letter-spacing: -0.04em;
+}
+
+.hermes-hero p {
+  max-width: 44rem;
+  font-size: 1.05rem;
+}
+
+.hermes-hero .md-button {
+  margin-top: 0.5rem;
+  margin-right: 0.5rem;
+}
+
+.hermes-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.hermes-card {
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.8rem;
+  background: var(--md-default-bg-color);
+}
+
+.hermes-card h3 {
+  margin-top: 0;
+}
+
+.hermes-card p:last-child {
+  margin-bottom: 0;
+}
+

@@ -136,6 +136,7 @@ make build-release  # Build the optimized workspace
 make run            # Run the development build
 make run-release    # Run the optimized build
 make package-linux  # Create a Linux archive and checksum
+make docs           # Build and validate the documentation site
 ```
 
 Runtime logging can be customized without changing project files:
@@ -143,6 +144,35 @@ Runtime logging can be customized without changing project files:
 ```bash
 make run RUST_LOG="talaria_servo=debug,servo=warn"
 ```
+
+## Documentation
+
+Hermes keeps user and developer documentation together in one searchable MkDocs site:
+
+- the **User Guide** covers installation, everyday browsing, media support, privacy, security, and troubleshooting;
+- the **Developer Guide** covers setup, architecture, Servo integration, testing, dependency patches, releases, and contributions.
+
+Install the documentation toolchain in a Python virtual environment:
+
+```bash
+python3 -m venv .venv-docs
+source .venv-docs/bin/activate
+python -m pip install -r docs/requirements.txt
+```
+
+Preview the site locally with live reload:
+
+```bash
+make docs-serve
+```
+
+Build it with strict validation:
+
+```bash
+make docs
+```
+
+The complete documentation starts at [`docs/index.md`](docs/index.md). Rust API documentation remains available through `make rust-docs` and `make rust-docs-open`.
 
 ## Keyboard shortcuts
 
