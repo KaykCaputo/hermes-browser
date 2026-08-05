@@ -90,7 +90,9 @@ make setup
 make run
 ```
 
-`make install-linux-deps` currently supports Debian- and Ubuntu-based Linux distributions. Other distributions need equivalent compiler, Fontconfig, X11, Wayland, and `pkg-config` dependencies.
+`make install-linux-deps` currently supports Debian- and Ubuntu-based Linux distributions. Other distributions need equivalent compiler, Fontconfig, X11, Wayland, GStreamer development libraries, and the Base, Good, Bad, Ugly, and libav GStreamer plugin sets.
+
+On Linux, Hermes lets Mesa and DRM select the system's default GPU automatically and ignores an inherited `DRI_PRIME` override. No per-GPU launch configuration is required.
 
 For an optimized runtime build:
 
@@ -162,10 +164,10 @@ Manual workflow runs keep both packages as downloadable Actions artifacts withou
 
 ## Roadmap
 
-- Complete media playback through a production GStreamer backend
+- Package the native GStreamer runtime with Windows releases
 - Add permission prompts, downloads, native form controls, and site information
 - Persist sessions, history, bookmarks, cookies, and settings
-- Introduce multiprocess execution, sandboxing, and crash recovery
+- Introduce multiprocess execution, sandboxing, and crash recovery once Servo's embedded cross-process Paint path is usable
 - Add per-site content-blocking controls and cosmetic filtering
 - Suspend and discard tabs under memory pressure
 - Expand automated compatibility testing and upstream Servo contributions
@@ -176,8 +178,12 @@ Manual workflow runs keep both packages as downloadable Actions artifacts withou
 The current version is an engineering preview with known limitations:
 
 - Web compatibility follows Servo's current implementation maturity.
-- Multimedia playback does not yet use the production GStreamer backend.
-- The browser currently runs a single window without multiprocess site isolation.
+- Linux builds use Servo's production GStreamer backend for multimedia playback. Codec availability still depends on the installed GStreamer plugins.
+- Direct MP4/WebM playback is supported on Linux. YouTube remains incompatible: its current web player does not select its progressive fallback in this Servo revision, while its adaptive path requires Media Source Extensions (`MediaSource`/`SourceBuffer`), which the pinned Servo revision does not implement.
+- Windows builds still use Servo's fallback media backend until the release archive includes the native GStreamer runtime and plugins.
+- Web content currently runs in-process. Servo 0.4.0 can load pages in isolated
+  content processes, but its embedded cross-process Paint path does not yet
+  display their rendered content, so Hermes keeps that experimental path disabled.
 - Persistence, downloads, permission prompts, extensions, and private profiles are not implemented yet.
 - Background tabs are throttled but are not yet suspended or discarded.
 - Linux packages currently target x86-64, glibc 2.35 or newer, and compatible system libraries.
