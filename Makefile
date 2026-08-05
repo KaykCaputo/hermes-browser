@@ -11,7 +11,7 @@ APP_PACKAGE ?= hermes-desktop
 ARGS ?=
 RUST_LOG ?= talaria_servo=info,servo=warn
 DIST_DIR ?= dist
-PROJECT_VERSION ?= 0.1.0
+PROJECT_VERSION ?= 0.1.1
 LINUX_PACKAGE_NAME := hermes-browser-v$(PROJECT_VERSION)-linux-x86_64
 LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 

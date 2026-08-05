@@ -192,8 +192,8 @@ The complete documentation starts at [`docs/index.md`](docs/index.md). Rust API 
 Linux and Windows packages are built on native GitHub-hosted runners. Version tags create a GitHub Release automatically:
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.1
+git push origin v0.1.1
 ```
 
 The release workflow produces:
