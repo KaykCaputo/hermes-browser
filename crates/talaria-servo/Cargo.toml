@@ -18,5 +18,12 @@ surfman.workspace = true
 talaria-core = { path = "../talaria-core" }
 url.workspace = true
 
+# Servo defaults to a no-op media backend. Linux builds opt into the production
+# GStreamer backend so HTML audio/video, Web Audio, and WebRTC have a real media
+# pipeline. Other platforms keep their existing backend until their release
+# packages can ship the native GStreamer runtime alongside the executable.
+[target.'cfg(target_os = "linux")'.dependencies]
+servo = { workspace = true, features = ["media-gstreamer"] }
+
 [build-dependencies]
 adblock.workspace = true

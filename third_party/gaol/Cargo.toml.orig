@@ -1,0 +1,45 @@
+[package]
+name = "gaol"
+version = "0.2.1"
+authors = ["The Servo Project Developers"]
+license = "MIT/Apache-2.0"
+documentation = "https://docs.rs/gaol"
+repository = "https://github.com/servo/gaol"
+description = "OS-level application sandboxing library"
+
+[lib]
+name = "gaol"
+path = "lib.rs"
+
+[dependencies]
+libc = "0.2"
+log = "0.4"
+
+[dev-dependencies]
+rand = "0.7"
+
+[[test]]
+name = "file-read-all"
+path = "tests/file-read-all.rs"
+harness = false
+
+[[test]]
+name = "file-read-metadata"
+path = "tests/file-read-metadata.rs"
+harness = false
+
+[[test]]
+name = "forbidden-syscalls"
+path = "tests/forbidden-syscalls.rs"
+harness = false
+
+[[test]]
+name = "network-outbound"
+path = "tests/network-outbound.rs"
+harness = false
+
+[[test]]
+name = "system-info-read"
+path = "tests/system-info-read.rs"
+harness = false
+

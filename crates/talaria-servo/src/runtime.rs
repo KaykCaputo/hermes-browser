@@ -8,7 +8,9 @@ use std::time::Instant;
 use euclid::Scale;
 use log::info;
 use rustls::crypto::CryptoProvider;
-use servo::{LoadStatus, PixelFormat, Preferences, RenderingContext, ServoBuilder, WebViewBuilder};
+use servo::{
+    LoadStatus, Opts, PixelFormat, Preferences, RenderingContext, ServoBuilder, WebViewBuilder,
+};
 use talaria_core::{BrowserEvent, LoadState, PageIcon, TabEvent, TabId};
 use url::Url;
 
@@ -67,11 +69,27 @@ impl ServoRuntime {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
+        let options = hermes_options();
+        let multiprocess_enabled = options.multiprocess;
+        let sandbox_enabled = options.sandbox;
         let inner = ServoBuilder::default()
+            .opts(options)
             .preferences(hermes_preferences())
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
+        if multiprocess_enabled {
+            info!(
+                "Servo content process isolation enabled; operating-system sandbox {}",
+                if sandbox_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                }
+            );
+        } else {
+            info!("Servo single-process mode enabled; operating-system sandbox disabled");
+        }
         let content_blocker = Rc::new(ContentBlocker::new());
         inner.set_delegate(Rc::new(BrowserServoDelegate {
             content_blocker: Rc::clone(&content_blocker),
@@ -117,6 +135,20 @@ impl ServoRuntime {
     pub fn spin_event_loop(&self) {
         self.redraw_waker.acknowledge();
         self.inner.spin_event_loop();
+    }
+}
+
+fn hermes_options() -> Opts {
+    Opts {
+        // Servo 0.4.0 successfully runs script and networking in a child process,
+        // but its cross-process Paint path does not deliver the display list to
+        // this embedded RenderingContext. Pages finish loading and update their
+        // title while the WebView remains blank. Keep the content-process entry
+        // point and gaol compatibility fixes ready, but do not enable a mode that
+        // cannot display web content.
+        multiprocess: false,
+        sandbox: false,
+        ..Opts::default()
     }
 }
 
@@ -319,6 +351,18 @@ fn ensure_crypto_provider() {
 
 #[cfg(test)]
 mod tests {
+    use super::hermes_options;
+
+    #[test]
+    fn keeps_browsing_in_process_until_cross_process_paint_is_supported() {
+        assert!(!hermes_options().multiprocess);
+    }
+
+    #[test]
+    fn does_not_claim_an_os_sandbox_without_a_content_process() {
+        assert!(!hermes_options().sandbox);
+    }
+
     use super::*;
 
     #[test]

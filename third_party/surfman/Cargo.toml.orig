@@ -1,0 +1,141 @@
+[package]
+name = "surfman"
+license = "MIT OR Apache-2.0 OR MPL-2.0"
+edition = "2021"
+version = "0.13.0"
+authors = [
+    "Patrick Walton <pcwalton@mimiga.net>",
+    "Emilio Cobos Álvarez <emilio@crisal.io>",
+    "The Servo Project Developers",
+]
+description = "A cross-platform, low-level toolkit for GPU surface management"
+repository = "https://github.com/servo/surfman"
+build = "build.rs"
+readme = "README.md"
+
+[build-dependencies]
+gl_generator = "0.14"
+cfg_aliases = "0.2.1"
+
+[features]
+chains = ["fnv"]
+default = ["sm-raw-window-handle-06"]
+sm-angle = []
+sm-angle-builtin = ["mozangle"]
+sm-angle-default = ["sm-angle"]
+sm-no-wgl = ["sm-angle-default"]
+sm-test = []
+sm-wayland-default = []
+sm-x11 = ["x11-dl"]
+sm-raw-window-handle-generic = []
+sm-raw-window-handle-05 = ["dep:rwh_05"]
+sm-raw-window-handle-06 = ["dep:rwh_06"]
+
+[dependencies]
+bitflags = "2.6"
+euclid = "0.22"
+fnv = { version = "1.0", optional = true }
+libc = "0.2"
+log = "0.4"
+glow = "0.17"
+osmesa-sys = { version = "0.1", optional = true }
+rwh_05 = { package = "raw-window-handle", version = "0.5.2", features = [
+    "std",
+], optional = true }
+rwh_06 = { package = "raw-window-handle", version = "0.6.2", features = [
+    "std",
+], optional = true }
+
+[dev-dependencies]
+clap = "2"
+gl = "0.14"
+png = "0.17"
+rand = "0.8"
+winit = { version = "0.29.10", features = ["android-native-activity"] }
+serial_test = "3.1.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cgl = "0.3.2"
+objc2 = "0.6.1"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-quartz-core",
+    "objc2-core-foundation",
+    "NSResponder",
+    "NSScreen",
+    "NSView",
+    "NSGraphics",
+    "NSWindow",
+] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFBundle",
+    "CFCGTypes",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-core-video = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-graphics",
+    "CVBase",
+    "CVDisplayLink",
+    "CVPixelBuffer",
+    "CVReturn",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSEnumerator",
+    "NSGeometry",
+    "NSString",
+    "NSValue",
+] }
+objc2-io-surface = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "libc",
+    "objc2",
+    "objc2-core-foundation",
+    "IOSurfaceRef",
+    "IOSurfaceTypes",
+] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "MTLDevice",
+] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "CALayer",
+    "CATransaction",
+    "CATransform3D",
+] }
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_env = "ohos"))))'.dependencies.wayland-sys]
+version = "0.31"
+features = ["client", "dlopen", "egl"]
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android", target_env = "ohos"))))'.dependencies.x11-dl]
+version = "2.3.0"
+optional = true
+
+# Ensure that we have a static libEGL.lib present for linking with EGL bindings.
+[target.'cfg(target_os = "windows")'.dependencies.mozangle]
+version = "0.5.1"
+features = ["egl", "build_dlls"]
+optional = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wio = "0.2"
+winapi = { version = "0.3", features = [
+    "d3d11",
+    "libloaderapi",
+    "winbase",
+    "winerror",
+    "wingdi",
+    "winuser",
+] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+rwh_06 = { package = "raw-window-handle", version = "0.6" }

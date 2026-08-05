@@ -17,7 +17,7 @@ use talaria_core::{
 };
 use talaria_servo::{
     EventLoopWaker, NEW_TAB_URL, ServoRuntime, ServoWebView, ServoWebViewError,
-    SharedOpenGlContext, ViewportSize,
+    SharedOpenGlContext, ViewportSize, run_content_process_if_requested,
 };
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::keyboard::{Key, KeyLocation as WinitKeyLocation, ModifiersState, PhysicalKey};
@@ -25,6 +25,11 @@ use winit::keyboard::{Key, KeyLocation as WinitKeyLocation, ModifiersState, Phys
 const MAX_COMMANDS_PER_FRAME: usize = 128;
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if run_content_process_if_requested()? {
+        return Ok(());
+    }
+
+    use_automatic_gpu_selection();
     select_hardware_accelerated_backend()?;
 
     let window = MainWindow::new()?;
@@ -46,6 +51,21 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     window.run()?;
     Ok(())
+}
+
+fn use_automatic_gpu_selection() {
+    #[cfg(target_os = "linux")]
+    {
+        // DRI_PRIME is a manual Mesa device override. Inheriting a stale value
+        // such as `1` on a single-GPU machine causes every GL context to try a
+        // nonexistent second device before falling back to the default GPU.
+        //
+        // SAFETY: This is the first operation in main, before Slint, Servo, or
+        // GStreamer can create worker threads or read the process environment.
+        unsafe {
+            std::env::remove_var("DRI_PRIME");
+        }
+    }
 }
 
 fn select_hardware_accelerated_backend() -> Result<(), slint::platform::PlatformError> {

@@ -90,10 +90,20 @@ install-linux-deps:
 		build-essential \
 		pkg-config \
 		libfontconfig1-dev \
+		libgstreamer1.0-dev \
+		libgstreamer-plugins-base1.0-dev \
+		libgstreamer-plugins-bad1.0-dev \
 		libx11-dev \
 		libx11-xcb-dev \
 		libxcursor-dev \
 		libxkbcommon-x11-dev \
+		gstreamer1.0-libav \
+		gstreamer1.0-plugins-bad \
+		gstreamer1.0-plugins-base \
+		gstreamer1.0-plugins-good \
+		gstreamer1.0-tools \
+		gstreamer1.0-plugins-ugly \
+		gstreamer1.0-pulseaudio \
 		xinput
 
 fetch:
@@ -118,6 +128,8 @@ lint:
 
 test:
 	"$(CARGO)" test --workspace
+	"$(CARGO)" test --target-dir target --manifest-path third_party/gaol/Cargo.toml --test shared-memory
+	"$(CARGO)" test --package servo-media-gstreamer --lib
 
 qa:
 	"$(MAKE)" fmt-check

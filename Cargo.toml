@@ -6,6 +6,7 @@ members = [
     "crates/talaria-core",
     "crates/talaria-servo",
 ]
+exclude = ["third_party/gaol"]
 
 [workspace.package]
 version = "0.1.0"
@@ -32,6 +33,13 @@ slint = { version = "~1.17.1", default-features = false, features = [
 slint-build = "~1.17.1"
 surfman = "0.13"
 url = "2.5"
+
+# Keep the GStreamer backend on Servo 0.4.0 while carrying focused compatibility
+# and lifecycle fixes. See third_party/servo-media-gstreamer/README.md.
+[patch.crates-io]
+gaol = { path = "third_party/gaol" }
+servo-media-gstreamer = { path = "third_party/servo-media-gstreamer" }
+surfman = { path = "third_party/surfman" }
 
 # Keep Hermes crates easy to debug while optimizing the browser-engine hotspots used at runtime.
 # Targeting the complete dependency graph would also rebuild large native build tools such as
