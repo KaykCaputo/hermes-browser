@@ -14,21 +14,22 @@ site_dir: target/mkdocs
 theme:
   name: material
   language: en
+  logo: assets/hermes-browser.svg
+  favicon: assets/hermes-browser.svg
   icon:
-    logo: material/shoe-sneaker
     repo: fontawesome/brands/github
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
-      primary: deep purple
-      accent: amber
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
-      primary: deep purple
-      accent: amber
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
