@@ -1,0 +1,117 @@
+name: Continuous integration
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  test-linux:
+    name: Linux quality checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      CLANG_PATH: /usr/bin/clang-14
+      LIBCLANG_PATH: /usr/lib/llvm-14/lib
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Free disk space for Servo
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          df -h /
+          sudo rm -rf \
+            /opt/ghc \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          sudo apt-get clean
+          df -h /
+
+      - name: Install Rust
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rustup update stable
+          rustup default stable
+          rustup component add clippy rustfmt
+
+          rustc --version
+          cargo --version
+
+      - name: Install Linux and GStreamer dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install --yes \
+            build-essential \
+            clang-14 \
+            cmake \
+            gstreamer1.0-libav \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-pulseaudio \
+            libclang-14-dev \
+            libfontconfig1-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcursor-dev \
+            libxkbcommon-x11-dev \
+            ninja-build \
+            pkg-config \
+            xinput
+
+          test -x "${CLANG_PATH}"
+          test -e "${LIBCLANG_PATH}/libclang.so"
+          "${CLANG_PATH}" --version
+
+          pkg-config --atleast-version=1.18 gstreamer-1.0
+          pkg-config --atleast-version=1.18 gstreamer-app-1.0
+          pkg-config --atleast-version=1.18 gstreamer-audio-1.0
+          pkg-config --atleast-version=1.18 gstreamer-video-1.0
+          pkg-config --atleast-version=1.18 gstreamer-webrtc-1.0
+          gst-inspect-1.0 playbin3 >/dev/null
+          gst-inspect-1.0 autoaudiosink >/dev/null
+          gst-inspect-1.0 avdec_h264 >/dev/null
+
+      - name: Run formatting, lint, and tests
+        shell: bash
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/hermes-ci-target
+        run: |
+          set -euo pipefail
+
+          make fmt-check
+          cargo clippy \
+            --locked \
+            --workspace \
+            --all-targets \
+            --all-features \
+            -- \
+            -D warnings
+          cargo test --locked --workspace
+          cargo test --locked --package servo-media-gstreamer --lib

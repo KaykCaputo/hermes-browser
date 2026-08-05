@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
 
       - name: Free disk space for Servo
         shell: bash
@@ -75,8 +75,18 @@ jobs:
             build-essential \
             clang-14 \
             cmake \
+            gstreamer1.0-libav \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-pulseaudio \
             libclang-14-dev \
             libfontconfig1-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-bad1.0-dev \
             libx11-dev \
             libx11-xcb-dev \
             libxcursor-dev \
@@ -88,6 +98,15 @@ jobs:
           test -x "${CLANG_PATH}"
           test -e "${LIBCLANG_PATH}/libclang.so"
           "${CLANG_PATH}" --version
+
+          pkg-config --atleast-version=1.18 gstreamer-1.0
+          pkg-config --atleast-version=1.18 gstreamer-app-1.0
+          pkg-config --atleast-version=1.18 gstreamer-audio-1.0
+          pkg-config --atleast-version=1.18 gstreamer-video-1.0
+          pkg-config --atleast-version=1.18 gstreamer-webrtc-1.0
+          gst-inspect-1.0 playbin3 >/dev/null
+          gst-inspect-1.0 autoaudiosink >/dev/null
+          gst-inspect-1.0 avdec_h264 >/dev/null
 
       - name: Run quality checks
         shell: bash
@@ -217,7 +236,7 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v6
 
       - name: Install Rust
         shell: pwsh
