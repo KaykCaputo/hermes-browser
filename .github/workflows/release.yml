@@ -71,6 +71,11 @@ jobs:
           set -euo pipefail
 
           sudo apt-get update
+
+          # GitHub's Ubuntu 22.04 image preinstalls LLVM's libunwind 14,
+          # which conflicts with the GNU libunwind required by GStreamer.
+          sudo apt-get remove --yes libunwind-14-dev
+
           sudo apt-get install --yes \
             build-essential \
             clang-14 \
@@ -87,6 +92,7 @@ jobs:
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev \
+            libunwind-dev \
             libx11-dev \
             libx11-xcb-dev \
             libxcursor-dev \
