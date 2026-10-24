@@ -103,6 +103,7 @@ fn resource_type(destination: Destination) -> &'static str {
         | Destination::PaintWorklet
         | Destination::ServiceWorker
         | Destination::SharedWorker
+        | Destination::Text
         | Destination::Worker => "script",
         Destination::Style => "stylesheet",
         Destination::Report => "csp_report",

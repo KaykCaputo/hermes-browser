@@ -1,6 +1,7 @@
 //! A thread-local handle to the device.
 
 use super::connection::Connection;
+use super::context::NativeContext;
 use crate::base::egl::context::{self, CurrentContextGuard};
 use crate::base::egl::device::EGL_FUNCTIONS;
 use crate::base::egl::error::ToWindowingApiError;
@@ -9,7 +10,7 @@ use crate::context::{ContextID, CREATE_CONTEXT_MUTEX};
 use crate::egl::types::{EGLConfig, EGLDisplay, EGLint};
 use crate::hardware_buffer::surface::SurfaceObjects;
 use crate::surface::Framebuffer;
-use crate::{egl, ContextDescriptor, NativeContext, Surface};
+use crate::{egl, ContextDescriptor, Surface};
 use crate::{Context, ContextAttributes, Error, GLApi, Gl, SurfaceInfo};
 use euclid::default::Size2D;
 use glow::HasContext;
@@ -344,7 +345,7 @@ impl Device {
         };
 
         match mem::replace(&mut context.framebuffer, Framebuffer::None) {
-            Framebuffer::Surface(surface) => return Ok(Some(surface)),
+            Framebuffer::Surface(surface) => Ok(Some(surface)),
             Framebuffer::External { .. } | Framebuffer::None => unreachable!(),
         }
     }

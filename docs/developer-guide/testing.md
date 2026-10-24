@@ -13,7 +13,7 @@ Hermes uses small deterministic tests for browser policy and adapter translation
 make qa
 ```
 
-This runs formatting checks, Clippy with warnings denied, workspace tests, the vendored `gaol` shared-memory regression test, and the `servo-media-gstreamer` library tests.
+This runs formatting checks, Clippy with warnings denied, workspace tests, and the vendored `gaol` shared-memory regression test.
 
 Run stages separately while iterating:
 

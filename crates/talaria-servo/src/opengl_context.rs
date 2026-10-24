@@ -1,13 +1,4 @@
-use std::cell::Cell;
-use std::ffi::{CStr, CString, c_void};
-use std::ptr;
-use std::rc::Rc;
-use std::sync::Arc;
-
-use dpi::{LogicalSize, PhysicalSize};
-use gleam::gl::{self, Gl};
-use glow::HasContext as _;
-use servo::{DeviceIntRect, RenderingContext, RgbaImage};
+use dpi::LogicalSize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ViewportSize {
@@ -32,9 +23,7 @@ impl ViewportSize {
         }
 
         let logical_size = LogicalSize::new(f64::from(width), f64::from(height));
-
         let physical_size = logical_size.to_physical::<u32>(f64::from(scale_factor));
-
         Self::new(physical_size.width, physical_size.height)
     }
 
@@ -45,91 +34,24 @@ impl ViewportSize {
     pub fn height(self) -> u32 {
         self.height
     }
-
-    fn physical_size(self) -> PhysicalSize<u32> {
-        PhysicalSize::new(self.width, self.height)
-    }
 }
 
-pub struct SharedOpenGlContext {
-    size: Cell<ViewportSize>,
-    gleam_gl: Rc<dyn Gl>,
-    glow_gl: Arc<glow::Context>,
-    connection: surfman::Connection,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl SharedOpenGlContext {
-    /// Creates a rendering context from the OpenGL context currently owned by the embedder.
-    /// # Safety
-    /// `get_proc_address` must return function pointers for the OpenGL context that is current on
-    /// this thread. That context must remain alive while this `SharedOpenGlContext` exists, and
-    /// every Servo rendering operation must run while the same context is current.
-    pub unsafe fn new(
-        size: ViewportSize,
-        get_proc_address: &dyn Fn(&CStr) -> *const c_void,
-    ) -> Result<Self, surfman::Error> {
-        let connection = surfman::Connection::new()?;
-        let glow_gl = Arc::new(unsafe {
-            glow::Context::from_loader_function_cstr(|symbol| get_proc_address(symbol))
-        });
-
-        let gleam_gl: Rc<dyn Gl> = if glow_gl.version().is_embedded {
-            unsafe { gl::GlesFns::load_with(|symbol| load_symbol(get_proc_address, symbol)) }
-        } else {
-            unsafe { gl::GlFns::load_with(|symbol| load_symbol(get_proc_address, symbol)) }
-        };
-
-        Ok(Self {
-            size: Cell::new(size),
-            gleam_gl,
-            glow_gl,
-            connection,
-        })
+    #[test]
+    fn rejects_empty_or_invalid_viewports() {
+        assert_eq!(ViewportSize::new(0, 10), None);
+        assert_eq!(ViewportSize::from_logical(f32::NAN, 10.0, 1.0), None);
+        assert_eq!(ViewportSize::from_logical(10.0, 10.0, 0.0), None);
     }
 
-    pub fn resize(&self, size: ViewportSize) {
-        self.size.set(size);
+    #[test]
+    fn converts_logical_dimensions_to_physical_pixels() {
+        assert_eq!(
+            ViewportSize::from_logical(640.0, 360.0, 1.5),
+            ViewportSize::new(960, 540)
+        );
     }
-}
-
-impl RenderingContext for SharedOpenGlContext {
-    fn read_to_image(&self, _source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
-        None
-    }
-
-    fn size(&self) -> PhysicalSize<u32> {
-        self.size.get().physical_size()
-    }
-
-    fn resize(&self, size: PhysicalSize<u32>) {
-        if let Some(size) = ViewportSize::new(size.width, size.height) {
-            SharedOpenGlContext::resize(self, size);
-        }
-    }
-
-    fn present(&self) {}
-
-    fn make_current(&self) -> Result<(), surfman::Error> {
-        Ok(())
-    }
-
-    fn gleam_gl_api(&self) -> Rc<dyn Gl> {
-        Rc::clone(&self.gleam_gl)
-    }
-
-    fn glow_gl_api(&self) -> Arc<glow::Context> {
-        Arc::clone(&self.glow_gl)
-    }
-
-    fn connection(&self) -> Option<surfman::Connection> {
-        Some(self.connection.clone())
-    }
-}
-
-fn load_symbol(get_proc_address: &dyn Fn(&CStr) -> *const c_void, symbol: &str) -> *const c_void {
-    let Ok(symbol) = CString::new(symbol) else {
-        return ptr::null();
-    };
-
-    get_proc_address(&symbol)
 }

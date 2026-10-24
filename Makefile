@@ -11,7 +11,7 @@ APP_PACKAGE ?= hermes-desktop
 ARGS ?=
 RUST_LOG ?= talaria_servo=info,servo=warn
 DIST_DIR ?= dist
-PROJECT_VERSION ?= 0.1.1
+PROJECT_VERSION ?= 0.1.2
 LINUX_PACKAGE_NAME := hermes-browser-v$(PROJECT_VERSION)-linux-x86_64
 LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 
@@ -31,6 +31,7 @@ LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 	build-release \
 	package-linux \
 	run \
+	run-debug \
 	run-release \
 	docs-install \
 	docs \
@@ -56,8 +57,9 @@ help:
 		'build' 'Build the complete workspace in debug mode.' \
 		'build-release' 'Build the complete workspace in release mode.' \
 		'package-linux' 'Build and package the Linux x86-64 release.' \
-		'run' 'Run Hermes Desktop in debug mode.' \
-		'run-release' 'Run Hermes Desktop in release mode.' \
+		'run' 'Run the optimized Hermes Desktop build.' \
+		'run-debug' 'Run Hermes Desktop with development debug information.' \
+		'run-release' 'Alias for the optimized run target.' \
 		'docs-install' 'Install the MkDocs documentation dependencies.' \
 		'docs' 'Build the MkDocs site with strict validation.' \
 		'docs-serve' 'Serve the MkDocs site with live reload.' \
@@ -137,7 +139,6 @@ lint:
 test:
 	"$(CARGO)" test --workspace
 	"$(CARGO)" test --target-dir target --manifest-path third_party/gaol/Cargo.toml --test shared-memory
-	"$(CARGO)" test --package servo-media-gstreamer --lib
 
 qa:
 	"$(MAKE)" fmt-check
@@ -160,10 +161,12 @@ package-linux: build-release
 	cd "$(DIST_DIR)" && sha256sum "$(LINUX_ARCHIVE)" > "$(LINUX_ARCHIVE).sha256"
 
 run:
+	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)
+
+run-debug:
 	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" -- $(ARGS)
 
-run-release:
-	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)
+run-release: run
 
 docs-install:
 	"$(PYTHON)" -m pip install -r docs/requirements.txt

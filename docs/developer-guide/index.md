@@ -24,7 +24,7 @@ The codebase is small enough to read, but the engine underneath it is not. This 
 | `apps/hermes-desktop` | Desktop lifecycle, Slint callbacks, the native event loop, and runtime composition |
 | `crates/hermes-ui` | Slint components and UI-facing presentation types |
 | `crates/talaria-core` | Engine-independent browser state, commands, events, tabs, and address resolution |
-| `crates/talaria-servo` | Servo WebViews, OpenGL integration, media selection, metrics, and content blocking |
+| `crates/talaria-servo` | Servo WebViews, browser events, media selection, metrics, and content blocking |
 | `third_party` | Focused compatibility patches for dependencies pinned by Servo |
 | `docs` | This MkDocs site and its screenshots |
 
@@ -38,5 +38,4 @@ The codebase is small enough to read, but the engine underneath it is not. This 
 
 ## Current engineering constraint
 
-The normal runtime is intentionally single-process. Servo's isolated content process can load a document, but Servo 0.4.0's embedded cross-process Paint path does not display it in Hermes' `RenderingContext`. Do not enable multiprocess mode merely because the child process starts successfully; visible rendering is part of the acceptance criteria.
-
+The normal runtime enables Servo 0.7.0 content-process isolation. Navigation, rendering, input, audio, and video have been validated across that boundary. The independent operating-system sandbox remains disabled because the Linux `gaol` path is not yet reliable enough for a release.

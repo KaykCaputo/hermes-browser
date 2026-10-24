@@ -458,7 +458,7 @@ impl<Device: DeviceAPI> SwapChainData<Device> {
             .pending_surface
             .take()
             .into_iter()
-            .chain(self.back_buffer.take_surface(device, context).into_iter())
+            .chain(self.back_buffer.take_surface(device, context))
             .chain(self.recycled_surfaces.drain(..));
         for mut surface in surfaces {
             device.destroy_surface(context, &mut surface)?;
@@ -705,7 +705,7 @@ where
         };
         self.ids()
             .entry(device.context_id(context))
-            .or_insert_with(Default::default)
+            .or_default()
             .insert(id);
         Ok(())
     }
@@ -731,7 +731,7 @@ where
         };
         self.ids()
             .entry(device.context_id(context))
-            .or_insert_with(Default::default)
+            .or_default()
             .insert(id);
         Ok(())
     }

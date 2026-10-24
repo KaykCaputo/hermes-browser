@@ -26,7 +26,7 @@
 > Hermes is an early technical preview. It is ready for experimentation and development, but not yet for daily use or sensitive browsing.
 
 > [!WARNING]
-> Web content currently runs in the main browser process without operating-system sandboxing. Servo 0.4.0 can start isolated content processes, but its embedded cross-process Paint path does not display their rendered output yet. Hermes keeps that path disabled until it can render pages reliably.
+> Web content runs in isolated Servo content processes, but those processes do not yet have operating-system sandbox restrictions. Treat this release as a technical preview and avoid sensitive browsing until the Linux sandbox path is reliable.
 
 ## A lighter path to the web
 
@@ -53,7 +53,7 @@ Hermes takes its name from the Greek messenger associated with speed and travel.
 ## Highlights
 
 - **Servo-powered browsing** — modern web content through an embeddable Rust engine
-- **GPU-accelerated experience** — WebRender, Vello Canvas 2D, and a native OpenGL interface
+- **GPU-accelerated experience** — WebRender and Vello Canvas 2D rendered offscreen, then composed by Slint through WGPU
 - **Native Linux multimedia** — HTML audio, video, Web Audio, and WebRTC through GStreamer
 - **Native content blocking** — ads and trackers are intercepted before network resources are loaded
 - **Responsive tabs** — one dedicated Servo WebView per tab with background throttling
@@ -84,19 +84,18 @@ Servo Web Engine
 | `apps/hermes-desktop` | Application lifecycle, desktop window, and runtime composition |
 | `crates/hermes-ui` | Native Slint interface and presentation types |
 | `crates/talaria-core` | Tabs, browser state, commands, events, and navigation policies |
-| `crates/talaria-servo` | Servo integration, OpenGL rendering, Linux multimedia, metrics, and content blocking |
+| `crates/talaria-servo` | Servo WebViews, browser events, Linux multimedia, metrics, and content blocking |
 
 The browser core can be tested with fake WebViews without starting Servo. UI code remains independent from Servo's internal types, keeping the product easier to evolve and the engine easier to upgrade.
 
 ### Runtime compatibility patches
 
-Hermes currently carries focused patches for three dependencies used by Servo 0.4.0:
+Hermes currently carries focused patches for two dependencies used by Servo 0.7.0:
 
 - `gaol`, to support current Linux system calls and allow Servo's shared-memory IPC regions to be sized correctly;
-- `servo-media-gstreamer`, for codec detection, portable Linux video frames, Web Audio, and media lifecycle fixes;
 - `surfman`, to avoid process-global GPU selection through `DRI_PRIME`.
 
-Each vendored directory documents why the patch exists and when it can be removed. These patches prepare the isolated content-process path, but do not enable it while cross-process rendering remains broken.
+Each vendored directory documents why the patch exists and when it can be removed. The patches make Servo content-process isolation usable on current Linux systems; operating-system sandbox enforcement remains disabled until its `gaol` path is reliable.
 
 ## Quick start
 
@@ -114,10 +113,11 @@ make run
 
 On Linux, Hermes lets Mesa and DRM select the system's default GPU automatically and ignores an inherited `DRI_PRIME` override. No per-GPU launch configuration is required. Multimedia support depends on the GStreamer plugins installed by `make install-linux-deps`.
 
-For an optimized runtime build:
+`make run` uses the optimized profile because real-world pages and media are not representative in
+an unoptimized browser-engine build. For a development build with full debug information:
 
 ```bash
-make run-release
+make run-debug
 ```
 
 ### Windows
@@ -139,8 +139,9 @@ make test           # Run the complete test suite
 make qa             # Formatting, Clippy, and tests
 make build          # Build the debug workspace
 make build-release  # Build the optimized workspace
-make run            # Run the development build
-make run-release    # Run the optimized build
+make run            # Run the optimized browser
+make run-debug      # Run the development build with debug information
+make run-release    # Alias for the optimized browser
 make package-linux  # Create a Linux archive and checksum
 make docs           # Build and validate the documentation site
 ```
@@ -200,8 +201,8 @@ The complete documentation starts at [`docs/index.md`](docs/index.md). Rust API 
 Linux and Windows packages are built on native GitHub-hosted runners. Version tags create a GitHub Release automatically:
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 The release workflow produces:
@@ -219,7 +220,7 @@ Manual workflow runs keep both packages as downloadable Actions artifacts withou
 - Package the native GStreamer runtime with Windows releases
 - Add permission prompts, downloads, native form controls, and site information
 - Persist sessions, history, bookmarks, cookies, and settings
-- Introduce multiprocess execution, sandboxing, and crash recovery once Servo's embedded cross-process Paint path is usable
+- Add operating-system sandbox enforcement and content-process crash recovery once Servo's Linux `gaol` path is reliable
 - Add per-site content-blocking controls and cosmetic filtering
 - Suspend and discard tabs under memory pressure
 - Expand automated compatibility testing and upstream Servo contributions
@@ -231,9 +232,9 @@ The current version is an engineering preview with known limitations:
 
 - Web compatibility follows Servo's current implementation maturity.
 - Linux builds use Servo's production GStreamer backend for multimedia playback. Codec availability still depends on the installed GStreamer plugins.
-- Direct MP4/WebM playback is supported on Linux. YouTube remains incompatible: its current web player does not select its progressive fallback in this Servo revision, while its adaptive path requires Media Source Extensions (`MediaSource`/`SourceBuffer`), which the pinned Servo revision does not implement.
+- Direct MP4/WebM playback and YouTube playback are supported on Linux when the required GStreamer plugins are installed. Website and codec compatibility still follows Servo and the host media stack.
 - Windows builds still use Servo's fallback media backend until the release archive includes the native GStreamer runtime and plugins.
-- Web content currently runs in-process without operating-system sandboxing. Servo 0.4.0 can load pages in isolated content processes, but its embedded cross-process Paint path does not yet display their rendered content, so Hermes keeps that experimental path disabled.
+- Web content runs in isolated Servo content processes, but those child processes currently run without operating-system sandbox restrictions.
 - Persistence, downloads, permission prompts, extensions, and private profiles are not implemented yet.
 - Background tabs are throttled but are not yet suspended or discarded.
 - Linux packages currently target x86-64, glibc 2.35 or newer, and compatible system libraries.

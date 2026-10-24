@@ -1,6 +1,6 @@
-# Patched surfman 0.13.0
+# Patched surfman 0.14.0
 
-This directory vendors `surfman` 0.13.0 under its original MIT, Apache-2.0,
+This directory vendors `surfman` 0.14.0 under its original MIT, Apache-2.0,
 and MPL-2.0 licenses.
 
 Hermes uses Mesa's default hardware adapter on Linux instead of implementing

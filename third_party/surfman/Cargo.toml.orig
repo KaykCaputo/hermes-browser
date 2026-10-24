@@ -2,7 +2,7 @@
 name = "surfman"
 license = "MIT OR Apache-2.0 OR MPL-2.0"
 edition = "2021"
-version = "0.13.0"
+version = "0.14.0"
 authors = [
     "Patrick Walton <pcwalton@mimiga.net>",
     "Emilio Cobos Álvarez <emilio@crisal.io>",
@@ -18,8 +18,6 @@ gl_generator = "0.14"
 cfg_aliases = "0.2.1"
 
 [features]
-chains = ["fnv"]
-default = ["sm-raw-window-handle-06"]
 sm-angle = []
 sm-angle-builtin = ["mozangle"]
 sm-angle-default = ["sm-angle"]
@@ -27,24 +25,16 @@ sm-no-wgl = ["sm-angle-default"]
 sm-test = []
 sm-wayland-default = []
 sm-x11 = ["x11-dl"]
-sm-raw-window-handle-generic = []
-sm-raw-window-handle-05 = ["dep:rwh_05"]
-sm-raw-window-handle-06 = ["dep:rwh_06"]
 
 [dependencies]
 bitflags = "2.6"
 euclid = "0.22"
-fnv = { version = "1.0", optional = true }
+fnv = { version = "1.0" }
 libc = "0.2"
 log = "0.4"
 glow = "0.17"
 osmesa-sys = { version = "0.1", optional = true }
-rwh_05 = { package = "raw-window-handle", version = "0.5.2", features = [
-    "std",
-], optional = true }
-rwh_06 = { package = "raw-window-handle", version = "0.6.2", features = [
-    "std",
-], optional = true }
+raw-window-handle = { version = "0.6.2", features = [ "std" ] }
 
 [dev-dependencies]
 clap = "2"
@@ -138,4 +128,4 @@ winapi = { version = "0.3", features = [
 ] }
 
 [target.'cfg(target_os = "android")'.dependencies]
-rwh_06 = { package = "raw-window-handle", version = "0.6" }
+raw-window-handle = { version = "0.6" }

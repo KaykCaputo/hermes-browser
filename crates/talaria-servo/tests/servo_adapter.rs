@@ -2,11 +2,9 @@ use std::error::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use servo::{EventLoopWaker as ServoEventLoopWaker, RenderingContext};
+use servo::EventLoopWaker as ServoEventLoopWaker;
 use talaria_core::WebView;
-use talaria_servo::{
-    EventLoopWaker, ServoWebView, ServoWebViewError, SharedOpenGlContext, ViewportSize,
-};
+use talaria_servo::{EventLoopWaker, ServoWebView, ServoWebViewError, ViewportSize};
 use url::Url;
 
 fn invalid_url_error() -> ServoWebViewError {
@@ -91,13 +89,6 @@ fn viewport_size_rejects_invalid_logical_dimensions_and_scale_factors() {
     assert_eq!(ViewportSize::from_logical(f32::NAN, 600.0, 1.0), None);
     assert_eq!(ViewportSize::from_logical(800.0, f32::INFINITY, 1.0), None);
     assert_eq!(ViewportSize::from_logical(800.0, 600.0, f32::NAN), None);
-}
-
-#[test]
-fn shared_opengl_context_implements_the_servo_rendering_contract() {
-    fn assert_rendering_context<T: RenderingContext>() {}
-
-    assert_rendering_context::<SharedOpenGlContext>();
 }
 
 #[test]

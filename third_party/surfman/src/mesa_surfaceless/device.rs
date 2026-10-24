@@ -40,7 +40,7 @@ pub enum Adapter {
 impl Adapter {
     #[inline]
     pub(crate) fn hardware() -> Adapter {
-        // Let Mesa select the system's default adapter. HardwarePrime used to
+        // Let Mesa select the system's default adapter. HardwarePrime would
         // implement this preference by writing DRI_PRIME=1 into the process
         // environment immediately before every context creation. Apart from
         // assuming that a second GPU exists, that global mutation races with

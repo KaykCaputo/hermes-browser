@@ -5,7 +5,19 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+ash.workspace = true
+dpi.workspace = true
+euclid.workspace = true
+gleam.workspace = true
+glow.workspace = true
 hermes-ui = { path = "../../crates/hermes-ui" }
+log.workspace = true
+servo.workspace = true
 slint.workspace = true
+surfman.workspace = true
 talaria-core = { path = "../../crates/talaria-core" }
 talaria-servo = { path = "../../crates/talaria-servo" }
+thiserror.workspace = true
+
+[build-dependencies]
+gl_generator = "0.14"

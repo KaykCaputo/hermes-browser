@@ -11,8 +11,8 @@ impl FrameReadySignal {
         self.ready.set(true);
     }
 
-    pub(crate) fn has_frame(&self) -> bool {
-        self.ready.get()
+    pub(crate) fn take_ready(&self) -> bool {
+        self.ready.replace(false)
     }
 }
 
@@ -27,7 +27,7 @@ mod tests {
 
         cloned_signal.mark_ready();
 
-        assert!(signal.has_frame());
-        assert!(cloned_signal.has_frame());
+        assert!(signal.take_ready());
+        assert!(!cloned_signal.take_ready());
     }
 }

@@ -31,13 +31,11 @@ unsafe impl Send for Connection {}
 pub(crate) struct NativeConnectionWrapper {
     pub(crate) xlib: Xlib,
     pub(crate) egl_display: EGLDisplay,
-    /// Whether or not this [`NativeConnectionWrapper`] created its [`EGLDisplay`].
-    /// If true, the `Drop` handler is reponsible for cleaning it up.
-    egl_display_is_owned: bool,
     x11_display: *mut Display,
     /// Whether or not this [`NativeConnectionWrapper`] created its X11 [`Display`].
-    /// If true, the `Drop` handler is reponsible for cleaning it up.
-    x11_display_is_owned: bool,
+    /// If true, the `Drop` handler is responsible for cleaning up both the X11
+    /// and [`EGLDisplay`].
+    is_owned: bool,
 }
 
 /// Wrapper for an X11 and EGL display.
@@ -57,10 +55,8 @@ impl Drop for NativeConnectionWrapper {
     #[inline]
     fn drop(&mut self) {
         unsafe {
-            if self.egl_display_is_owned {
+            if self.is_owned {
                 terminate_egl_display(self.egl_display);
-            }
-            if self.x11_display_is_owned {
                 (self.xlib.XCloseDisplay)(self.x11_display);
             }
             self.x11_display = ptr::null_mut();
@@ -90,9 +86,8 @@ impl Connection {
                 native_connection: Arc::new(NativeConnectionWrapper {
                     xlib,
                     egl_display,
-                    egl_display_is_owned: true,
                     x11_display,
-                    x11_display_is_owned: true,
+                    is_owned: true,
                 }),
             })
         }
@@ -118,14 +113,13 @@ impl Connection {
             native_connection: Arc::new(NativeConnectionWrapper {
                 xlib,
                 egl_display: native_connection.egl_display,
-                egl_display_is_owned: false,
                 x11_display: native_connection.x11_display,
-                x11_display_is_owned: false,
+                is_owned: false,
             }),
         })
     }
 
-    fn from_x11_display(x11_display: *mut Display, is_owned: bool) -> Result<Connection, Error> {
+    fn from_x11_display(x11_display: *mut Display) -> Result<Connection, Error> {
         let xlib = Xlib::open().map_err(|_| Error::ConnectionFailed)?;
         unsafe {
             let egl_display = create_egl_display(x11_display);
@@ -133,9 +127,8 @@ impl Connection {
                 native_connection: Arc::new(NativeConnectionWrapper {
                     xlib,
                     egl_display,
-                    egl_display_is_owned: true,
                     x11_display,
-                    x11_display_is_owned: is_owned,
+                    is_owned: false,
                 }),
             })
         }
@@ -202,29 +195,13 @@ impl Connection {
         Device::new(self, &native_device.adapter)
     }
 
-    /// Opens the display connection corresponding to the given `RawDisplayHandle`.
-    #[cfg(feature = "sm-raw-window-handle-05")]
-    pub fn from_raw_display_handle(
-        raw_handle: rwh_05::RawDisplayHandle,
-    ) -> Result<Connection, Error> {
-        use rwh_05::RawDisplayHandle::Xcb;
-        use rwh_05::RawDisplayHandle::Xlib;
-        use rwh_05::XlibDisplayHandle;
-        let display = match raw_handle {
-            Xlib(XlibDisplayHandle { display, .. }) => display as *mut Display,
-            Xcb(_) => return Err(Error::Unimplemented),
-            _ => return Err(Error::IncompatibleRawDisplayHandle),
-        };
-
-        Connection::from_x11_display(display, false)
-    }
-
     /// Opens the display connection corresponding to the given `DisplayHandle`.
-    #[cfg(feature = "sm-raw-window-handle-06")]
-    pub fn from_display_handle(handle: rwh_06::DisplayHandle) -> Result<Connection, Error> {
-        use rwh_06::RawDisplayHandle::Xcb;
-        use rwh_06::RawDisplayHandle::Xlib;
-        use rwh_06::XlibDisplayHandle;
+    pub fn from_display_handle(
+        handle: raw_window_handle::DisplayHandle,
+    ) -> Result<Connection, Error> {
+        use raw_window_handle::RawDisplayHandle::Xcb;
+        use raw_window_handle::RawDisplayHandle::Xlib;
+        use raw_window_handle::XlibDisplayHandle;
         let display = match handle.as_raw() {
             Xlib(XlibDisplayHandle {
                 display: Some(display),
@@ -234,7 +211,7 @@ impl Connection {
             _ => return Err(Error::IncompatibleRawDisplayHandle),
         };
 
-        Connection::from_x11_display(display, false)
+        Connection::from_x11_display(display)
     }
 
     /// Create a native widget from a raw pointer
@@ -248,31 +225,13 @@ impl Connection {
         }
     }
 
-    /// Create a native widget type from the given `RawWindowHandle`.
-    #[cfg(feature = "sm-raw-window-handle-05")]
-    pub fn create_native_widget_from_raw_window_handle(
-        &self,
-        raw_handle: rwh_05::RawWindowHandle,
-        _size: Size2D<i32>,
-    ) -> Result<NativeWidget, Error> {
-        use rwh_05::RawWindowHandle::Xlib;
-
-        match raw_handle {
-            Xlib(handle) => Ok(NativeWidget {
-                window: handle.window,
-            }),
-            _ => Err(Error::IncompatibleNativeWidget),
-        }
-    }
-
     /// Create a native widget type from the given `WindowHandle`.
-    #[cfg(feature = "sm-raw-window-handle-06")]
     pub fn create_native_widget_from_window_handle(
         &self,
-        handle: rwh_06::WindowHandle,
+        handle: raw_window_handle::WindowHandle,
         _size: Size2D<i32>,
     ) -> Result<NativeWidget, Error> {
-        use rwh_06::RawWindowHandle::Xlib;
+        use raw_window_handle::RawWindowHandle::Xlib;
 
         match handle.as_raw() {
             Xlib(handle) => Ok(NativeWidget {
@@ -339,6 +298,45 @@ unsafe fn create_egl_display(display: *mut Display) -> EGLDisplay {
 
 unsafe fn terminate_egl_display(display: EGLDisplay) {
     EGL_FUNCTIONS.with(|egl| {
-        egl.Terminate(display);
+        let ok = egl.Terminate(display);
+        debug_assert_ne!(ok, egl::FALSE);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg_attr(not(feature = "sm-test"), test)]
+    pub fn test_from_x11_display() {
+        use crate::{ContextAttributeFlags, ContextAttributes, GLVersion};
+
+        let connection = Connection::new().unwrap();
+        let adapter = connection.create_low_power_adapter().unwrap();
+        let device = match connection.create_device(&adapter) {
+            Ok(device) => device,
+            Err(Error::RequiredExtensionUnavailable) => {
+                // Can't run this test on this hardware.
+                return;
+            }
+            Err(error) => panic!("Failed to create device: {error:?}"),
+        };
+
+        let context_descriptor = device
+            .create_context_descriptor(&ContextAttributes {
+                version: GLVersion::new(3, 0),
+                flags: ContextAttributeFlags::empty(),
+            })
+            .unwrap();
+
+        let mut context = device.create_context(&context_descriptor, None).unwrap();
+        device.make_context_current(&context).unwrap();
+
+        {
+            let _second_connection =
+                Connection::from_x11_display(connection.native_connection().x11_display).unwrap();
+        }
+
+        device.destroy_context(&mut context).unwrap();
+    }
 }

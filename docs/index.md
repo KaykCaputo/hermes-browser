@@ -79,7 +79,7 @@ hide:
     <article class="hermes-card">
       <span class="hermes-card__number">02</span>
       <h3>Native desktop experience</h3>
-      <p>Slint, winit, and OpenGL provide responsive tabs, navigation, keyboard input, and IME composition.</p>
+      <p>Slint, winit, and WGPU provide responsive tabs, navigation, keyboard input, and IME composition.</p>
     </article>
     <article class="hermes-card">
       <span class="hermes-card__number">03</span>
@@ -118,7 +118,7 @@ hide:
   <img class="hermes-preview__mark" src="assets/hermes-browser.svg" alt="Hermes Browser logo">
   <div>
     <h2>Hermes is an engineering preview.</h2>
-    <p>Web content currently runs without operating-system sandboxing. Use known sites and non-sensitive data while the isolated rendering path is completed.</p>
+    <p>Web content runs in isolated content processes without operating-system sandbox restrictions. Use known sites and non-sensitive data while that security boundary is hardened.</p>
   </div>
   <a href="user-guide/privacy-and-security/">Read the security model →</a>
 </aside>

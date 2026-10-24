@@ -151,6 +151,7 @@ export component MainWindow inherits Window {
     in property <bool> is-loading: false;
     in property <bool> is-new-tab: true;
     in property <bool> web-view-visible: false;
+    in property <image> web-view-texture;
     out property <length> web-view-width: web-view-area.width;
     out property <length> web-view-height: web-view-area.height;
     in property <string> content-message: "Type an address or search with DuckDuckGo.";
@@ -186,8 +187,10 @@ export component MainWindow inherits Window {
     icon: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
     preferred-width: 1180px;
     preferred-height: 760px;
-    min-width: 480px;
-    min-height: 480px;
+    min-width: 0px;
+    min-height: 0px;
+    max-width: 100000px;
+    max-height: 100000px;
     background: #0b0f14;
 
     VerticalLayout {
@@ -313,7 +316,14 @@ export component MainWindow inherits Window {
 
         web-view-area := Rectangle {
             vertical-stretch: 1;
-            background: root.web-view-visible ? transparent : #0c1117;
+            background: #0c1117;
+
+            if root.web-view-visible: Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.web-view-texture;
+                image-fit: fill;
+            }
 
             if root.is-loading: Rectangle {
                 x: 0px;

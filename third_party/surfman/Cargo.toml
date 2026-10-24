@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "surfman"
-version = "0.13.0"
+version = "0.14.0"
 authors = [
     "Patrick Walton <pcwalton@mimiga.net>",
     "Emilio Cobos Álvarez <emilio@crisal.io>",
@@ -30,15 +30,10 @@ license = "MIT OR Apache-2.0 OR MPL-2.0"
 repository = "https://github.com/servo/surfman"
 
 [features]
-chains = ["fnv"]
-default = ["sm-raw-window-handle-06"]
 sm-angle = []
 sm-angle-builtin = ["mozangle"]
 sm-angle-default = ["sm-angle"]
 sm-no-wgl = ["sm-angle-default"]
-sm-raw-window-handle-05 = ["dep:rwh_05"]
-sm-raw-window-handle-06 = ["dep:rwh_06"]
-sm-raw-window-handle-generic = []
 sm-test = []
 sm-wayland-default = []
 sm-x11 = ["x11-dl"]
@@ -67,7 +62,6 @@ version = "0.22"
 
 [dependencies.fnv]
 version = "1.0"
-optional = true
 
 [dependencies.glow]
 version = "0.17"
@@ -82,17 +76,9 @@ version = "0.4"
 version = "0.1"
 optional = true
 
-[dependencies.rwh_05]
-version = "0.5.2"
-features = ["std"]
-optional = true
-package = "raw-window-handle"
-
-[dependencies.rwh_06]
+[dependencies.raw-window-handle]
 version = "0.6.2"
 features = ["std"]
-optional = true
-package = "raw-window-handle"
 
 [dev-dependencies.clap]
 version = "2"
@@ -131,9 +117,8 @@ features = [
 version = "2.3.0"
 optional = true
 
-[target.'cfg(target_os = "android")'.dependencies.rwh_06]
+[target.'cfg(target_os = "android")'.dependencies.raw-window-handle]
 version = "0.6"
-package = "raw-window-handle"
 
 [target.'cfg(target_os = "macos")'.dependencies.cgl]
 version = "0.3.2"

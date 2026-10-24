@@ -9,9 +9,9 @@ On Linux, Hermes connects Servo to the native GStreamer backend. That gives HTML
 
 ## What should work
 
-Direct media resources and ordinary `<audio>` or `<video>` elements can work when your installed GStreamer plugins provide the required codec. Common MP4 and WebM files are the most useful test cases.
+Direct media resources, ordinary `<audio>` or `<video>` elements, and YouTube playback can work when your installed GStreamer plugins provide the required codecs. Common MP4 and WebM files remain useful tests because they isolate the native media pipeline from a website's application code.
 
-The browser intentionally uses a portable CPU-frame transfer path for Linux video. WebRender remains GPU accelerated; only the handoff from GStreamer avoids assuming that the media backend can activate Hermes' native OpenGL context.
+Hermes uses Servo's upstream GStreamer GL frame-transfer path. The desktop renderer shares the graphics resources needed to present those frames while web content remains in isolated Servo processes.
 
 ## Install the common codecs
 
@@ -28,11 +28,11 @@ gst-inspect-1.0 avdec_h264
 gst-inspect-1.0 vp9dec
 ```
 
-## Why YouTube does not work yet
+## YouTube and streaming sites
 
-YouTube's current player does not select its progressive fallback in the Servo revision pinned by Hermes. Its adaptive playback path depends on Media Source Extensions, including `MediaSource` and `SourceBuffer`, which Servo 0.4.0 does not implement.
+Hermes' Servo 0.7.0 integration can play YouTube video and audio on Linux. Streaming sites change frequently, however, and their compatibility can depend on Servo's web-platform support, the selected stream format, and the codecs installed on the machine.
 
-Installing more codecs cannot add a missing browser API. Use a direct MP4 or WebM file when testing the media pipeline itself.
+If a streaming site fails, first test a direct MP4 or WebM file. That comparison separates a website compatibility problem from a GStreamer, decoder, or audio-output problem.
 
 ## Diagnose playback
 
@@ -43,4 +43,3 @@ make run RUST_LOG="talaria_servo=debug,servo=info,servo_media=debug"
 ```
 
 Then look for the first GStreamer error rather than later playback fallout. The [troubleshooting guide](troubleshooting.md#media-does-not-play) has a short checklist.
-

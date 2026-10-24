@@ -19,7 +19,6 @@ pub mod angle;
 pub(crate) mod base;
 #[cfg(macos_platform)]
 pub mod cgl;
-#[cfg(feature = "chains")]
 pub mod chains;
 pub mod connection;
 mod context;
@@ -61,9 +60,9 @@ pub use crate::context::{ContextAttributeFlags, ContextAttributes, ContextID};
 pub use crate::error::{Error, WindowingApiError};
 pub use crate::info::{GLApi, GLVersion};
 pub use crate::surface::{SurfaceAccess, SurfaceID, SurfaceInfo, SurfaceType, SystemSurfaceInfo};
-pub use default::connection::{Connection, NativeConnection};
-pub use default::context::{Context, ContextDescriptor, NativeContext};
-pub use default::device::{Adapter, Device, NativeDevice};
+pub use default::connection::Connection;
+pub use default::context::{Context, ContextDescriptor};
+pub use default::device::{Adapter, Device};
 pub use default::surface::{NativeWidget, Surface, SurfaceTexture};
 pub(crate) use glow::{self as gl, Context as Gl};
 pub(crate) use macros::implement_interfaces;

@@ -21,7 +21,11 @@ Only the active WebView is visible and unthrottled. Hidden tabs remain alive but
 
 ## Frame delivery
 
-Servo calls `notify_new_frame_ready` on the WebView delegate. Hermes records the first-frame milestone, marks the tab's frame-ready signal, and wakes the native event loop. The desktop then calls `paint()` for the active WebView.
+Servo calls `notify_new_frame_ready` on the WebView delegate. Hermes records the first-frame milestone and marks the tab's frame-ready signal. Servo's runtime waker schedules the native redraw, and the desktop then calls `paint()` once for that frame without issuing a duplicate wake.
+
+Servo owns a dedicated offscreen Surfman context. On Linux, Hermes copies the completed framebuffer into Vulkan external memory and imports it into the WGPU device already owned by Slint. Slint then composes that texture as a normal image. Servo never draws into Slint's window framebuffer and cannot leak OpenGL state into the UI renderer. This separation is essential during window moves and resizes, when both renderers are active in quick succession.
+
+The Linux bridge requires Slint's Vulkan WGPU backend. The transfer stays on the GPU and explicitly waits for the OpenGL copy to finish before Slint samples the texture, preventing partially updated frames.
 
 This callback is the important distinction between a page that loaded and one that became visible. URL or title events alone do not prove that rendering succeeded.
 
@@ -44,7 +48,7 @@ Matched subresources are intercepted and cancelled. Main-frame navigations remai
 
 ## Linux media
 
-The Linux target enables Servo's `media-gstreamer` feature. Hermes vendors a narrowly patched `servo-media-gstreamer` 0.4.0 for codec identifiers, error diagnostics, portable BGRA video frames, Web Audio negotiation, and lifecycle correctness.
+The Linux target enables Servo's upstream `media-gstreamer` feature. Hermes uses the `servo-media-gstreamer` 0.7.0 release unchanged; this is important because its GL frame-transfer path remains compatible with Servo's isolated content processes.
 
 GStreamer remains a native system dependency. Cargo selects the Rust backend, but the machine must still provide the runtime plugins and codecs.
 
@@ -55,9 +59,8 @@ The executable recognizes Servo's `--content-process <token>` bootstrap before i
 Despite that preparation, normal options explicitly set:
 
 ```rust
-multiprocess: false,
+multiprocess: true,
 sandbox: false,
 ```
 
-Servo 0.4.0 loads and scripts a page in the child process, but the embedded cross-process Paint path does not deliver visible output to Hermes' rendering context. Keep both flags disabled until a test demonstrates navigation, title updates, first-frame delivery, visible pixels, input, and clean shutdown together.
-
+Servo 0.7.0 content processes complete navigation and deliver visible frames, input, audio, and video in Hermes. The operating-system sandbox is a separate option: keep it disabled until Linux `gaol` can enforce its profile without destabilizing child processes. A sandbox acceptance test must cover navigation, visible pixels, audio and video, input, and clean shutdown together.

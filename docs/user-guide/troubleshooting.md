@@ -31,7 +31,7 @@ Check whether the tab title or address changed.
 - **The title changes but the page is blank:** loading and script execution probably succeeded, while the frame was not painted.
 - **A first-frame message appears:** inspect the graphics context and compositor path.
 
-Hermes deliberately uses Servo's single-process mode because the embedded cross-process Paint path in Servo 0.4.0 loads pages without displaying them. If your log says content-process isolation is enabled, you are not running the supported configuration from this repository.
+Hermes normally logs that content-process isolation is enabled and the operating-system sandbox is disabled. If the log says the OS sandbox is enabled, you are running an experimental configuration that is not supported by this release.
 
 ## The browser opens on the wrong GPU
 
@@ -41,12 +41,12 @@ If rendering still uses the wrong device, inspect system-level Mesa configuratio
 
 ## Media does not play
 
-1. Confirm the page is using a direct media resource rather than Media Source Extensions.
+1. Compare the affected page with a direct MP4 or WebM resource.
 2. Verify `playbin3`, the audio sink, and the required decoder with `gst-inspect-1.0`.
 3. Run with detailed media logging.
 4. Test the media URL in a small native GStreamer pipeline when possible.
 
-YouTube is a known compatibility gap and is not a useful first test of the GStreamer backend.
+For YouTube, verify that the player and desktop session are not muted. Hermes keeps the PulseAudio-compatible GStreamer sink connected while the backend is active to prevent video-only playback caused by reconnect races.
 
 ## Build fails while compiling Servo
 
@@ -58,7 +58,7 @@ YouTube is a known compatibility gap and is not a useful first test of the GStre
 
 ## GLib cannot find a home directory
 
-Warnings such as `getpwuid_r(): failed` or `HOME is not set` come from a process environment where GLib cannot resolve the current user. They can appear in an experimental sandbox. In the supported single-process configuration, make sure Hermes inherits a normal desktop environment and a valid `HOME` value.
+Warnings such as `getpwuid_r(): failed` or `HOME is not set` come from a process environment where GLib cannot resolve the current user. They can appear in an experimental OS sandbox. In the supported multiprocess configuration, make sure Hermes inherits a normal desktop environment and a valid `HOME` value.
 
 ## A particular website is broken
 

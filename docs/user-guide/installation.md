@@ -40,15 +40,18 @@ The first build compiles Servo and its native dependencies. It can take consider
 : Checks Rust tooling, installs `rustfmt` and Clippy, then downloads the locked Cargo dependency graph.
 
 `make run`
-: Builds and starts the desktop application with useful default logging.
+: Builds and starts the optimized desktop application with useful default logging.
 
 ## Run an optimized build
 
-The development profile keeps Hermes code easy to debug while optimizing the expensive browser-engine crates. For the closest experience to a packaged build, use:
+`make run` already uses the optimized profile so that complex pages and media behave like the
+packaged application. `make run-release` remains an equivalent alias:
 
 ```bash
 make run-release
 ```
+
+Developers who need complete debug information can use `make run-debug`.
 
 ## Other Linux distributions
 

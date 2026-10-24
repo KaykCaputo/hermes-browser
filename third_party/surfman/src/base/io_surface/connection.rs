@@ -47,7 +47,7 @@ impl Connection {
             CFMutableDictionary::set_value(
                 Some(&bundle_info_dictionary),
                 &*supports_automatic_graphics_switching_key as *const _ as *const c_void,
-                &*supports_automatic_graphics_switching_value as *const _ as *const c_void,
+                supports_automatic_graphics_switching_value as *const _ as *const c_void,
             );
         }
 
@@ -111,15 +111,8 @@ impl Connection {
         self.create_device(&self.create_adapter()?)
     }
 
-    /// Opens the display connection corresponding to the given `RawDisplayHandle`.
-    #[cfg(feature = "sm-raw-window-handle-05")]
-    pub fn from_raw_display_handle(_: rwh_05::RawDisplayHandle) -> Result<Connection, Error> {
-        Connection::new()
-    }
-
     /// Opens the display connection corresponding to the given `DisplayHandle`.
-    #[cfg(feature = "sm-raw-window-handle-06")]
-    pub fn from_display_handle(_: rwh_06::DisplayHandle) -> Result<Connection, Error> {
+    pub fn from_display_handle(_: raw_window_handle::DisplayHandle) -> Result<Connection, Error> {
         Connection::new()
     }
 
@@ -139,48 +132,15 @@ impl Connection {
         }
     }
 
-    /// Create a native widget type from the given `RawWindowHandle`.
-    #[cfg(feature = "sm-raw-window-handle-05")]
-    #[inline]
-    pub fn create_native_widget_from_raw_window_handle(
-        &self,
-        raw_handle: rwh_05::RawWindowHandle,
-        _size: Size2D<i32>,
-    ) -> Result<NativeWidget, Error> {
-        use objc2::{MainThreadMarker, Message};
-        use objc2_app_kit::NSWindow;
-        use rwh_05::RawWindowHandle::AppKit;
-
-        match raw_handle {
-            AppKit(handle) => {
-                assert!(
-                    MainThreadMarker::new().is_some(),
-                    "NSView is only usable on the main thread"
-                );
-                // SAFETY: The pointer is valid for as long as the handle is,
-                // and we just checked that we're on the main thread.
-                let ns_view = unsafe { handle.ns_view.cast::<NSView>().as_ref().unwrap() };
-                let ns_window = unsafe { handle.ns_window.cast::<NSWindow>().as_ref().unwrap() };
-
-                Ok(NativeWidget {
-                    view: ns_view.retain(),
-                    opaque: unsafe { ns_window.isOpaque() },
-                })
-            }
-            _ => Err(Error::IncompatibleNativeWidget),
-        }
-    }
-
     /// Create a native widget type from the given `WindowHandle`.
-    #[cfg(feature = "sm-raw-window-handle-06")]
     #[inline]
     pub fn create_native_widget_from_window_handle(
         &self,
-        handle: rwh_06::WindowHandle,
+        handle: raw_window_handle::WindowHandle,
         _size: Size2D<i32>,
     ) -> Result<NativeWidget, Error> {
         use objc2::{MainThreadMarker, Message};
-        use rwh_06::RawWindowHandle::AppKit;
+        use raw_window_handle::RawWindowHandle::AppKit;
 
         match handle.as_raw() {
             AppKit(handle) => {

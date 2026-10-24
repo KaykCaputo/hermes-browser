@@ -17,7 +17,7 @@ use url::Url;
 use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
-use crate::{ServoWebView, ServoWebViewError, SharedOpenGlContext};
+use crate::{ServoWebView, ServoWebViewError};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
 
@@ -104,17 +104,15 @@ impl ServoRuntime {
 
     pub fn create_web_view(
         &self,
-        rendering_context: Rc<SharedOpenGlContext>,
+        rendering_context: Rc<dyn RenderingContext>,
         initial_url: &str,
         scale_factor: f32,
         tab_id: TabId,
         browser_event_sender: Sender<TabEvent>,
     ) -> Result<ServoWebView, ServoWebViewError> {
         let initial_url = Url::parse(initial_url)?;
-        let rendering_context: Rc<dyn RenderingContext> = rendering_context;
         let frame_ready = FrameReadySignal::default();
         let delegate = Rc::new(BrowserDelegate {
-            event_loop_waker: self.redraw_waker.clone(),
             tab_id,
             browser_event_sender,
             frame_ready: frame_ready.clone(),
@@ -140,13 +138,10 @@ impl ServoRuntime {
 
 fn hermes_options() -> Opts {
     Opts {
-        // Servo 0.4.0 successfully runs script and networking in a child process,
-        // but its cross-process Paint path does not deliver the display list to
-        // this embedded RenderingContext. Pages finish loading and update their
-        // title while the WebView remains blank. Keep the content-process entry
-        // point and gaol compatibility fixes ready, but do not enable a mode that
-        // cannot display web content.
-        multiprocess: false,
+        // Servo 0.7.0 content-process isolation renders correctly in Hermes.
+        // Keep the operating-system sandbox disabled independently: the
+        // current Linux gaol path is not yet reliable enough for a release.
+        multiprocess: true,
         sandbox: false,
         ..Opts::default()
     }
@@ -171,7 +166,6 @@ fn hermes_preferences() -> Preferences {
 }
 
 struct BrowserDelegate {
-    event_loop_waker: EventLoopWaker,
     tab_id: TabId,
     browser_event_sender: Sender<TabEvent>,
     frame_ready: FrameReadySignal,
@@ -254,7 +248,6 @@ impl servo::WebViewDelegate for BrowserDelegate {
     fn notify_new_frame_ready(&self, _web_view: servo::WebView) {
         self.record_load_milestone(LoadMilestone::FirstFrame);
         self.frame_ready.mark_ready();
-        servo::EventLoopWaker::wake(&self.event_loop_waker);
     }
 
     fn notify_crashed(
@@ -304,18 +297,18 @@ fn page_icon_from_pixels(
             }
         }
         PixelFormat::KA8 => {
-            for pixel in pixels.chunks_exact(2) {
+            for pixel in pixels.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
             }
         }
         PixelFormat::RGB8 => {
-            for pixel in pixels.chunks_exact(3) {
+            for pixel in pixels.as_chunks::<3>().0 {
                 rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
             }
         }
         PixelFormat::RGBA8 => rgba.extend_from_slice(pixels),
         PixelFormat::BGRA8 => {
-            for pixel in pixels.chunks_exact(4) {
+            for pixel in pixels.as_chunks::<4>().0 {
                 rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
             }
         }
@@ -354,12 +347,12 @@ mod tests {
     use super::hermes_options;
 
     #[test]
-    fn keeps_browsing_in_process_until_cross_process_paint_is_supported() {
-        assert!(!hermes_options().multiprocess);
+    fn enables_content_process_isolation() {
+        assert!(hermes_options().multiprocess);
     }
 
     #[test]
-    fn does_not_claim_an_os_sandbox_without_a_content_process() {
+    fn keeps_the_unreliable_os_sandbox_disabled() {
         assert!(!hermes_options().sandbox);
     }
 

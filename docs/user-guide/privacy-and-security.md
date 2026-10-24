@@ -22,13 +22,12 @@ The current preview does not implement persistent sessions, history, bookmarks, 
 ## Sandboxing status
 
 !!! danger "Do not use Hermes for sensitive browsing"
-    Web content currently runs inside the main browser process without an operating-system sandbox. A malicious page that exploits the engine would not face the process boundary expected in a mature browser.
+    Web content runs in separate Servo content processes, but those child processes currently have no operating-system sandbox restrictions. Process isolation improves fault containment, but it is not the hardened security boundary expected in a mature browser.
 
-Servo 0.4.0 can start content processes, and Hermes retains the required bootstrap and Linux `gaol` compatibility work. In embedded multiprocess mode, pages load and can update their titles, but their cross-process Paint output does not reach the visible rendering context. Hermes therefore keeps both `multiprocess` and `sandbox` disabled until that path can display content correctly.
+Hermes enables Servo 0.7.0 multiprocess mode: navigation, visible rendering, input, audio, and video cross the process boundary. The separate Linux `gaol` sandbox mode is still unreliable, so Hermes keeps `sandbox` disabled until it can enforce restrictions without breaking content processes.
 
 Use Hermes with local test pages, known public sites, and non-sensitive data. Do not enter passwords, payment information, private documents, or account recovery details.
 
 ## Reporting a security issue
 
 Avoid publishing exploit details in a general bug report. Contact the maintainer through the repository profile first so the issue can be handled privately and routed upstream when it belongs to Servo or a dependency.
-

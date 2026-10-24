@@ -5,7 +5,7 @@ description: Prepare a local Hermes Browser development environment on Linux or 
 
 # Development setup
 
-Linux is the primary development environment because it exercises the full Servo, OpenGL, GStreamer, and packaging path.
+Linux is the primary development environment because it exercises the full Servo, Vulkan/WGPU composition, GStreamer, and packaging path.
 
 ## Clone and prepare the repository
 
@@ -32,22 +32,24 @@ Servo also builds native code. On Linux, Hermes expects Clang, CMake, a C/C++ to
 
 ```bash
 make build
-make run
+make run-debug
 ```
 
 Pass application arguments through `ARGS` and adjust logging through `RUST_LOG`:
 
 ```bash
-make run ARGS="--example-option" RUST_LOG="talaria_servo=debug,servo=info"
+make run-debug ARGS="--example-option" RUST_LOG="talaria_servo=debug,servo=info"
 ```
 
-Use an optimized runtime when investigating timing or media behavior:
+Use the default optimized runtime when investigating timing or media behavior:
 
 ```bash
-make run-release
+make run
 ```
 
-The development profile already optimizes major Servo, WebRender, Vello, and ad-blocking crates while retaining useful debug information for Hermes code.
+`make run-release` is retained as an alias for `make run`. The development profile still optimizes
+major Servo, WebRender, Vello, and ad-blocking crates while retaining useful debug information for
+Hermes code, but it is intended for diagnosis rather than performance evaluation.
 
 ## Build the documentation
 
@@ -91,4 +93,3 @@ Use 64-bit Windows 10 or 11 with:
 - C++ ATL for the v143 x64 toolchain
 
 Current Windows builds do not bundle native GStreamer, so they do not exercise the complete Linux media path.
-

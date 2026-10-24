@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 
 use hermes_ui::{BrowserTab, MainWindow, WebViewPointerButton};
+use rendering::BrowserRenderingContext;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{
     BackendSelector, ComponentHandle, GraphicsAPI, Image, ModelRc, RenderingState, Rgba8Pixel,
@@ -16,13 +17,15 @@ use talaria_core::{
     PointerButtonAction, TabEvent, TabId, WebView as TalariaWebView, dispatch_command,
 };
 use talaria_servo::{
-    EventLoopWaker, NEW_TAB_URL, ServoRuntime, ServoWebView, ServoWebViewError,
-    SharedOpenGlContext, ViewportSize, run_content_process_if_requested,
+    EventLoopWaker, NEW_TAB_URL, ServoRuntime, ServoWebView, ServoWebViewError, ViewportSize,
+    run_content_process_if_requested,
 };
 use winit::event::{ElementState, Ime, WindowEvent};
 use winit::keyboard::{Key, KeyLocation as WinitKeyLocation, ModifiersState, PhysicalKey};
 
 const MAX_COMMANDS_PER_FRAME: usize = 128;
+
+mod rendering;
 
 fn main() -> Result<(), Box<dyn Error>> {
     if run_content_process_if_requested()? {
@@ -69,10 +72,20 @@ fn use_automatic_gpu_selection() {
 }
 
 fn select_hardware_accelerated_backend() -> Result<(), slint::platform::PlatformError> {
+    #[cfg(target_os = "linux")]
+    let settings = {
+        let mut settings = slint::wgpu_29::WGPUSettings::default();
+        // Linux texture sharing uses Vulkan external memory. Requiring Vulkan here keeps
+        // Slint and Servo on one physical GPU and makes the transfer deterministic.
+        settings.backends = slint::wgpu_29::wgpu::Backends::VULKAN;
+        settings
+    };
+    #[cfg(not(target_os = "linux"))]
+    let settings = slint::wgpu_29::WGPUSettings::default();
+
     BackendSelector::new()
         .backend_name("winit".to_owned())
-        .renderer_name("femtovg".to_owned())
-        .require_opengl()
+        .require_wgpu_29(slint::wgpu_29::WGPUConfiguration::Automatic(settings))
         .select()
 }
 
@@ -90,7 +103,8 @@ fn connect_servo_runtime(
 
     let runtime = ServoRuntime::new(event_loop_waker);
     let weak_window_for_rendering = window.as_weak();
-    let mut rendering_context: Option<Rc<SharedOpenGlContext>> = None;
+    let mut rendering_context: Option<Rc<BrowserRenderingContext>> = None;
+    let mut wgpu_device: Option<slint::wgpu_29::wgpu::Device> = None;
     let mut web_views = HashMap::<TabId, ServoWebView>::new();
     let mut visible_tab_id: Option<TabId> = None;
     let mut current_viewport_size: Option<ViewportSize> = None;
@@ -110,9 +124,9 @@ fn connect_servo_runtime(
                 };
                 window.set_web_view_visible(false);
 
-                let GraphicsAPI::NativeOpenGL { get_proc_address } = graphics_api else {
+                let GraphicsAPI::WGPU29 { device, .. } = graphics_api else {
                     window.set_content_message(
-                        "The selected Slint renderer does not provide OpenGL.".into(),
+                        "The selected Slint renderer does not provide WGPU 29.".into(),
                     );
                     return;
                 };
@@ -124,22 +138,20 @@ fn connect_servo_runtime(
                     return;
                 };
 
-                // SAFETY: Slint guarantees that its OpenGL context is current while this
-                // notifier runs. The wrapper is dropped during RenderingTeardown.
-                let context =
-                    match unsafe { SharedOpenGlContext::new(viewport_size, get_proc_address) } {
-                        Ok(context) => context,
-                        Err(error) => {
-                            window.set_content_message(
-                                format!("Failed to create Surfman connection: {error:?}").into(),
-                            );
-                            return;
-                        }
-                    };
+                let context = match BrowserRenderingContext::new(viewport_size, device) {
+                    Ok(context) => context,
+                    Err(error) => {
+                        window.set_content_message(
+                            format!("Failed to create Servo's rendering context: {error}").into(),
+                        );
+                        return;
+                    }
+                };
 
                 rendering_context = Some(Rc::new(context));
+                wgpu_device = Some(device.clone());
                 window.set_content_message(
-                    "OpenGL context initialized. Waiting for Servo WebView.".into(),
+                    "Offscreen rendering initialized. Waiting for Servo WebView.".into(),
                 );
             }
             RenderingState::BeforeRendering => {
@@ -174,23 +186,22 @@ fn connect_servo_runtime(
                     (active_tab_id, tab_ids)
                 };
                 web_views.retain(|tab_id, _| tab_ids.contains(tab_id));
-                let mut active_web_view_was_created = false;
-
                 for tab_id in tab_ids {
                     if web_views.contains_key(&tab_id) {
                         continue;
                     }
 
-                    match runtime.create_web_view(
-                        Rc::clone(rendering_context),
+                    let create_result = runtime.create_web_view(
+                        rendering_context.clone(),
                         NEW_TAB_URL,
                         scale_factor,
                         tab_id,
                         browser_event_sender.clone(),
-                    ) {
+                    );
+
+                    match create_result {
                         Ok(created_web_view) => {
                             created_web_view.hide();
-                            active_web_view_was_created |= tab_id == active_tab_id;
                             web_views.insert(tab_id, created_web_view);
                         }
                         Err(error) => {
@@ -207,16 +218,11 @@ fn connect_servo_runtime(
                     {
                         let _focus_result = previous_web_view.set_focus(false);
                         previous_web_view.hide();
-                        previous_web_view.set_throttled(true);
                     }
 
                     if let Some(active_web_view) = web_views.get_mut(&active_tab_id) {
-                        // New WebViews start unthrottled. Waiting until a later event-loop turn
-                        // avoids sending SetWebViewThrottled before Servo has installed the new
-                        // top-level browsing context.
-                        if !active_web_view_was_created {
-                            active_web_view.set_throttled(false);
-                        }
+                        // Servo 0.7 couples visibility and throttling: show() resumes the active
+                        // pipeline and hide() throttles background tabs.
                         active_web_view.show();
                         let _focus_result = active_web_view.set_focus(web_view_focused.get());
                     }
@@ -252,12 +258,31 @@ fn connect_servo_runtime(
                 }
 
                 if let Some(active_web_view) = web_views.get(&active_tab_id) {
-                    let _painted = active_web_view.paint_if_available();
+                    let painted = active_web_view.paint_if_available();
+
+                    if painted {
+                        let Some(device) = wgpu_device.as_ref() else {
+                            return;
+                        };
+                        match rendering_context.current_frame_as_image(device) {
+                            Ok(image) => window.set_web_view_texture(image),
+                            Err(error) => {
+                                log::error!("failed to import Servo frame into Slint: {error}");
+                                window.set_content_message(
+                                    format!("Failed to display Servo frame: {error}").into(),
+                                );
+                            }
+                        }
+                    }
                 }
             }
             RenderingState::RenderingTeardown => {
+                if let Some(window) = weak_window_for_rendering.upgrade() {
+                    window.set_web_view_texture(Image::default());
+                }
                 web_views.clear();
                 drop(rendering_context.take());
+                drop(wgpu_device.take());
                 visible_tab_id = None;
                 current_viewport_size = None;
                 current_scale_factor = None;

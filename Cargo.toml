@@ -9,42 +9,45 @@ members = [
 exclude = ["third_party/gaol"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MPL-2.0"
 
 [workspace.dependencies]
 adblock = "=0.13.2"
-content-security-policy = "0.8"
+ash = "0.38"
+content-security-policy = "0.9"
 dpi = "0.1"
 euclid = "0.22"
 gleam = "0.15"
 glow = "0.17"
 log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
-servo = { version = "=0.4.0", features = ["vello"] }
+servo = { version = "=0.7.0", features = ["vello"] }
 slint = { version = "~1.17.1", default-features = false, features = [
     "backend-winit",
     "compat-1-2",
-    "renderer-femtovg",
+    "renderer-femtovg-wgpu",
     "std",
+    "unstable-wgpu-29",
     "unstable-winit-030",
 ] }
 slint-build = "~1.17.1"
-surfman = "0.13"
+surfman = "0.14"
+thiserror = "2"
 url = "2.5"
 
-# Keep the GStreamer backend on Servo 0.4.0 while carrying focused compatibility
-# and lifecycle fixes. See third_party/servo-media-gstreamer/README.md.
 [patch.crates-io]
 gaol = { path = "third_party/gaol" }
-servo-media-gstreamer = { path = "third_party/servo-media-gstreamer" }
 surfman = { path = "third_party/surfman" }
 
-# Keep Hermes crates easy to debug while optimizing the browser-engine hotspots used at runtime.
-# Targeting the complete dependency graph would also rebuild large native build tools such as
-# SpiderMonkey and ANGLE whenever this profile changes.
+# Keep the controller easy to debug while optimizing the browser-engine, frame-transfer, and media
+# hotspots used by `make run`. Targeting the complete dependency graph would also rebuild large
+# native build tools such as SpiderMonkey and ANGLE whenever this profile changes.
 [profile.dev.package.adblock]
+opt-level = 2
+
+[profile.dev.package.hermes-desktop]
 opt-level = 2
 
 [profile.dev.package.servo]
@@ -65,6 +68,21 @@ opt-level = 2
 [profile.dev.package."servo-script"]
 opt-level = 2
 
+[profile.dev.package."servo-media-gstreamer"]
+opt-level = 2
+
+[profile.dev.package."servo-media-gstreamer-render"]
+opt-level = 2
+
+[profile.dev.package."servo-media-gstreamer-render-unix"]
+opt-level = 2
+
+[profile.dev.package.surfman]
+opt-level = 2
+
+[profile.dev.package."talaria-servo"]
+opt-level = 2
+
 [profile.dev.package.vello]
 opt-level = 2
 
@@ -72,4 +90,13 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.webrender]
+opt-level = 2
+
+[profile.dev.package.wgpu]
+opt-level = 2
+
+[profile.dev.package."wgpu-core"]
+opt-level = 2
+
+[profile.dev.package."wgpu-hal"]
 opt-level = 2

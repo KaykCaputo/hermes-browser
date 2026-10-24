@@ -1,6 +1,6 @@
 //! A connection abstraction that allows the choice of backends dynamically.
 
-use super::device::{Adapter, Device, NativeDevice};
+use super::device::{Adapter, Device};
 use super::surface::NativeWidget;
 use crate::connection::Connection as ConnectionInterface;
 use crate::device::Device as DeviceInterface;
@@ -40,20 +40,6 @@ where
     }
 }
 
-/// The native connection type.
-pub enum NativeConnection<Def, Alt>
-where
-    Def: DeviceInterface,
-    Alt: DeviceInterface,
-    Def::Connection: ConnectionInterface,
-    Alt::Connection: ConnectionInterface,
-{
-    /// The default native connection type.
-    Default(<Def::Connection as ConnectionInterface>::NativeConnection),
-    /// The alternate native connection type.
-    Alternate(<Alt::Connection as ConnectionInterface>::NativeConnection),
-}
-
 impl<Def, Alt> Connection<Def, Alt>
 where
     Def: DeviceInterface,
@@ -67,18 +53,6 @@ where
         match <Def::Connection>::new() {
             Ok(connection) => Ok(Connection::Default(connection)),
             Err(_) => <Alt::Connection>::new().map(Connection::Alternate),
-        }
-    }
-
-    /// Returns the native connection corresponding to this connection.
-    pub fn native_connection(&self) -> NativeConnection<Def, Alt> {
-        match *self {
-            Connection::Default(ref connection) => {
-                NativeConnection::Default(connection.native_connection())
-            }
-            Connection::Alternate(ref connection) => {
-                NativeConnection::Alternate(connection.native_connection())
-            }
         }
     }
 
@@ -155,45 +129,9 @@ where
         }
     }
 
-    /// Wraps a native device in a device.
-    #[inline]
-    pub unsafe fn create_device_from_native_device(
-        &self,
-        native_device: NativeDevice<Def, Alt>,
-    ) -> Result<Device<Def, Alt>, Error> {
-        match self {
-            Connection::Default(connection) => match native_device {
-                NativeDevice::Default(native_device) => connection
-                    .create_device_from_native_device(native_device)
-                    .map(Device::Default),
-                _ => Err(Error::IncompatibleNativeDevice),
-            },
-            Connection::Alternate(connection) => match native_device {
-                NativeDevice::Alternate(native_device) => connection
-                    .create_device_from_native_device(native_device)
-                    .map(Device::Alternate),
-                _ => Err(Error::IncompatibleNativeDevice),
-            },
-        }
-    }
-
-    /// Opens the display connection corresponding to the given `RawDisplayHandle.
-    #[cfg(feature = "sm-raw-window-handle-05")]
-    pub fn from_raw_display_handle(
-        raw_handle: rwh_05::RawDisplayHandle,
-    ) -> Result<Connection<Def, Alt>, Error> {
-        match <Def::Connection>::from_raw_display_handle(raw_handle) {
-            Ok(connection) => Ok(Connection::Default(connection)),
-            Err(_) => {
-                <Alt::Connection>::from_raw_display_handle(raw_handle).map(Connection::Alternate)
-            }
-        }
-    }
-
     /// Opens the display connection corresponding to the given `DisplayHandle`.
-    #[cfg(feature = "sm-raw-window-handle-06")]
     pub fn from_display_handle(
-        handle: rwh_06::DisplayHandle,
+        handle: raw_window_handle::DisplayHandle,
     ) -> Result<Connection<Def, Alt>, Error> {
         match <Def::Connection>::from_display_handle(handle) {
             Ok(connection) => Ok(Connection::Default(connection)),
@@ -217,28 +155,10 @@ where
         }
     }
 
-    /// Create a native widget type from the given `RawWindowHandle`.
-    #[cfg(feature = "sm-raw-window-handle-05")]
-    pub fn create_native_widget_from_raw_window_handle(
-        &self,
-        raw_handle: rwh_05::RawWindowHandle,
-        size: Size2D<i32>,
-    ) -> Result<NativeWidget<Def, Alt>, Error> {
-        match *self {
-            Connection::Default(ref connection) => connection
-                .create_native_widget_from_raw_window_handle(raw_handle, size)
-                .map(NativeWidget::Default),
-            Connection::Alternate(ref connection) => connection
-                .create_native_widget_from_raw_window_handle(raw_handle, size)
-                .map(NativeWidget::Alternate),
-        }
-    }
-
     /// Create a native widget type from the given `WindowHandle`.
-    #[cfg(feature = "sm-raw-window-handle-06")]
     pub fn create_native_widget_from_window_handle(
         &self,
-        handle: rwh_06::WindowHandle,
+        handle: raw_window_handle::WindowHandle,
         size: Size2D<i32>,
     ) -> Result<NativeWidget<Def, Alt>, Error> {
         match *self {
@@ -261,18 +181,11 @@ where
 {
     type Adapter = Adapter<Def, Alt>;
     type Device = Device<Def, Alt>;
-    type NativeConnection = NativeConnection<Def, Alt>;
-    type NativeDevice = NativeDevice<Def, Alt>;
     type NativeWidget = NativeWidget<Def, Alt>;
 
     #[inline]
     fn new() -> Result<Connection<Def, Alt>, Error> {
         Connection::new()
-    }
-
-    #[inline]
-    fn native_connection(&self) -> NativeConnection<Def, Alt> {
-        Connection::native_connection(self)
     }
 
     #[inline]
@@ -305,23 +218,9 @@ where
         Connection::create_device(self, adapter)
     }
 
-    #[inline]
-    unsafe fn create_device_from_native_device(
-        &self,
-        native_device: NativeDevice<Def, Alt>,
-    ) -> Result<Device<Def, Alt>, Error> {
-        Connection::create_device_from_native_device(self, native_device)
-    }
-
-    #[cfg(feature = "sm-raw-window-handle-05")]
-    fn from_raw_display_handle(
-        raw_handle: rwh_05::RawDisplayHandle,
+    fn from_display_handle(
+        handle: raw_window_handle::DisplayHandle,
     ) -> Result<Connection<Def, Alt>, Error> {
-        Connection::from_raw_display_handle(raw_handle)
-    }
-
-    #[cfg(feature = "sm-raw-window-handle-06")]
-    fn from_display_handle(handle: rwh_06::DisplayHandle) -> Result<Connection<Def, Alt>, Error> {
         Connection::from_display_handle(handle)
     }
 
@@ -334,19 +233,9 @@ where
         Connection::create_native_widget_from_ptr(self, raw, size)
     }
 
-    #[cfg(feature = "sm-raw-window-handle-05")]
-    fn create_native_widget_from_raw_window_handle(
-        &self,
-        raw_handle: rwh_05::RawWindowHandle,
-        size: Size2D<i32>,
-    ) -> Result<Self::NativeWidget, Error> {
-        Connection::create_native_widget_from_raw_window_handle(self, raw_handle, size)
-    }
-
-    #[cfg(feature = "sm-raw-window-handle-06")]
     fn create_native_widget_from_window_handle(
         &self,
-        handle: rwh_06::WindowHandle,
+        handle: raw_window_handle::WindowHandle,
         size: Size2D<i32>,
     ) -> Result<Self::NativeWidget, Error> {
         Connection::create_native_widget_from_window_handle(self, handle, size)

@@ -142,4 +142,3 @@ jobs:
             -- \
             -D warnings
           cargo test --locked --workspace
-          cargo test --locked --package servo-media-gstreamer --lib

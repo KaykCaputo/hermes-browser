@@ -41,7 +41,7 @@ impl ServoWebView {
     }
 
     pub fn paint_if_available(&self) -> bool {
-        if !self.frame_ready.has_frame() {
+        if !self.frame_ready.take_ready() {
             return false;
         }
 
@@ -55,10 +55,6 @@ impl ServoWebView {
 
     pub fn hide(&self) {
         self.inner.hide();
-    }
-
-    pub fn set_throttled(&self, throttled: bool) {
-        self.inner.set_throttled(throttled);
     }
 }
 
@@ -138,12 +134,7 @@ impl TalariaWebView for ServoWebView {
     }
 
     fn set_focus(&mut self, focused: bool) -> Result<(), Self::Error> {
-        if focused {
-            self.inner.focus();
-        } else {
-            self.inner.blur();
-        }
-
+        self.inner.set_focused(focused);
         Ok(())
     }
 
@@ -237,9 +228,9 @@ fn servo_mouse_button_action(action: PointerButtonAction) -> ServoMouseButtonAct
 
 fn servo_mouse_button(button: PointerButton) -> servo::MouseButton {
     match button {
-        PointerButton::Left => servo::MouseButton::Left,
-        PointerButton::Middle => servo::MouseButton::Middle,
-        PointerButton::Right => servo::MouseButton::Right,
+        PointerButton::Left => servo::MouseButton::Primary,
+        PointerButton::Middle => servo::MouseButton::Auxiliary,
+        PointerButton::Right => servo::MouseButton::Secondary,
         PointerButton::Other => servo::MouseButton::Other(5),
     }
 }
@@ -272,15 +263,15 @@ mod tests {
     fn pointer_buttons_map_to_servo_buttons() {
         assert_eq!(
             servo_mouse_button(PointerButton::Left),
-            servo::MouseButton::Left
+            servo::MouseButton::Primary
         );
         assert_eq!(
             servo_mouse_button(PointerButton::Middle),
-            servo::MouseButton::Middle
+            servo::MouseButton::Auxiliary
         );
         assert_eq!(
             servo_mouse_button(PointerButton::Right),
-            servo::MouseButton::Right
+            servo::MouseButton::Secondary
         );
         assert_eq!(
             servo_mouse_button(PointerButton::Other),
