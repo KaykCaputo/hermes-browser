@@ -515,7 +515,10 @@ mod platform {
             let size = self.inner.size2d().to_i32();
             let pixels = self
                 .inner
-                .read_to_image(DeviceIntRect::from_origin_and_size(Point2D::origin(), size))
+                .read_to_image(DeviceIntRect::from_origin_and_size(
+                    Point2D::origin(),
+                    size.cast_unit(),
+                ))
                 .ok_or(RenderingBridgeError::MissingFrame)?;
             let (width, height) = pixels.dimensions();
             Ok(Image::from_rgba8(SharedPixelBuffer::clone_from_slice(
