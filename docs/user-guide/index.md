@@ -21,7 +21,7 @@ This guide helps you get useful results from the technical preview and recognize
 | Platform | Status | Notes |
 | --- | --- | --- |
 | Linux x86-64 | Primary development platform | X11 and Wayland are supported; multimedia uses system GStreamer plugins. |
-| Windows x86-64 | Build foundation | Native GStreamer is not packaged yet, so media support is limited. |
+| Windows x86-64 | Source-build foundation | No Windows release artifact is currently published; native GStreamer is not packaged yet. |
 | macOS | Not currently packaged | No supported release workflow is available. |
 
 !!! note

@@ -198,22 +198,19 @@ The complete documentation starts at [`docs/index.md`](docs/index.md). Rust API 
 
 ## Release builds
 
-Linux and Windows packages are built on native GitHub-hosted runners. Version tags create a GitHub Release automatically:
+Linux packages are built on an Ubuntu 22.04 GitHub-hosted runner. Version tags create a GitHub Release automatically:
 
 ```bash
 git tag v0.1.2
 git push origin v0.1.2
 ```
 
-The release workflow produces:
-
-- `hermes-browser-linux-x86_64.tar.gz` with a SHA-256 checksum;
-- `hermes-browser-windows-x86_64.zip` with a SHA-256 checksum.
+The release workflow produces `hermes-browser-linux-x86_64.tar.gz` with a SHA-256 checksum.
 
 The Linux executable is built on Ubuntu 22.04 and targets glibc 2.35 or newer.
 The workflow verifies this compatibility baseline before publishing the package.
 
-Manual workflow runs keep both packages as downloadable Actions artifacts without publishing a release. Current packages are intended for testing and are not universal installers.
+Manual workflow runs keep the Linux package as a downloadable Actions artifact without publishing a release. Current packages are intended for testing and are not universal installers.
 
 ## Roadmap
 
@@ -233,7 +230,7 @@ The current version is an engineering preview with known limitations:
 - Web compatibility follows Servo's current implementation maturity.
 - Linux builds use Servo's production GStreamer backend for multimedia playback. Codec availability still depends on the installed GStreamer plugins.
 - Direct MP4/WebM playback and YouTube playback are supported on Linux when the required GStreamer plugins are installed. Website and codec compatibility still follows Servo and the host media stack.
-- Windows builds still use Servo's fallback media backend until the release archive includes the native GStreamer runtime and plugins.
+- Windows remains a source-build foundation and is not currently published as a release artifact.
 - Web content runs in isolated Servo content processes, but those child processes currently run without operating-system sandbox restrictions.
 - Persistence, downloads, permission prompts, extensions, and private profiles are not implemented yet.
 - Background tabs are throttled but are not yet suspended or discarded.

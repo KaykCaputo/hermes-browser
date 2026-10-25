@@ -1,11 +1,11 @@
 ---
 title: Releases
-description: Build and publish Hermes Browser Linux and Windows preview archives.
+description: Build and publish the Hermes Browser Linux preview archive.
 ---
 
 # Releases
 
-Hermes publishes preview archives from native GitHub-hosted Linux and Windows runners. These are portable test artifacts, not signed installers.
+Hermes publishes a Linux preview archive from an Ubuntu 22.04 GitHub-hosted runner. It is a portable test artifact, not a signed installer.
 
 ## Build a Linux package locally
 
@@ -32,7 +32,7 @@ make package-linux PROJECT_VERSION=0.2.0
 
 The Linux quality job installs the same native GStreamer families used by development, verifies required plugins, runs formatting and Clippy, and executes workspace and media tests.
 
-The release workflow builds on Ubuntu 22.04 to preserve the glibc 2.35 compatibility baseline. Windows uses its native runner and currently ships without the GStreamer runtime.
+The release workflow builds on Ubuntu 22.04 to preserve the glibc 2.35 compatibility baseline. Windows release packaging remains deferred until the native build and GStreamer runtime can be validated together.
 
 ## Publish a tagged release
 
@@ -51,5 +51,5 @@ Before pushing a tag:
 4. Test direct media playback when the release changes GStreamer or graphics code.
 5. Confirm the version and expected artifact names.
 
-Manual workflow runs keep the archives as Actions artifacts without publishing a GitHub Release.
+Manual workflow runs keep the Linux archive as an Actions artifact without publishing a GitHub Release.
 

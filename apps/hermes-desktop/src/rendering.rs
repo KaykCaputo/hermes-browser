@@ -516,7 +516,7 @@ mod platform {
             let pixels = self
                 .inner
                 .read_to_image(DeviceIntRect::from_origin_and_size(
-                    Point2D::origin(),
+                    Point2D::origin().cast_unit(),
                     size.cast_unit(),
                 ))
                 .ok_or(RenderingBridgeError::MissingFrame)?;

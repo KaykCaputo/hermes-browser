@@ -79,5 +79,5 @@ All three commands should describe a plugin instead of reporting that it is miss
 
 ## Windows status
 
-Hermes has a native Windows build configuration, but current release archives do not bundle GStreamer and its plugins. Windows builds therefore use Servo's fallback media backend. Windows is useful for development, but Linux remains the complete supported path for the preview.
+Hermes has a native Windows source-build configuration, but the project does not currently publish Windows release artifacts. Native GStreamer and its plugins are not bundled, so Windows builds use Servo's fallback media backend. Linux remains the complete supported path for the preview.
 
