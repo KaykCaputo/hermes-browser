@@ -109,7 +109,7 @@ make setup
 make run
 ```
 
-`make install-linux-deps` currently supports Debian- and Ubuntu-based Linux distributions. Other distributions need equivalent compiler, Fontconfig, X11, Wayland, GStreamer development libraries, and the Base, Good, Bad, Ugly, and libav GStreamer plugin sets.
+`make install-linux-deps` currently supports Debian- and Ubuntu-based Linux distributions and installs the same packages CI uses (`.github/workflows/ci.yml`), including `cmake`, `ninja-build`, and the CI-pinned `clang-14`/`libclang-14-dev` pair (the naming on Ubuntu 22.04 and Debian 12; releases that ship a different clang need the matching package names). Other distributions need equivalent compiler, Fontconfig, X11, Wayland, GStreamer development libraries, and the Base, Good, Bad, Ugly, and libav GStreamer plugin sets.
 
 On Linux, Hermes lets Mesa and DRM select the system's default GPU automatically and ignores an inherited `DRI_PRIME` override. No per-GPU launch configuration is required. Multimedia support depends on the GStreamer plugins installed by `make install-linux-deps`.
 
