@@ -95,18 +95,14 @@ install-linux-deps:
 		printf '%s\n' 'error: this target currently supports apt-based distributions only.' >&2; \
 		exit 1; \
 	}
+	@printf '%s\n' 'Installing the same packages CI uses (.github/workflows/ci.yml). The' \
+		'clang pinning follows the runner (clang-14/libclang-14-dev on Ubuntu 22.04);' \
+		'releases that ship a different clang need the matching package names here.'
 	sudo apt-get update
 	sudo apt-get install --yes \
 		build-essential \
-		pkg-config \
-		libfontconfig1-dev \
-		libgstreamer1.0-dev \
-		libgstreamer-plugins-base1.0-dev \
-		libgstreamer-plugins-bad1.0-dev \
-		libx11-dev \
-		libx11-xcb-dev \
-		libxcursor-dev \
-		libxkbcommon-x11-dev \
+		clang-14 \
+		cmake \
 		gstreamer1.0-libav \
 		gstreamer1.0-plugins-bad \
 		gstreamer1.0-plugins-base \
@@ -114,6 +110,18 @@ install-linux-deps:
 		gstreamer1.0-tools \
 		gstreamer1.0-plugins-ugly \
 		gstreamer1.0-pulseaudio \
+		libclang-14-dev \
+		libfontconfig1-dev \
+		libgstreamer1.0-dev \
+		libgstreamer-plugins-base1.0-dev \
+		libgstreamer-plugins-bad1.0-dev \
+		libunwind-dev \
+		libx11-dev \
+		libx11-xcb-dev \
+		libxcursor-dev \
+		libxkbcommon-x11-dev \
+		ninja-build \
+		pkg-config \
 		xinput
 
 fetch:
