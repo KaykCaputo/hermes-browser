@@ -26,7 +26,13 @@ an origin that can hold logins at all). Nothing matches subdomains.
 
 `PasswordStore::save` refuses empty passwords, control characters (NUL, tab, line breaks and the
 rest) in user names and realms, and values longer than `MAX_USERNAME_BYTES` (1024),
-`MAX_REALM_BYTES` (1024) and `MAX_PASSWORD_BYTES` (4096). An empty user name is allowed.
+`MAX_REALM_BYTES` (1024) and `MAX_PASSWORD_BYTES` (4096). An empty user name is allowed. These
+rules apply to `save` only: `password` and `remove` accept any key, so every login `all()` lists
+can be read and removed. `remove_all` goes on past a login it cannot remove and then reports
+`RemoveAllIncomplete` with the number removed and the first error.
+
+`Debug` output of `LoginKey`, `LoginSummary` and `CsvLogin` shows the origin and kind but only
+the length of a user name (`<redacted, 5 chars>`), so logging a key does not log who the user is.
 
 ## Storage on macOS
 
@@ -35,6 +41,12 @@ rest) in user names and realms, and values longer than `MAX_USERNAME_BYTES` (102
 (`kSecUseKeychain` when adding, `kSecMatchSearchList` when searching, updating and deleting).
 `KeychainBackend::login()` resolves the user's default keychain and passes it like any other;
 `KeychainBackend::file(path, password)` targets one keychain file and is what tests use.
+
+`file()` refuses, before touching anything, a path with a component beginning with
+`login.keychain` (any case) and any path inside `~/Library/Keychains`, `/Library/Keychains` or
+`/System/Library/Keychains`. Apple's implementation adds a newly created keychain to the user's
+search list, and makes it the default keychain if there is none, when its path contains
+`/login.keychain`; other paths are created without changing the search list.
 
 | Attribute | Value |
 | --- | --- |
@@ -85,7 +97,7 @@ attributes:
 | `get` | `SecItemCopyMatching` with `kSecReturnData` | Yes: to unlock a locked keychain, and when the item's access list does not trust this build. |
 | `put`, new login | `SecItemAdd` | Only to unlock a locked keychain. |
 | `put`, existing login | `SecItemAdd` (duplicate), `SecItemCopyMatching` with data to compare, `SecItemUpdate` if different | Yes, as `get`. |
-| `delete` | `SecItemDelete` | Not observed (deleting worked even on a locked test keychain); not verified against a rebuilt application. |
+| `delete` | `SecItemDelete` | No: deleting needs neither the secret nor an unlocked keychain (see below). |
 
 A new item's access list trusts only the program that created it. For an **ad-hoc-signed** build
 that trust is pinned to the binary's code-directory hash (`requirement: cdhash H"…"` in
@@ -97,6 +109,25 @@ until the next build. With user interaction disabled the same read fails with
 stable Developer ID identity keep a stable designated requirement and do not re-prompt. See
 Apple's [TN3137: On Mac keychain APIs and implementations](https://developer.apple.com/documentation/technotes/tn3137-on-mac-keychains)
 for the file-based keychain and its access-list model.
+
+### What a file keychain does and does not protect
+
+In a file-based keychain **only the secret is encrypted**. Any program running as the same user
+can, without a prompt and even while the keychain is locked:
+
+- list every saved site and user name (the service, account and label attributes);
+- delete any of the items;
+- add items under this application's service name, with any account string and any secret.
+
+The access list protects reading the password, nothing else. For the application this means:
+
+- treat what `list`, `all` and `logins_for` return as **untrusted input**: an item may have been
+  planted by another program, and its user name or realm can contain anything the encoding allows
+  (escaped control characters included). Display it safely; never interpret it.
+- **never fill a login into a page merely because an item for that origin exists.** Filling must
+  follow a choice the user makes in Mercury's own UI. Otherwise a program that can add one item
+  under the service name could get a password of its choosing filled into a site.
+- do not rely on a login staying saved: another program can delete it.
 
 ### Errors
 
@@ -123,9 +154,17 @@ one random byte and rejects bytes at or above `256 - 256 % n`, so there is no mo
 `parse_logins_csv` reads the exports of Chrome, Edge and Brave (`name,url,username,password,note`,
 `note` optional), Firefox (`url,username,password,httpRealm,formActionOrigin,guid,timeCreated,timeLastUsed,timePasswordChanged`)
 and Safari (`Title,URL,Username,Password,Notes,OTPAuth`, `Notes` optional), told apart by their
-header. Rows with an unusable URL, an Android-app entry, an empty password, broken quoting or the
-wrong number of fields are skipped and listed by line number with a reason that never contains a
-field value. `write_logins_csv` writes Chrome's format.
+header. The Safari header comes from Apple's Safari User Guide as quoted in
+[Mozilla bug 1827467](https://bugzilla.mozilla.org/show_bug.cgi?id=1827467); it has not been
+checked against a real export. Rows with an unusable URL, an Android-app entry, an empty
+password, broken quoting, the wrong number of fields, or a user name, realm or password that
+`save` would refuse are skipped and listed by line number with a fixed reason that never
+contains a field value. `write_logins_csv` writes Chrome's format.
+
+**Spreadsheet formulas.** A spreadsheet that opens an exported file may run values beginning with
+`=`, `+`, `-` or `@` as formulas. The file is deliberately not altered to prevent this (for
+example with a leading quote), because a password must round-trip exactly; tell the user not to
+open the export in a spreadsheet.
 
 **An exported file holds every password in clear text.** Write one only when the user asks for
 it, to the place they chose, as a new file only they can read (mode `0600`), and suggest
@@ -140,7 +179,8 @@ Keychain tests must never read or change the developer's own keychains, nor show
 - before the first Keychain call, the test process disables Keychain user interaction for its
   whole life (`SecKeychain::disable_user_interaction`, held in a static), so an operation that
   would prompt fails instead;
-- creating a keychain with `SecKeychainCreate` does not add it to the search list; check
+- creating a keychain with `SecKeychainCreate` does not add it to the search list unless its
+  path contains `/login.keychain`, which `KeychainBackend::file` refuses; check
   `security list-keychains -d user` before and after a test run all the same;
 - the backend contract (`tests/backend_contract.rs`) runs the same suite against `MemoryBackend`
   and a temporary `KeychainBackend`.
