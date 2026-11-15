@@ -7,5 +7,5 @@ their own licence files.
 
 - Hermes Browser — https://github.com/KaykCaputo/hermes-browser — MPL-2.0 — Mercury Browser is derived from this project at commit `a41f18e`.
 - Servo `servo-canvas` 0.8.0 — https://github.com/servo/servo, commit `4e136d8ef31b7c4748fbfac606ca463f3efd7537`, path `components/canvas` — MPL-2.0 — vendored in `third_party/servo-canvas` with a small fix to its GPU (vello) backend; see `third_party/servo-canvas/MERCURY.md`.
-- Zervo — https://github.com/Goddv/Zervo, commit `86cb7126` — MPL-2.0 — `scripts/bundle-macos.sh` (Info.plist keys) adapted in `apps/mercury-desktop/resources/macos/Info.plist.in`.
+- Zervo — https://github.com/Goddv/Zervo, commit `86cb7126` — MPL-2.0 — `scripts/bundle-macos.sh` (Info.plist keys) adapted in `apps/mercury-desktop/resources/macos/Info.plist.in`; `scripts/make-icns.sh` adapted in `scripts/macos/make-icns.sh`.
 - Servo 0.8.0 — https://github.com/servo/servo, tag `v0.8.0` — MPL-2.0 — `ports/servoshell/platform/macos/mod.rs` (the embedded `__TEXT,__info_plist` static) adapted in `apps/mercury-desktop/src/platform_macos.rs`; `ports/servoshell/platform/macos/Info.plist` adapted in `apps/mercury-desktop/resources/macos/Info.plist.in`.
