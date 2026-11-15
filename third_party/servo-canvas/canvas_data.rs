@@ -41,6 +41,20 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         }
     }
 
+    /// Mercury: like `new`, for a draw target that may fail to start.
+    #[cfg(feature = "vello")]
+    pub(crate) fn try_new(
+        size: Size2D<u64>,
+        paint_api: CrossProcessPaintApi,
+        new_draw_target: impl FnOnce(Size2D<u32>) -> Option<DrawTarget>,
+    ) -> Option<CanvasData<DrawTarget>> {
+        Some(CanvasData {
+            draw_target: new_draw_target(size.max(MIN_WR_IMAGE_SIZE).cast())?,
+            paint_api,
+            image_key: None,
+        })
+    }
+
     pub(crate) fn set_image_key(&mut self, image_key: ImageKey) {
         let (descriptor, data) = self.draw_target.image_descriptor_and_serializable_data();
         self.paint_api.add_image(image_key, descriptor, data, false);

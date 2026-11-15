@@ -347,7 +347,16 @@ impl Canvas {
             .as_str()
         {
             #[cfg(feature = "vello")]
-            "vello" => Some(Self::Vello(CanvasData::new(size, paint_api))),
+            // Mercury: fall back to the CPU backend when the GPU canvas cannot start.
+            "vello" => Some(
+                CanvasData::try_new(
+                    size,
+                    paint_api.clone(),
+                    crate::vello_backend::VelloDrawTarget::try_new,
+                )
+                .map(Self::Vello)
+                .unwrap_or_else(|| Self::VelloCPU(CanvasData::new(size, paint_api))),
+            ),
             _ => Some(Self::VelloCPU(CanvasData::new(size, paint_api))),
         }
     }

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use euclid::default::{Point2D, Rect, Size2D, Transform2D};
 use fonts::FontIdentifier;
@@ -34,6 +35,7 @@ use vello::wgpu::{
     TexelCopyTextureInfoBase, Texture, TextureDescriptor, TextureDimension, TextureFormat,
     TextureUsages, TextureView, TextureViewDescriptor,
 };
+use vello::wgpu::ErrorFilter;
 use vello::{kurbo, peniko};
 use webrender_api::{ImageDescriptor, ImageDescriptorFlags};
 
@@ -44,6 +46,12 @@ thread_local! {
     /// The shared font cache used by all canvases that render on a thread.
     static SHARED_FONT_CACHE: RefCell<HashMap<FontIdentifier, peniko::FontData>> = RefCell::default();
 }
+
+/// Mercury: set when the GPU canvas could not start; later canvases go
+/// straight to the CPU backend for the rest of the process.
+static GPU_CANVAS_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+/// Mercury: set once a failed render has been logged.
+static RENDER_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) struct VelloDrawTarget {
     device: Device,
@@ -196,12 +204,23 @@ impl VelloDrawTarget {
             },
         }
     }
-}
 
-impl GenericDrawTarget for VelloDrawTarget {
-    type SourceSurface = Vec<u8>; // TODO: this should be texture
+    /// Mercury: returns `None` when the GPU canvas cannot start, so that the
+    /// caller draws this canvas on the CPU. The reason is logged once and the
+    /// GPU is not tried again in this process.
+    pub(crate) fn try_new(size: Size2D<u32>) -> Option<Self> {
+        if GPU_CANVAS_UNAVAILABLE.load(Ordering::Relaxed) {
+            return None;
+        }
+        Self::start(size)
+            .map_err(|reason| {
+                GPU_CANVAS_UNAVAILABLE.store(true, Ordering::Relaxed);
+                log::warn!("GPU 2D canvas unavailable ({reason}); drawing 2D canvases on the CPU");
+            })
+            .ok()
+    }
 
-    fn new(size: Size2D<u32>) -> Self {
+    fn start(size: Size2D<u32>) -> Result<Self, String> {
         // TODO: we should read prefs instead of env
 
         // we forbid GL because it clashes with servo's GL usage
@@ -219,10 +238,16 @@ impl GenericDrawTarget for VelloDrawTarget {
             instance,
             devices: Vec::new(),
         };
-        let device_id = pollster::block_on(context.device(None)).unwrap();
+        let Some(device_id) = pollster::block_on(context.device(None)) else {
+            return Err("no GPU adapter or device".to_owned());
+        };
         let device_handle = &mut context.devices[device_id];
         let device = device_handle.device.clone();
         let queue = device_handle.queue.clone();
+        device.on_uncaptured_error(Arc::new(|error| {
+            log::error!("VELLO WGPU ERROR: {error}");
+        }));
+        let error_scope = device.push_error_scope(ErrorFilter::Validation);
         let renderer = vello::Renderer::new(
             &device,
             vello::RendererOptions {
@@ -231,12 +256,22 @@ impl GenericDrawTarget for VelloDrawTarget {
                 antialiasing_support: vello::AaSupport::area_only(),
                 pipeline_cache: None,
             },
-        )
-        .unwrap();
-        device.on_uncaptured_error(Arc::new(|error| {
-            log::error!("VELLO WGPU ERROR: {error}");
-        }));
-        Self::new_with_renderer(device, queue, Rc::new(RefCell::new(renderer)), size)
+        );
+        let renderer = match (renderer, pollster::block_on(error_scope.pop())) {
+            (Ok(renderer), None) => renderer,
+            (Err(error), _) => return Err(format!("renderer creation failed: {error}")),
+            (Ok(_), Some(error)) => return Err(format!("renderer creation failed: {error}")),
+        };
+        Ok(Self::new_with_renderer(device, queue, Rc::new(RefCell::new(renderer)), size))
+    }
+}
+
+impl GenericDrawTarget for VelloDrawTarget {
+    type SourceSurface = Vec<u8>; // TODO: this should be texture
+
+    /// Mercury: canvases are created through `try_new`; nothing calls this.
+    fn new(size: Size2D<u32>) -> Self {
+        Self::try_new(size).expect("GPU 2D canvas unavailable")
     }
 
     fn canvas_store_sizes(
@@ -678,15 +713,16 @@ fn convert_to_brush(
 }
 
 impl VelloDrawTarget {
-    fn render_to_texture(&mut self) {
+    fn render_to_texture(&mut self) -> bool {
         if matches!(
             self.state,
             State::RenderedToTexture | State::RenderedToBuffer
         ) {
-            return;
+            return true;
         }
 
-        self.renderer
+        let result = self
+            .renderer
             .borrow_mut()
             .render_to_texture(
                 &self.device,
@@ -699,8 +735,15 @@ impl VelloDrawTarget {
                     height: self.size.height,
                     antialiasing_method: vello::AaConfig::Area,
                 },
-            )
-            .unwrap();
+            );
+        // Mercury: on failure keep the scene for the next render and leave
+        // the last rendered frame in place.
+        if let Err(error) = result {
+            if !RENDER_FAILURE_LOGGED.swap(true, Ordering::Relaxed) {
+                log::warn!("VELLO RENDER ERROR {error}");
+            }
+            return false;
+        }
         self.state = State::RenderedToTexture;
         // prune scene
         self.scene.reset();
@@ -709,13 +752,16 @@ impl VelloDrawTarget {
             self.scene
                 .push_clip_layer(peniko::Fill::NonZero, kurbo::Affine::IDENTITY, &path.0);
         }
+        true
     }
 
     fn render_to_buffer(&mut self) {
         if matches!(self.state, State::RenderedToBuffer) {
             return;
         }
-        self.render_to_texture();
+        if !self.render_to_texture() {
+            return;
+        }
 
         let size = extend3d(self.size);
         // TODO(perf): do a render pass that will multiply with alpha on GPU
