@@ -1,0 +1,252 @@
+//! Search engines: the built-in table, user-defined engines, and address-bar keywords.
+
+use serde::{Deserialize, Serialize};
+
+use crate::error::SettingsError;
+use crate::settings::{Repair, SearchSettings};
+
+/// The id of the engine used when none is chosen: DuckDuckGo, as the browser uses today.
+pub const DEFAULT_ENGINE_ID: &str = "duckduckgo";
+/// The placeholder a URL template carries where the query goes (OpenSearch 1.1).
+pub const SEARCH_TERMS_PLACEHOLDER: &str = "{searchTerms}";
+/// The longest URL template accepted, in bytes.
+pub const MAX_TEMPLATE_BYTES: usize = 2048;
+/// The longest engine id accepted, in bytes.
+pub const MAX_ENGINE_ID_BYTES: usize = 64;
+/// The longest engine name accepted, in bytes.
+pub const MAX_ENGINE_NAME_BYTES: usize = 100;
+/// The longest keyword accepted, in bytes.
+pub const MAX_KEYWORD_BYTES: usize = 32;
+/// How many custom engines are kept.
+pub const MAX_CUSTOM_ENGINES: usize = 50;
+
+/// A search engine.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchEngine {
+    /// A stable identifier: 1 to [`MAX_ENGINE_ID_BYTES`] of `a-z`, `0-9`, `-`, `_`, `.`.
+    pub id: String,
+    /// The name shown to the user.
+    pub name: String,
+    /// The address-bar keyword (`"w"` in `"w rust book"`); empty for none. No whitespace.
+    pub keyword: String,
+    /// The results page, with [`SEARCH_TERMS_PLACEHOLDER`] where the query goes.
+    pub url_template: String,
+    /// Where suggestions would be fetched from, in the same form. Carried as data only:
+    /// nothing in this crate fetches anything.
+    pub suggest_template: Option<String>,
+}
+
+/// The built-in engines, the default first.
+pub fn builtin_engines() -> Vec<SearchEngine> {
+    vec![duckduckgo()]
+}
+
+fn engine(
+    id: &str,
+    name: &str,
+    keyword: &str,
+    url_template: &str,
+    suggest_template: Option<&str>,
+) -> SearchEngine {
+    SearchEngine {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        keyword: keyword.to_owned(),
+        url_template: url_template.to_owned(),
+        suggest_template: suggest_template.map(str::to_owned),
+    }
+}
+
+fn duckduckgo() -> SearchEngine {
+    engine(
+        DEFAULT_ENGINE_ID,
+        "DuckDuckGo",
+        "@duckduckgo",
+        "https://duckduckgo.com/?q={searchTerms}",
+        Some("https://duckduckgo.com/ac/?q={searchTerms}&type=list"),
+    )
+}
+
+/// Where in a URL the placeholder sits, which decides how the query is encoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Component {
+    Path,
+    Query,
+    Fragment,
+}
+
+impl SearchEngine {
+    /// Checks the template: http or https, exactly one `{searchTerms}`, a valid URL once filled.
+    ///
+    /// Also refuses other `{…}` placeholders, a placeholder in the scheme or host, a template
+    /// over [`MAX_TEMPLATE_BYTES`], the same for `suggest_template` when present, and an id,
+    /// name or keyword outside the limits documented on the fields.
+    pub fn validate(&self) -> Result<(), SettingsError> {
+        self.check_identity()
+            .and_then(|()| check_template(&self.url_template).map(|_| ()))
+            .and_then(|()| match &self.suggest_template {
+                Some(template) => check_template(template)
+                    .map(|_| ())
+                    .map_err(|reason| format!("suggestion template: {reason}")),
+                None => Ok(()),
+            })
+            .map_err(|reason| SettingsError::InvalidSearchEngine {
+                id: self.id.clone(),
+                reason,
+            })
+    }
+
+    fn check_identity(&self) -> Result<(), String> {
+        let id_ok = !self.id.is_empty()
+            && self.id.len() <= MAX_ENGINE_ID_BYTES
+            && self.id.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"-_.".contains(&byte)
+            });
+        if !id_ok {
+            return Err(format!(
+                "the id must be 1 to {MAX_ENGINE_ID_BYTES} bytes of a-z, 0-9, '-', '_' or '.'"
+            ));
+        }
+        if self.name.trim().is_empty()
+            || self.name.len() > MAX_ENGINE_NAME_BYTES
+            || self.name.chars().any(char::is_control)
+        {
+            return Err(format!(
+                "the name must be 1 to {MAX_ENGINE_NAME_BYTES} bytes without control characters"
+            ));
+        }
+        if self.keyword.len() > MAX_KEYWORD_BYTES
+            || self
+                .keyword
+                .chars()
+                .any(|c| c.is_whitespace() || c.is_control())
+        {
+            return Err(format!(
+                "the keyword must be at most {MAX_KEYWORD_BYTES} bytes without spaces"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Checks a template and says where its placeholder sits.
+fn check_template(template: &str) -> Result<Component, String> {
+    if template.len() > MAX_TEMPLATE_BYTES {
+        return Err(format!(
+            "the template is longer than {MAX_TEMPLATE_BYTES} bytes"
+        ));
+    }
+    let mut places = template.match_indices(SEARCH_TERMS_PLACEHOLDER);
+    let Some((position, _)) = places.next() else {
+        return Err(format!("the template has no {SEARCH_TERMS_PLACEHOLDER}"));
+    };
+    if places.next().is_some() {
+        return Err(format!(
+            "the template has more than one {SEARCH_TERMS_PLACEHOLDER}"
+        ));
+    }
+    let rest = template.replacen(SEARCH_TERMS_PLACEHOLDER, "", 1);
+    if rest.contains(['{', '}']) {
+        return Err("the template has a placeholder other than {searchTerms}".to_owned());
+    }
+
+    let before = &template[..position];
+    let Some((scheme, after_scheme)) = before.split_once("://") else {
+        return Err("the placeholder must come after the host".to_owned());
+    };
+    if !(scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")) {
+        return Err("the template must be an http or https URL".to_owned());
+    }
+    let component = if after_scheme.contains('#') {
+        Component::Fragment
+    } else if after_scheme.contains('?') {
+        Component::Query
+    } else if after_scheme.contains('/') {
+        Component::Path
+    } else {
+        return Err("the placeholder must come after the host".to_owned());
+    };
+
+    let filled = template.replacen(SEARCH_TERMS_PLACEHOLDER, "test", 1);
+    let url = url::Url::parse(&filled).map_err(|error| format!("not a valid URL: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("the template must be an http or https URL".to_owned());
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        return Err("the template has no host".to_owned());
+    }
+    Ok(component)
+}
+
+/// The custom engines that can be used alongside the built-in ones, and a repair for each one
+/// that cannot: invalid, or reusing a built-in id, an earlier id, or a keyword already taken
+/// (compared case-insensitively). At most [`MAX_CUSTOM_ENGINES`] are kept.
+pub(crate) fn usable_custom_engines(custom: &[SearchEngine]) -> (Vec<SearchEngine>, Vec<Repair>) {
+    const FIELD: &str = "search.custom_engines";
+    let builtins = builtin_engines();
+    let mut ids: Vec<String> = builtins.iter().map(|engine| engine.id.clone()).collect();
+    let mut keywords: Vec<String> = builtins
+        .iter()
+        .filter(|engine| !engine.keyword.is_empty())
+        .map(|engine| engine.keyword.to_lowercase())
+        .collect();
+    let mut usable = Vec::new();
+    let mut repairs = Vec::new();
+
+    for engine in custom {
+        let drop = |reason: String| Repair {
+            field: FIELD,
+            reason: format!("dropped engine {:?}: {reason}", engine.id),
+        };
+        if usable.len() == MAX_CUSTOM_ENGINES {
+            repairs.push(drop(format!(
+                "more than {MAX_CUSTOM_ENGINES} custom engines"
+            )));
+            continue;
+        }
+        if let Err(error) = engine.validate() {
+            repairs.push(drop(error.to_string()));
+            continue;
+        }
+        if builtins.iter().any(|builtin| builtin.id == engine.id) {
+            repairs.push(drop("the id is a built-in engine's".to_owned()));
+            continue;
+        }
+        if ids.contains(&engine.id) {
+            repairs.push(drop("the id is used by an earlier engine".to_owned()));
+            continue;
+        }
+        let keyword = engine.keyword.to_lowercase();
+        if !keyword.is_empty() && keywords.contains(&keyword) {
+            repairs.push(drop(format!(
+                "the keyword {:?} is already taken",
+                engine.keyword
+            )));
+            continue;
+        }
+        ids.push(engine.id.clone());
+        if !keyword.is_empty() {
+            keywords.push(keyword);
+        }
+        usable.push(engine.clone());
+    }
+    (usable, repairs)
+}
+
+impl SearchSettings {
+    /// Built-in engines followed by valid custom ones; ids and keywords unique.
+    pub fn engines(&self) -> Vec<SearchEngine> {
+        let mut engines = builtin_engines();
+        engines.extend(usable_custom_engines(&self.custom_engines).0);
+        engines
+    }
+
+    /// The engine named by `default_engine`, or DuckDuckGo when that is not a usable engine.
+    pub fn default_engine(&self) -> SearchEngine {
+        self.engines()
+            .into_iter()
+            .find(|engine| engine.id == self.default_engine)
+            .unwrap_or_else(duckduckgo)
+    }
+}

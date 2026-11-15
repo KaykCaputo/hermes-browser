@@ -10,5 +10,21 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod atomic;
+mod error;
+mod search;
+mod settings;
+mod store;
 
 pub use atomic::write_private_atomic;
+pub use error::SettingsError;
+pub use search::{
+    DEFAULT_ENGINE_ID, MAX_CUSTOM_ENGINES, MAX_ENGINE_ID_BYTES, MAX_ENGINE_NAME_BYTES,
+    MAX_KEYWORD_BYTES, MAX_TEMPLATE_BYTES, SEARCH_TERMS_PLACEHOLDER, SearchEngine, builtin_engines,
+};
+pub use settings::{
+    AppearanceSettings, ClearOnExit, DownloadSettings, MAX_LANGUAGE_TAG_BYTES,
+    MAX_NEVER_SAVE_ORIGINS, MAX_ORIGIN_BYTES, MAX_PATH_BYTES, MAX_URL_BYTES, MAX_ZOOM_PERCENT,
+    MIN_ZOOM_PERCENT, PasswordSettings, PrivacySettings, Repair, SearchSettings, Settings,
+    StartupBehavior, Theme, WebSettings,
+};
+pub use store::{Loaded, MAX_SETTINGS_FILE_BYTES, SETTINGS_FORMAT_VERSION, SettingsStore};

@@ -1,0 +1,415 @@
+//! The settings model, its defaults and its validation.
+
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+use crate::search::{DEFAULT_ENGINE_ID, SearchEngine};
+
+/// The smallest default page zoom, in percent.
+pub const MIN_ZOOM_PERCENT: u16 = 30;
+/// The largest default page zoom, in percent.
+pub const MAX_ZOOM_PERCENT: u16 = 500;
+/// The longest URL kept anywhere in settings or a session, in bytes.
+pub const MAX_URL_BYTES: usize = 8 * 1024;
+/// The longest BCP 47 language tag accepted, in bytes (RFC 5646 §4.4.1's recommended minimum
+/// buffer).
+pub const MAX_LANGUAGE_TAG_BYTES: usize = 35;
+/// The longest download directory accepted, in bytes.
+pub const MAX_PATH_BYTES: usize = 4096;
+/// How many origins the "never save passwords" list keeps.
+pub const MAX_NEVER_SAVE_ORIGINS: usize = 1000;
+/// The longest entry in the "never save passwords" list, in bytes.
+pub const MAX_ORIGIN_BYTES: usize = 300;
+
+/// Everything the user can set. Every field has a default, so a file that lacks some of them,
+/// or is empty, still loads.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    /// What a new window shows at start-up.
+    pub startup: StartupBehavior,
+    /// The home page; empty means none.
+    pub homepage: String,
+    /// Search engines and address-bar search.
+    pub search: SearchSettings,
+    /// Where downloads go.
+    pub downloads: DownloadSettings,
+    /// How the browser looks.
+    pub appearance: AppearanceSettings,
+    /// Privacy and security.
+    pub privacy: PrivacySettings,
+    /// The password manager.
+    pub passwords: PasswordSettings,
+    /// Web-platform features.
+    pub web: WebSettings,
+    /// The user-interface language as a BCP 47 tag; `None` follows the system.
+    pub language: Option<String>,
+}
+
+/// What the browser shows when it starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StartupBehavior {
+    /// A new tab page.
+    #[default]
+    NewTab,
+    /// The home page.
+    Homepage,
+    /// The tabs of the previous session.
+    RestoreSession,
+}
+
+/// Search settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SearchSettings {
+    /// The id of the engine used for address-bar searches.
+    pub default_engine: String,
+    /// Engines the user added, after the built-in ones.
+    pub custom_engines: Vec<SearchEngine>,
+    /// Whether to fetch search suggestions while typing. Off by default because it sends every
+    /// keystroke in the address bar to the search engine.
+    pub suggestions: bool,
+}
+
+impl Default for SearchSettings {
+    fn default() -> Self {
+        Self {
+            default_engine: DEFAULT_ENGINE_ID.to_owned(),
+            custom_engines: Vec::new(),
+            suggestions: false,
+        }
+    }
+}
+
+/// Download settings.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DownloadSettings {
+    /// An absolute directory; `None` is the platform's Downloads folder.
+    pub directory: Option<PathBuf>,
+    /// Whether to ask where to save each download.
+    pub ask_where_to_save: bool,
+}
+
+/// The colour scheme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Theme {
+    /// Follow the system.
+    #[default]
+    System,
+    /// Always light.
+    Light,
+    /// Always dark.
+    Dark,
+}
+
+/// Appearance settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppearanceSettings {
+    /// The colour scheme.
+    pub theme: Theme,
+    /// The zoom of a page with no zoom of its own, in percent
+    /// ([`MIN_ZOOM_PERCENT`]..=[`MAX_ZOOM_PERCENT`]).
+    pub default_zoom_percent: u16,
+    /// Whether the bookmarks bar is shown.
+    pub show_bookmarks_bar: bool,
+    /// Whether the toolbar has a home button.
+    pub show_home_button: bool,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        Self {
+            theme: Theme::System,
+            default_zoom_percent: 100,
+            show_bookmarks_bar: true,
+            show_home_button: false,
+        }
+    }
+}
+
+/// Privacy and security settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrivacySettings {
+    /// Block ads and trackers.
+    pub block_ads_and_trackers: bool,
+    /// Load pages over HTTPS only.
+    pub https_only: bool,
+    /// Block pop-up windows.
+    pub block_popups: bool,
+    /// Send the Global Privacy Control signal.
+    pub global_privacy_control: bool,
+    /// What is cleared when the browser quits.
+    pub clear_on_exit: ClearOnExit,
+}
+
+impl Default for PrivacySettings {
+    fn default() -> Self {
+        Self {
+            block_ads_and_trackers: true,
+            https_only: false,
+            block_popups: true,
+            global_privacy_control: true,
+            clear_on_exit: ClearOnExit::default(),
+        }
+    }
+}
+
+/// Data cleared when the browser quits. Nothing by default.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClearOnExit {
+    /// Browsing history.
+    pub history: bool,
+    /// Cookies and site data.
+    pub cookies: bool,
+    /// The cache.
+    pub cache: bool,
+}
+
+/// Password-manager settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PasswordSettings {
+    /// Offer to save passwords.
+    pub offer_to_save: bool,
+    /// Origins (`scheme://host[:port]`) for which saving was declined for good.
+    pub never_save_origins: Vec<String>,
+}
+
+impl Default for PasswordSettings {
+    fn default() -> Self {
+        Self {
+            offer_to_save: true,
+            never_save_origins: Vec::new(),
+        }
+    }
+}
+
+/// Web-platform settings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebSettings {
+    /// Turn on web features the engine marks as experimental.
+    pub experimental_web_features: bool,
+    /// Draw `<canvas>` on the GPU.
+    pub gpu_canvas: bool,
+}
+
+impl Default for WebSettings {
+    fn default() -> Self {
+        Self {
+            experimental_web_features: true,
+            gpu_canvas: true,
+        }
+    }
+}
+
+/// One value that [`Settings::validated`] changed, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Repair {
+    /// The dotted path of the field, for example `appearance.default_zoom_percent`.
+    pub field: &'static str,
+    /// What was wrong and what was done about it.
+    pub reason: String,
+}
+
+impl Settings {
+    /// Repairs out-of-range or inconsistent values and reports each repair.
+    ///
+    /// In field order: a home page that is not an `http`, `https`, `file` or `about` URL, or is
+    /// longer than [`MAX_URL_BYTES`], is cleared; unusable custom search engines are dropped
+    /// (see [`SearchSettings::engines`]) and a default engine that does not exist becomes
+    /// [`DEFAULT_ENGINE_ID`]; a download directory that is not absolute, not UTF-8 or longer
+    /// than [`MAX_PATH_BYTES`] becomes `None`; a zoom outside
+    /// [`MIN_ZOOM_PERCENT`]..=[`MAX_ZOOM_PERCENT`] becomes 100; "never save" entries that are
+    /// not `scheme://host[:port]` over http(s) are dropped, the rest written in their canonical
+    /// form, duplicates removed, and the list cut at [`MAX_NEVER_SAVE_ORIGINS`]; a language
+    /// that is not a plausible BCP 47 tag becomes `None`. Validating the result again repairs
+    /// nothing.
+    pub fn validated(mut self) -> (Self, Vec<Repair>) {
+        let mut repairs = Vec::new();
+
+        if !self.homepage.is_empty() && !is_restorable_url(&self.homepage) {
+            repairs.push(Repair {
+                field: "homepage",
+                reason: format!(
+                    "not an http, https, file or about URL of at most {MAX_URL_BYTES} bytes; \
+                     cleared"
+                ),
+            });
+            self.homepage.clear();
+        }
+
+        let (usable, dropped) = crate::search::usable_custom_engines(&self.search.custom_engines);
+        repairs.extend(dropped);
+        self.search.custom_engines = usable;
+        if !self
+            .search
+            .engines()
+            .iter()
+            .any(|engine| engine.id == self.search.default_engine)
+        {
+            repairs.push(Repair {
+                field: "search.default_engine",
+                reason: format!(
+                    "no engine has the id {:?}; using {DEFAULT_ENGINE_ID:?}",
+                    truncated(&self.search.default_engine, 64)
+                ),
+            });
+            self.search.default_engine = DEFAULT_ENGINE_ID.to_owned();
+        }
+
+        if let Some(directory) = &self.downloads.directory {
+            let problem = match directory.to_str() {
+                None => Some("is not valid UTF-8"),
+                Some(text) if text.len() > MAX_PATH_BYTES => Some("is too long"),
+                Some(_) if !directory.is_absolute() => Some("is not absolute"),
+                Some(_) => None,
+            };
+            if let Some(problem) = problem {
+                repairs.push(Repair {
+                    field: "downloads.directory",
+                    reason: format!("the directory {problem}; using the Downloads folder"),
+                });
+                self.downloads.directory = None;
+            }
+        }
+
+        let zoom = self.appearance.default_zoom_percent;
+        if !(MIN_ZOOM_PERCENT..=MAX_ZOOM_PERCENT).contains(&zoom) {
+            repairs.push(Repair {
+                field: "appearance.default_zoom_percent",
+                reason: format!(
+                    "{zoom} is outside {MIN_ZOOM_PERCENT}-{MAX_ZOOM_PERCENT}; using 100"
+                ),
+            });
+            self.appearance.default_zoom_percent = 100;
+        }
+
+        let (origins, origin_repairs) =
+            canonical_origins(std::mem::take(&mut self.passwords.never_save_origins));
+        self.passwords.never_save_origins = origins;
+        repairs.extend(origin_repairs);
+
+        if let Some(language) = &self.language
+            && !is_plausible_language_tag(language)
+        {
+            repairs.push(Repair {
+                field: "language",
+                reason: format!(
+                    "{:?} is not a BCP 47 language tag; following the system",
+                    truncated(language, 64)
+                ),
+            });
+            self.language = None;
+        }
+
+        (self, repairs)
+    }
+}
+
+/// Whether `url` may be opened from settings or restored from a session: an `http`, `https`,
+/// `file` or `about` URL of at most [`MAX_URL_BYTES`].
+pub(crate) fn is_restorable_url(url: &str) -> bool {
+    url.len() <= MAX_URL_BYTES
+        && url::Url::parse(url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https" | "file" | "about"))
+}
+
+/// At most `max` bytes of `text`, cut at a character boundary.
+pub(crate) fn truncated(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// A language tag shaped like BCP 47: a primary language subtag of 2 to 8 letters, then
+/// subtags of 1 to 8 letters or digits, separated by `-`, at most [`MAX_LANGUAGE_TAG_BYTES`] in
+/// all. It does not check the subtags against the registry.
+fn is_plausible_language_tag(tag: &str) -> bool {
+    if tag.len() > MAX_LANGUAGE_TAG_BYTES {
+        return false;
+    }
+    let mut subtags = tag.split('-');
+    let primary_ok = subtags.next().is_some_and(|primary| {
+        (2..=8).contains(&primary.len()) && primary.bytes().all(|byte| byte.is_ascii_alphabetic())
+    });
+    primary_ok
+        && subtags.all(|subtag| {
+            (1..=8).contains(&subtag.len())
+                && subtag.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
+/// The "never save" list with every entry an http(s) origin in canonical form
+/// (`https://example.org`, `http://localhost:8080`), duplicates removed and the length capped.
+fn canonical_origins(entries: Vec<String>) -> (Vec<String>, Vec<Repair>) {
+    const FIELD: &str = "passwords.never_save_origins";
+    let mut origins: Vec<String> = Vec::new();
+    let mut repairs = Vec::new();
+    let mut over_limit = 0_usize;
+
+    for entry in entries {
+        let shown = truncated(&entry, 64);
+        let Some(origin) = canonical_origin(&entry) else {
+            repairs.push(Repair {
+                field: FIELD,
+                reason: format!("{shown:?} is not scheme://host[:port]; dropped"),
+            });
+            continue;
+        };
+        if origins.contains(&origin) {
+            repairs.push(Repair {
+                field: FIELD,
+                reason: format!("{shown:?} is listed already; dropped"),
+            });
+            continue;
+        }
+        if origins.len() == MAX_NEVER_SAVE_ORIGINS {
+            over_limit += 1;
+            continue;
+        }
+        if origin != entry {
+            repairs.push(Repair {
+                field: FIELD,
+                reason: format!("{shown:?} written as {origin:?}"),
+            });
+        }
+        origins.push(origin);
+    }
+    if over_limit > 0 {
+        repairs.push(Repair {
+            field: FIELD,
+            reason: format!(
+                "{over_limit} entries beyond the first {MAX_NEVER_SAVE_ORIGINS} dropped"
+            ),
+        });
+    }
+    (origins, repairs)
+}
+
+fn canonical_origin(entry: &str) -> Option<String> {
+    if entry.len() > MAX_ORIGIN_BYTES {
+        return None;
+    }
+    let url = url::Url::parse(entry).ok()?;
+    let plain = matches!(url.scheme(), "http" | "https")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.host().is_some();
+    plain.then(|| url.origin().ascii_serialization())
+}

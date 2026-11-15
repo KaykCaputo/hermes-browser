@@ -25,6 +25,8 @@ glow = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+serde = "1"
+serde_json = "1"
 # The `vello` (GPU canvas) feature is on through the vendored fix in `third_party/servo-canvas`:
 # servo-canvas 0.8.0's vello backend does not compile against wgpu 30 as published
 # (`vello_backend.rs:756`, `get_mapped_range` returns a `Result`). See its MERCURY.md.
