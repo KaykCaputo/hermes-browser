@@ -26,6 +26,13 @@ impl Default for LaunchOptions {
     }
 }
 
+impl LaunchOptions {
+    /// Screenshot and background runs are automated: they never use the user's own profile.
+    pub(crate) fn is_automated(&self) -> bool {
+        self.screenshot.is_some() || self.background
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ScreenshotOptions {
     pub path: PathBuf,
@@ -57,9 +64,31 @@ Options:
                                    (servoshell's list minus the async clipboard and
                                    WebGPU, which are always off)
   --profile-dir <directory>        Keep cookies and site data in this directory
-                                   (a screenshot run otherwise uses a temporary one)
+                                   (screenshot and background runs otherwise use a temporary one)
   --help                           Print this help and exit
-  --version                        Print the version and exit";
+  --version                        Print the version and exit
+
+Exit status:
+  0  Success
+  1  Failure, or a screenshot could not be saved
+  2  Invalid command line
+  3  The screenshot's page did not finish loading
+  4  The profile is in use by another Mercury Browser";
+
+/// `--profile-dir` needs a path that is valid UTF-8; anything else would be silently altered
+/// by the conversion to `String`. Returns the usage error to print, if any.
+pub(crate) fn reject_non_utf8_profile_dir(arguments: &[std::ffi::OsString]) -> Option<CliOutcome> {
+    let value = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--profile-dir" && pair[1].to_str().is_none())?;
+    Some(CliOutcome::PrintAndExit {
+        text: format!(
+            "mercury-browser: the --profile-dir path '{}' is not valid UTF-8; choose another directory\n\n{USAGE}",
+            value[1].to_string_lossy()
+        ),
+        code: 2,
+    })
+}
 
 /// Parses the command line, excluding the program name.
 pub(crate) fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> CliOutcome {
@@ -409,6 +438,72 @@ mod tests {
         };
 
         assert!(text.contains("--profile-dir <directory>"));
+    }
+
+    #[test]
+    fn screenshot_and_background_runs_are_automated() {
+        let automated = |arguments: &[&str]| {
+            let CliOutcome::Run(options) = parse(arguments) else {
+                panic!("these arguments should run the browser");
+            };
+            options.is_automated()
+        };
+
+        assert!(!automated(&[]));
+        assert!(!automated(&["--profile-dir", "/x"]));
+        assert!(automated(&["--screenshot", "out.png"]));
+        assert!(automated(&["--background"]));
+    }
+
+    #[test]
+    fn help_says_automated_runs_use_a_temporary_profile() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains("screenshot and background runs otherwise use a temporary one"));
+    }
+
+    #[test]
+    fn help_documents_the_profile_in_use_exit_status() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains(&format!(
+            "  {}  The profile is in use by another Mercury Browser",
+            crate::profile::EXIT_PROFILE_IN_USE
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_dir_that_is_not_utf8_is_a_usage_error() {
+        use std::ffi::{OsStr, OsString};
+        use std::os::unix::ffi::OsStrExt;
+
+        let arguments = [
+            OsString::from("--profile-dir"),
+            OsStr::from_bytes(b"/tmp/\xffprofile").to_owned(),
+        ];
+
+        assert_eq!(
+            reject_non_utf8_profile_dir(&arguments)
+                .as_ref()
+                .and_then(exit_code),
+            Some(2)
+        );
+        assert_eq!(
+            reject_non_utf8_profile_dir(&[OsString::from("--profile-dir"), OsString::from("/x")]),
+            None
+        );
+        assert_eq!(
+            reject_non_utf8_profile_dir(&[
+                OsString::from("--screenshot"),
+                OsStr::from_bytes(b"\xff.png").to_owned()
+            ]),
+            None
+        );
     }
 
     #[test]

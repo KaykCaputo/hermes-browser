@@ -10,7 +10,10 @@ const CONTENT_PROCESS_ARGUMENT: &str = "--content-process";
 /// worker threads are initialized. Sandboxed children are deliberately kept on
 /// Servo's minimal bootstrap path.
 pub fn run_content_process_if_requested() -> Result<bool, ContentProcessArgumentError> {
-    let Some(token) = content_process_token(std::env::args())? else {
+    // `args_os`: `std::env::args` panics on any argument that is not valid UTF-8. The token
+    // Servo passes is ASCII, so a lossy conversion of the other arguments is harmless here.
+    let arguments = std::env::args_os().map(|argument| argument.to_string_lossy().into_owned());
+    let Some(token) = content_process_token(arguments)? else {
         return Ok(false);
     };
 
