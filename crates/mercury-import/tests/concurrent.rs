@@ -7,7 +7,7 @@
 //! reads. A copy that mixed two states could drop visits whose page row it did not see, which
 //! breaks the sequence.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -95,6 +95,45 @@ fn write_until(path: &Path, layout: &'static Layout, stop: &AtomicBool) -> i64 {
     n
 }
 
+/// The writer thread, stopped and joined when dropped.
+struct Writer {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<i64>>,
+}
+
+impl Writer {
+    fn start(path: PathBuf, layout: &'static Layout) -> Writer {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || write_until(&path, layout, &stop))
+        };
+        Writer {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// Stops the writer and returns how many transactions it committed.
+    fn stop(&mut self) -> i64 {
+        self.stop.store(true, Ordering::Relaxed);
+        self.thread
+            .take()
+            .map(|thread| thread.join().expect("the writer does not panic"))
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            // A panic in the writer is already reported by the test that failed.
+            let _ = thread.join();
+        }
+    }
+}
+
 fn check_consistent(visits: &[ImportedVisit], previous: &mut usize) {
     let newest = visits.len();
     for (index, visit) in visits.iter().enumerate() {
@@ -114,11 +153,9 @@ fn read_while_writing(
     let profile = tempfile::tempdir().unwrap();
     let path = profile.path().join(file);
     create(&path, layout);
-    let stop = Arc::new(AtomicBool::new(false));
-    let writer = {
-        let (path, stop) = (path.clone(), Arc::clone(&stop));
-        std::thread::spawn(move || write_until(&path, layout, &stop))
-    };
+    // Declared after `profile`, so it is dropped first: the writer has stopped before the
+    // directory is removed, even when an assertion below fails.
+    let mut writer = Writer::start(path, layout);
 
     let (mut oks, mut errors, mut previous) = (0, Vec::new(), 0);
     let started = Instant::now();
@@ -131,8 +168,7 @@ fn read_while_writing(
             Err(error) => errors.push(error.to_string()),
         }
     }
-    stop.store(true, Ordering::Relaxed);
-    let written = writer.join().unwrap();
+    let written = writer.stop();
 
     eprintln!(
         "{file}: {written} transactions written, {oks} consistent reads (last saw {previous}), \
