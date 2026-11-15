@@ -30,6 +30,8 @@ LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 	build \
 	build-release \
 	package-linux \
+	app-macos \
+	package-macos \
 	run \
 	run-debug \
 	run-release \
@@ -57,6 +59,8 @@ help:
 		'build' 'Build the complete workspace in debug mode.' \
 		'build-release' 'Build the complete workspace in release mode.' \
 		'package-linux' 'Build and package the Linux x86-64 release.' \
+		'app-macos' 'Build the release and assemble the signed Mercury Browser.app.' \
+		'package-macos' 'Build Mercury Browser.app and its .dmg for macOS arm64.' \
 		'run' 'Run the optimized Mercury Desktop build.' \
 		'run-debug' 'Run Mercury Desktop with development debug information.' \
 		'run-release' 'Alias for the optimized run target.' \
@@ -167,6 +171,14 @@ package-linux: build-release
 	cp LICENSE "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/LICENSE"
 	tar -C "$(DIST_DIR)" -czf "$(DIST_DIR)/$(LINUX_ARCHIVE)" "$(LINUX_PACKAGE_NAME)"
 	cd "$(DIST_DIR)" && sha256sum "$(LINUX_ARCHIVE)" > "$(LINUX_ARCHIVE).sha256"
+
+app-macos:
+	"$(CARGO)" build --release --package "$(APP_PACKAGE)"
+	scripts/macos/bundle.sh --out "$(DIST_DIR)"
+
+package-macos:
+	"$(CARGO)" build --release --package "$(APP_PACKAGE)"
+	scripts/macos/bundle.sh --out "$(DIST_DIR)" --dmg
 
 run:
 	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)

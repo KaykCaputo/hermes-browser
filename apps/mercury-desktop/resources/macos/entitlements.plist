@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Adapted from Servo, https://github.com/servo/servo, tag v0.8.0,
+  support/macos/Servo.entitlements, MPL-2.0, and Zervo,
+  https://github.com/Goddv/Zervo, commit 86cb7126,
+  assets/macos/entitlements.plist, MPL-2.0 (the same two keys).
+
+  Entitlements for Mercury Browser's hardened-runtime signature
+  (scripts/macos/bundle.sh signs the executable with options=runtime).
+
+  The hardened runtime refuses to map memory that is both writable and
+  executable. SpiderMonkey, the JavaScript engine inside Servo, generates
+  machine code at run time and needs exactly that:
+
+    com.apple.security.cs.allow-jit
+      lets the process map memory with MAP_JIT, the writable-and-executable
+      memory a JIT compiler writes its generated code into.
+
+    com.apple.security.cs.allow-unsigned-executable-memory
+      lets the process make memory executable that no code signature covers,
+      which is what SpiderMonkey's executable-memory allocator asks for when it
+      changes page protections around generated code.
+
+  Servo ships exactly these two for the same reason. Measured: the bundle
+  signed with the hardened runtime but without them cannot start its
+  JavaScript engine (servo-script panics with InitFailed) and loads no page.
+
+  Deliberately absent: com.apple.security.cs.disable-library-validation (the
+  libraries in Contents/MacOS/lib are signed together with the executable) and
+  every App Sandbox key (Mercury Browser is not sandboxed). Camera, microphone
+  and location would need Info.plist usage strings, not entitlements, and those
+  features are off.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>
