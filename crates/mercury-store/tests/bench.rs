@@ -253,11 +253,19 @@ fn load(store: &mut Store, data: &Data) {
 }
 
 fn summary(mut samples: Vec<Duration>) -> (String, String) {
+    let (median, _, worst) = summary3(&mut samples);
+    (median, worst)
+}
+
+/// Median, 90th percentile and worst, in milliseconds.
+fn summary3(samples: &mut [Duration]) -> (String, String, String) {
     samples.sort();
     let ms = |d: Duration| format!("{:.2}", d.as_secs_f64() * 1000.0);
+    let n = samples.len();
     (
-        ms(samples[samples.len() / 2]),
-        ms(samples[samples.len() - 1]),
+        ms(samples[n / 2]),
+        ms(samples[n * 9 / 10]),
+        ms(samples[n - 1]),
     )
 }
 
