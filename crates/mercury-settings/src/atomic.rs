@@ -114,6 +114,20 @@ fn temporary_name(name: &OsStr) -> OsString {
     temporary
 }
 
+/// The target file name and process id in a name made by [`temporary_name`], or `None` if
+/// `name` is not exactly of that form.
+pub(crate) fn parse_temporary_name(name: &str) -> Option<(&str, u32)> {
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let inner = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (rest, counter) = inner.rsplit_once('-')?;
+    let (target, pid) = rest.rsplit_once('.')?;
+    if target.is_empty() || !digits(counter) || !digits(pid) {
+        return None;
+    }
+    counter.parse::<u64>().ok()?;
+    Some((target, pid.parse().ok()?))
+}
+
 fn create_temporary(
     dir: &Path,
     names: impl Iterator<Item = OsString>,
@@ -170,9 +184,34 @@ fn sync_directory(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// No test here can tell whether the file and the directory were synced: a sync only matters
+/// across a power loss, which a test cannot cause. The syncs are checked by reading the code.
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_names_parse_back_and_nothing_else_does() {
+        let name = temporary_name(OsStr::new("session.json"));
+        let name = name.to_str().unwrap();
+        assert_eq!(
+            parse_temporary_name(name),
+            Some(("session.json", std::process::id()))
+        );
+        for other in [
+            "session.json",
+            ".session.json.tmp",
+            ".session.json.12-3.tmp.bak",
+            "session.json.12-3.tmp",
+            ".session.json.12a-3.tmp",
+            ".session.json.12-.tmp",
+            ".session.json.-3.tmp",
+            "..12-3.tmp",
+            ".session.json.99999999999-3.tmp",
+        ] {
+            assert_eq!(parse_temporary_name(other), None, "{other}");
+        }
+    }
 
     fn listing(dir: &Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)

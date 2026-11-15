@@ -39,4 +39,5 @@ pub use settings::{
 pub use store::{
     Loaded, MAX_SESSION_FILE_BYTES, MAX_SETTINGS_FILE_BYTES, PreviousSession,
     SESSION_FORMAT_VERSION, SETTINGS_FORMAT_VERSION, SessionStore, SettingsStore, StartupSessions,
+    sweep_stale_temporaries,
 };

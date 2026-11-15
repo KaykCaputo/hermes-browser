@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::atomic::write_private_atomic;
+use crate::atomic::{parse_temporary_name, write_private_atomic};
 use crate::bounded;
 use crate::error::SettingsError;
 use crate::read::{Format, Inspection, Migration, Peek, inspect, peek};
@@ -35,6 +35,8 @@ const SETTINGS_FILE: &str = "settings.json";
 const SESSION_FILE: &str = "session.json";
 const PREVIOUS_FILE: &str = "session.previous.json";
 const RECOVERY_FILE: &str = "session.recovery.json";
+/// Every file this crate writes in a profile.
+const OWN_FILES: [&str; 4] = [SETTINGS_FILE, SESSION_FILE, PREVIOUS_FILE, RECOVERY_FILE];
 
 /// The outcome of loading a file.
 #[derive(Clone, Debug, PartialEq)]
@@ -588,6 +590,42 @@ enum Read {
     Newer,
     Damaged,
     Current(PreviousSession),
+}
+
+/// Removes temporary files left in `profile_dir` by writes of this crate's own files that never
+/// finished (a crash between creating and renaming), and returns how many it removed.
+///
+/// Only regular files named exactly as [`write_private_atomic`] names temporaries of
+/// `settings.json`, `session.json`, `session.previous.json` and `session.recovery.json`
+/// (`.<file>.<pid>-<n>.tmp`) are removed, and not those of the current process.
+///
+/// **Call it only while holding the profile's single-instance lock.** A temporary file of
+/// another process that is still running is a write in progress: removing it makes that
+/// write fail. A process id cannot tell a live process from a dead one (ids are reused), so
+/// only the lock guarantees that no other process is writing in this profile.
+pub fn sweep_stale_temporaries(profile_dir: &Path) -> io::Result<u64> {
+    let own = std::process::id();
+    let mut removed = 0;
+    for entry in std::fs::read_dir(profile_dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some((target, pid)) = name.to_str().and_then(parse_temporary_name) else {
+            continue;
+        };
+        if pid == own || !OWN_FILES.contains(&target) {
+            continue;
+        }
+        let path = entry.path();
+        if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]
