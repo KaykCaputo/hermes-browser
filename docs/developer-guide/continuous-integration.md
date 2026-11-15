@@ -36,13 +36,21 @@ Superseded runs on the same branch or pull request are cancelled. Tags run only 
 | --- | --- | --- | --- |
 | Check the version | `ubuntu-24.04` | reads `[workspace.package] version` from `Cargo.toml`; on a tag, fails unless the tag is `v<version>` | 1 minute |
 | Linux x86-64 | `ubuntu-22.04` | `make qa`, the release build, the glibc 2.35 check, `mercury-browser-linux-x86_64.tar.gz` and its `.sha256` | 90–120 minutes (limit 120) |
-| macOS Apple Silicon (build) | `macos-26` | GStreamer set-up and the release build, with no secrets and no environment; hands the unsigned executable and Servo's GStreamer plugin lists to the next job | 2–3 hours (limit 240 minutes) |
-| macOS Apple Silicon (sign and package) | `macos-26` | in the `release` environment, on a fresh runner that runs no cargo: GStreamer set-up, `scripts/macos/bundle.sh` (Developer ID when the secrets exist, otherwise ad hoc), the bundle checks, notarisation and stapling when the notarisation secrets exist, the checks again on the mounted disk image; uploads `mercury-browser-<version>-macos-arm64.dmg` and its `.sha256` | 15–30 minutes, plus Apple's notarisation time (limit 90) |
+| macOS Apple Silicon (build) | `macos-26` | GStreamer set-up and the release build, with no secrets and no environment; hands the unsigned executable to the next job and records its SHA-256 as a job output | 2–3 hours (limit 240 minutes) |
+| macOS Apple Silicon (sign and package) | `macos-26` | in the `release` environment, only for `v*` tags, on a fresh runner with no build step: the executable checked against the recorded digest, GStreamer downloaded afresh, Servo's plugin lists from the pinned crate, `scripts/macos/bundle.sh` (Developer ID when the secrets exist, otherwise ad hoc), the bundle checks, notarisation and stapling when the notarisation secrets exist, the checks again on the mounted disk image; uploads `mercury-browser-<version>-macos-arm64.dmg` and its `.sha256` | 15–30 minutes, plus Apple's notarisation time (limit 90) |
 | Publish GitHub Release | `ubuntu-24.04` | only for a push of a `v*` tag: verifies every `.sha256`, writes `SHA256SUMS`, attests build provenance for the files it lists, creates a draft release, uploads every file, then publishes it. An already published release is refused, not changed. | 3 minutes |
 
-A manual run (`workflow_dispatch`) builds and uploads the artefacts to the run and publishes nothing. The signing job of a manual run is held to the `release` environment's rules like any other: started from a branch that the environment does not allow, it does not run.
+A manual run (`workflow_dispatch`) builds and uploads the artefacts to the run and publishes nothing. From a branch, the signing job is skipped (it runs only for `v*` tags, which the `release` environment also enforces), so a manual run from a branch produces the Linux archive and the unsigned macOS executable only. The build to use from a branch is the ad-hoc `.app` that CI's macOS job uploads on every run.
 
-The macOS release is split in two because the build runs the build scripts and procedural macros of about 1,100 crates. They run on a runner that never holds a signing secret. The signing job receives only the executable and the plugin lists. A stand-in `cargo` that fails is first on its `PATH`, so nothing can rebuild there. Its secrets come only from the `release` environment, and each step receives only the secrets it uses.
+The macOS release is split in two because the build runs the build scripts and procedural macros of about 1,100 crates. They run on a runner that never holds a signing secret. The signing job takes in nothing that the build job or a third party could write, except the executable itself. That file is checked against the digest the build job recorded, and is only copied and signed, never run. In particular:
+
+- **No cache.** A cache entry is a tar archive extracted with absolute paths, so a poisoned entry saved by the build job could overwrite the checkout or plant programs.
+- **GStreamer is downloaded afresh** and checked against the checksums pinned in `scripts/macos/gstreamer.sh`. None of its programs is run, and nothing of it goes on `PATH`.
+- **Servo's plugin lists** are taken from the `servo` crate, checked against `Cargo.lock`.
+
+What prevents a rebuild there is that the job has no step that builds. The Rust toolchain is also taken off its `PATH`, and failing stand-ins for `cargo`, `rustc`, `rustup` and `make` go first on it. They only make a mistake fail loudly; they are not a control. Its secrets come only from the `release` environment, and each step receives only the secrets it uses. The publishing job checks every file it publishes against the digest recorded by the job that made it, and refuses any file it does not expect.
+
+**The limit of all this:** a compromised build can still have *its own output* signed and notarised, because signing what the build produced is the point of the job. What the design does is keep the credentials themselves (the private key, the notarisation key or password) out of the build's reach, so they cannot be stolen or used for anything else.
 
 ### Supply-chain rules for the workflows
 
@@ -82,7 +90,7 @@ scripts/ci/check-colors-screenshot.py /tmp/colors.png
 
 `--screenshot` does not take focus; the browser writes the PNG and exits. The checker finds the page below the browser's own toolbar by its red square, measures the square to learn the display scale, and then checks a red square at the top left, a blue one at the top right, a green bar along the bottom and white in between. It prints one line per check and exits 0 (matches), 1 (wrong picture) or 2 (not a usable PNG: truncated, corrupt, malformed, or larger than any screenshot could be). It needs only Python's standard library.
 
-`scripts/ci/check-macos-bundle.sh` checks that every Mach-O file in the bundle is arm64 only and records exactly one minimum macOS version; that the executable's equals `LSMinimumSystemVersion` and no library's is newer; that `Info.plist` passes `plutil -lint`; that `codesign --verify --deep --strict` passes with the hardened runtime on; that the entitlements are exactly the file `scripts/macos/bundle.sh` uses for that kind of signature (ad hoc or Developer ID); and that `scripts/macos/test-bundle.sh` passes. `--signature adhoc` or `--signature developer-id` also requires that kind of signature. `--require-media`, which both workflows pass, makes a bundle without its media libraries fail. It checks that `Contents/MacOS/lib` holds `libgstreamer-1.0.0.dylib` and every plugin in Servo's plugin lists. Those lists are found by `scripts/ci/servo-plugin-lists.sh` in the same way the collector finds them (`$MERCURY_SERVO_PLUGIN_LISTS`, or the resolved `servo` crate). It also checks that the executable loads `@rpath/libgstreamer-1.0.0.dylib` and has the rpath `@executable_path/lib/`, and that no Mach-O file loads a library from outside the bundle other than the system's own.
+`scripts/ci/check-macos-bundle.sh` checks that every Mach-O file in the bundle is arm64 only and records exactly one minimum macOS version; that the executable's equals `LSMinimumSystemVersion` and no library's is newer; that `Info.plist` passes `plutil -lint`; that `codesign --verify --deep --strict` passes with the hardened runtime on; that the entitlements are exactly the file `scripts/macos/bundle.sh` uses for that kind of signature (ad hoc or Developer ID); and that `scripts/macos/test-bundle.sh` passes. `--signature adhoc` or `--signature developer-id` also requires that kind of signature. `--require-media`, which both workflows pass, makes a bundle without its media libraries fail. It checks that `Contents/MacOS/lib` holds `libgstreamer-1.0.0.dylib` and every plugin in Servo's plugin lists. The plugins come from `scripts/macos/gstreamer-plugins.sh`, the one definition the collector uses too: every plugin it lists must be present, and every plugin `gstreamer-plugins.sh --excluded` lists (by default `ogg`, see `MERCURY_GSTREAMER_EXCLUDE_PLUGINS`) must be absent. It also checks that the executable loads `@rpath/libgstreamer-1.0.0.dylib` and that its only rpath is `@executable_path/lib/`, and that no Mach-O file loads a library from outside the bundle other than the system's own.
 
 ## Dependency policy
 
@@ -123,24 +131,33 @@ The macOS signing job understands these secrets. Store them as secrets of the `r
 | `MACOS_CERTIFICATE` | A "Developer ID Application" certificate with its private key, exported from Keychain Access as a `.p12` file and encoded with `base64 -i cert.p12` |
 | `MACOS_CERTIFICATE_PASSWORD` | The password chosen when exporting the `.p12` |
 | `MACOS_SIGN_IDENTITY` | The identity's full name, as `security find-identity -v -p codesigning` prints it, for example `Developer ID Application: Example Ltd (ABCDE12345)` |
-| `APPLE_ID` | The Apple ID used to notarise |
+| `APPLE_API_KEY` | Preferred for notarisation: the contents of an App Store Connect API key file (`AuthKey_XXXXXXXXXX.p8`, the text including its BEGIN/END lines), from App Store Connect → Users and Access → Integrations |
+| `APPLE_API_KEY_ID` | That key's ten-character key ID |
+| `APPLE_API_ISSUER` | The issuer ID shown on the same page |
+| `APPLE_ID` | Alternative for notarisation: the Apple ID used to notarise |
 | `APPLE_TEAM_ID` | The ten-character team identifier |
 | `APPLE_APP_PASSWORD` | An app-specific password for that Apple ID (appleid.apple.com → Sign-In and Security) |
 
-- **Without the first three,** the app is signed ad hoc (`scripts/macos/bundle.sh`'s default), is not notarised, and the job summary says so. Setting only some of them fails the job rather than quietly building ad hoc. The same holds for the last three, and notarisation secrets without signing secrets also fail.
-- **With them,** the certificate is imported into a keychain created for the job under the runner's temporary directory. That keychain is deleted in a final step that always runs, and the login keychain is never used. The app, its libraries and the disk image are signed with that identity, with the hardened runtime and a secure timestamp. The bundle is checked before anything is sent to Apple.
-- **With the last three as well,** the disk image is submitted with `xcrun notarytool submit --wait`, stapled, and its checksum written again. The stapled image is then verified (`stapler validate`, `spctl`), mounted, and the app inside checked once more.
+- **Without the first three,** the app is signed ad hoc (`scripts/macos/bundle.sh`'s default), is not notarised, and the job summary says so. Setting only some of the three fails the job rather than quietly building ad hoc. The same holds for each notarisation trio, and notarisation secrets without signing secrets also fail.
+- **With them,** the certificate is imported into a keychain created for the job under the runner's temporary directory. The key is imported as non-extractable (`security import -x`), and the `.p12` file is written under `umask 077` and removed straight after the import. The login keychain is never used. The app, its libraries and the disk image are signed with that identity, with the hardened runtime and a secure timestamp, and the bundle is checked before anything is sent to Apple. The keychain is deleted straight after the last signing or notarising step, and again at the end of the job as a backstop.
+- **With an API key (preferred),** the disk image is submitted with `xcrun notarytool submit --key … --key-id … --issuer … --wait`. The key is written to a private file for that one step and removed afterwards, so no secret appears on a command line.
+- **With an Apple ID instead,** the app-specific password is stored in the temporary keychain with `notarytool store-credentials`, and the submission reads it from there. If both routes are configured, the API key is used.
+- **Either way,** the image is stapled and its checksum written again. The stapled image is then verified (`stapler validate`, `spctl`), mounted, and the app inside checked once more.
 
-Secrets are passed only through `env:` to the steps that use them and are never printed.
+Secrets are passed only through `env:` to the steps that use them and are never printed. Two of them unavoidably appear on a command line while one command runs, where any process on the runner could list them: the `.p12` password (`security import -P`) and, on the Apple ID route only, the app-specific password (`notarytool store-credentials --password`). Neither command has another non-interactive way to take it. What limits the exposure is that the runner is fresh and no step of that job runs third-party code. The API-key route avoids the second.
 
 ### The release environment
 
-The signing job declares `environment: release`. GitHub creates that environment with no rules the first time the job runs. Before the first release, the repository owner sets it up under **Settings → Environments → release**:
+The signing job declares `environment: release` and runs only for `v*` tags. GitHub creates the environment with no rules the first time the job runs. Before the first release, the repository owner sets it up under **Settings → Environments → release**:
 
-1. **Deployment branches and tags:** choose "Selected branches and tags" and add a **tag** rule `v*`. Add no branch rule. Only a run for a `v*` tag can then use the environment. A run started from a branch, manually or otherwise, is refused before the job starts, and its secrets are never handed to that branch's code.
-2. **Required reviewers:** add the people who may approve a release (on a public repository this is available on every plan), and consider "Prevent self-review". The signing job then waits for an approval before it receives any secret.
-3. **Environment secrets:** add the six secrets above here, and delete any repository secrets of the same names.
-4. Optionally untick "Allow administrators to bypass configured protection rules".
+1. **Deployment branches and tags:** choose "Selected branches and tags" and add a **tag** rule `v*`. Add no branch rule. Only a run for a `v*` tag can then use the environment; a run from any branch is refused, and its secrets are never handed to that branch's code.
+2. **Required reviewers:** add yourself (or the people who may approve a release). The signing job then waits for an approval before it receives any secret, which gives a moment to look at what the build produced. **Do not enable "Prevent self-review" while there is one maintainer:** it stops the person who pushed the tag from approving, and with one maintainer nobody could approve the release.
+3. **Environment secrets:** add the secrets above here, and delete any repository secrets of the same names.
+4. Optionally untick "Allow administrators to bypass configured protection rules"; with one maintainer, who is also the administrator, this mostly guards against accidents.
+
+Also add a **tag ruleset** (Settings → Rules → Rulesets → New tag ruleset) targeting `v*`. Restrict creation, update and deletion to the maintainer, through the bypass list, so that nobody else who can push to the repository can create a release tag. A release tag is what the environment trusts.
+
+**Public versus private.** On GitHub Free, Pro and Team plans, required reviewers, administrator-bypass control and wait timers are available only for public repositories. Environment secrets also need a public repository on GitHub Free. Branch-and-tag deployment rules need a public repository, or Pro or Team for a private one. Artifact attestations (`actions/attest`) need a public repository unless the plan is Enterprise Cloud. If the repository is made private on Free, the release job loses the reviewer gate and the attestation step fails. On Pro or Team it keeps the tag rule and the environment secrets but loses the reviewer gate and, again, the attestation. Check GitHub's "Deployments and environments" reference before changing visibility.
 
 ## First push
 
@@ -156,10 +173,14 @@ Nothing in these workflows has run on GitHub yet. On the first push, watch the j
    - whether the runner can render at all in the smoke test (it needs a window server and a GPU);
    - the tests finding GStreamer through `DYLD_FALLBACK_LIBRARY_PATH`;
    - the 330-minute limit.
-5. **The release workflow.** Its first run is the first real release, because the tag must equal `v<version>` and a manual run from a branch is refused the `release` environment. That is safe enough: nothing is published until both platforms have built, signed and passed their checks, and the release stays a draft until every file is uploaded. A failure leaves at most a draft, which can be deleted with the tag before trying again. Check, in order:
+5. **The release workflow.** Its first run is the first real release, because the tag must equal `v<version>` and a manual run from a branch skips the signing job. That is safe enough: nothing is published until both platforms have built, signed and passed their checks, and the release stays a draft until every file is uploaded. A failure leaves at most a draft, which can be deleted with the tag before trying again. Check, in order:
    - the environment's approval;
-   - the certificate import (`set-key-partition-list`) and `notarytool store-credentials --keychain`;
-   - notarisation and stapling;
+   - the signing job's `PATH` (the "Confirm that no build tool is reachable" step);
+   - the executable matching the build's digest;
+   - the fresh GStreamer download;
+   - the certificate import (`-x`, `set-key-partition-list`);
+   - notarisation through the API key (or `notarytool store-credentials --keychain` on the Apple ID route);
+   - stapling;
    - the checks on the mounted image;
    - the provenance attestation (public repositories only);
    - the draft being published.
