@@ -14,7 +14,7 @@ repository's MPL-2.0 `LICENSE` file applies to this directory.
 Mercury enables Servo's `vello` feature, the GPU 2D-canvas backend. The first
 commit that added this directory (`60ee59f`) holds the crate as published, so
 `git diff 60ee59f -- third_party/servo-canvas` shows every change below.
-Changes 2–4 are marked with `Mercury:` comments in the source.
+Changes 2–5 are marked with `Mercury:` comments in the source.
 
 ## 1. Build with wgpu 30 (`vello_backend.rs`, `VelloDrawTarget::map_read`)
 
@@ -80,8 +80,35 @@ and the canvas's displayed frame is zero-filled as well.
 
 Drop it when Servo unmaps on this path.
 
+## 5. Keep earlier drawing when a canvas is drawn again (`vello_backend.rs`, `render_to_texture`)
+
+The GPU backend records drawing commands into a vello scene and renders the
+scene only when pixels are needed (a read-back, `toDataURL`, or the frame
+shown on screen). After rendering into the canvas's texture it empties the
+scene. The next drawing command starts a new scene whose first item is the
+canvas's previous frame: `ensure_drawing` draws `render_image`, an image that
+`override_image` points at the canvas's own texture.
+
+vello 0.11 caches images in its image atlas and copies an overridden texture
+into the atlas only when the image is new or has been marked dirty
+(`Renderer::mark_override_image_dirty`, whose documentation says that
+otherwise "stale image data from the atlas may be used"). Servo's backend was
+written against a vello without that cache and never marks the image. So the
+atlas kept the first copy of the texture — blank — and every render after the
+first composited new drawing over a blank previous frame: a page that draws,
+reads back or shows a frame, and then draws more lost everything drawn before.
+
+The fix marks `render_image` dirty after each successful render. This is the
+use the API is meant for, not a workaround: it costs one GPU texture-to-texture
+copy of the canvas into the atlas at the next render that draws on top of the
+previous frame — it does not re-render the old scene. On a 1000×1000 canvas
+drawn and read back 100 times the mean step was 2.2–2.8 ms with the fix and
+2.1–3.1 ms without it (under heavy machine load), i.e. no measurable cost.
+
+Drop it when Servo's backend marks the image itself.
+
 ## Removing this directory
 
 Remove the `[patch.crates-io]` entry and this directory once a Servo release
-compiles with the `vello` feature and contains equivalents of changes 2–4, or
+compiles with the `vello` feature and contains equivalents of changes 2–5, or
 once Mercury no longer needs them.

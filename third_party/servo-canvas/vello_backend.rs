@@ -744,6 +744,11 @@ impl VelloDrawTarget {
             }
             return false;
         }
+        // Mercury: the texture changed, so vello must copy it into its image
+        // atlas again the next time a scene draws `render_image`.
+        self.renderer
+            .borrow_mut()
+            .mark_override_image_dirty(&self.render_image.image);
         self.state = State::RenderedToTexture;
         // prune scene
         self.scene.reset();
