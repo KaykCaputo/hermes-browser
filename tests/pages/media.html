@@ -29,9 +29,15 @@
     const canvas = document.getElementById("canvas");
     const context = canvas.getContext("2d");
     const started = performance.now();
-    // Every wait below is bounded, so each check ends in PASS or FAIL and DONE always appears.
-    const TIMEOUT_MS = 20000;
-    const WATCHDOG_MS = 90000;
+    // Every wait below is bounded, so each check ends in PASS, FAIL or (under file://) SKIP,
+    // and DONE always appears within PAGE_BUDGET_MS of the page starting; nothing is printed
+    // after DONE. The budget fits inside the documented 30 s screenshot delay, including a
+    // first launch that spends about 10 s loading freshly copied libraries.
+    const TIMEOUT_MS = 12000;
+    const PAGE_BUDGET_MS = 25000;
+    // Video must keep up with the clock: never ahead of it, and at most this far behind.
+    const BEHIND_TOLERANCE_S = 0.5;
+    const opaqueOrigin = location.protocol === "file:";
     const pending = new Set();
     let finished = false;
 
@@ -40,6 +46,7 @@
     }
 
     function line(text, ok) {
+      if (finished) return;
       const element = document.createElement("div");
       element.className = ok === null ? "note" : ok ? "pass" : "fail";
       const at = "[" + seconds(started).toFixed(1) + "s] ";
@@ -103,9 +110,16 @@
       return withTimeout(element.play(), 5000, "play()");
     }
 
-    // A position that is ahead of the wall clock cannot come from playback: it is a jump.
+    // Real time: a position ahead of the wall clock cannot come from playback (it is a jump),
+    // and one more than BEHIND_TOLERANCE_S behind it means slow or stalled playback.
     function realTime(position, wall) {
-      return position <= wall + 0.3;
+      return position <= wall + 0.3 && position >= wall - BEHIND_TOLERANCE_S;
+    }
+
+    // Under file:// the clips are cross-origin: the canvas read-back and XHR are refused by
+    // design, so those checks are skipped with the reason rather than reported as failures.
+    function skip(label, reason) {
+      line(label + " SKIP (" + reason + ")", null);
     }
 
     const early = {};
@@ -119,9 +133,9 @@
       "video/webm": "webm container",
       "audio/ogg": "ogg container",
     };
-    if (location.protocol === "file:") {
+    if (opaqueOrigin) {
       line("note: loaded from file://, where media and XHR are cross-origin; the canvas and "
-        + "decodeAudioData checks need the page served over http (see tests/media/README.md)", null);
+        + "decodeAudioData checks are skipped (serve the page with scripts/serve-tests.py)", null);
     }
     for (const type of Object.keys(types)) {
       early[type] = document.createElement("video").canPlayType(type);
@@ -170,14 +184,20 @@
         await waitUntil(() => video.currentTime >= 1.1 || video.ended, TIMEOUT_MS, "currentTime 1.1 s");
         const wall = seconds(playStarted);
         check(id + " currentTime " + video.currentTime.toFixed(2) + " s after " + wall.toFixed(2)
-          + " s of wall time, past 1 s and not ahead of the clock",
+          + " s of wall time: past 1 s, in step with the clock (0.3 s ahead to "
+          + BEHIND_TOLERANCE_S + " s behind)",
           !video.ended && video.currentTime >= 1.1 && realTime(video.currentTime, wall));
         await waitUntil(() => video.currentTime >= 2.5 || video.ended, TIMEOUT_MS, "currentTime 2.5 s");
         const ended = video.ended;
         const second = bandColour(video);
         const secondTime = video.currentTime;
         const secondWall = seconds(playStarted);
-        check(id + " frame colour " + first.name + "@" + firstTime.toFixed(2) + "s [" + first.rgb + "] then "
+        if (opaqueOrigin) {
+          check(id + " position in step with the clock at " + firstTime.toFixed(2) + " s and "
+            + secondTime.toFixed(2) + " s (wall " + firstWall.toFixed(2) + " s, " + secondWall.toFixed(2) + " s)",
+            !ended && realTime(firstTime, firstWall) && realTime(secondTime, secondWall));
+          skip(id + " frame colour", "a cross-origin frame cannot be read back from a canvas");
+        } else check(id + " frame colour " + first.name + "@" + firstTime.toFixed(2) + "s [" + first.rgb + "] then "
           + second.name + "@" + secondTime.toFixed(2) + "s [" + second.rgb + "]"
           + (ended ? ", video had ended" : "") + "; want red then blue in real time",
           first.name === "red" && second.name === "blue" && !ended
@@ -223,8 +243,8 @@
       }
     }
 
-    // Ogg is left out of the macOS build until GStreamer's oggdemux is fixed (EXCLUDED_PLUGINS in
-    // scripts/macos/collect-gstreamer.sh). Then an Ogg element must fail promptly with
+    // Ogg is left out of the macOS build until GStreamer's oggdemux is fixed (DEFAULT_EXCLUDED in
+    // scripts/macos/gstreamer-plugins.sh). Then an Ogg element must fail promptly with
     // MEDIA_ERR_SRC_NOT_SUPPORTED; where Ogg is present, it must play correctly.
     async function oggChecks() {
       if (document.createElement("audio").canPlayType("audio/ogg") !== "") {
@@ -308,6 +328,10 @@
     }
 
     async function decodeCheck(url, duration, frequency) {
+      if (opaqueOrigin) {
+        skip("decodeAudioData " + url.split("/").pop(), "XHR cannot read a cross-origin file");
+        return;
+      }
       try {
         const offline = new OfflineAudioContext(1, 44100, 44100);
         const bytes = await load(url);
@@ -360,16 +384,16 @@
 
     function done(note) {
       if (finished) return;
-      finished = true;
       line("DONE in " + seconds(started).toFixed(1) + " s" + (note ? " (" + note + ")" : ""), null);
+      finished = true;
     }
 
     setTimeout(() => {
       if (!finished) {
-        for (const name of pending) check(name, false, "still running after " + WATCHDOG_MS / 1000 + " s");
-        done("watchdog");
+        for (const name of pending) check(name, false, "still running after " + PAGE_BUDGET_MS / 1000 + " s");
+        done("page budget reached");
       }
-    }, WATCHDOG_MS);
+    }, PAGE_BUDGET_MS - (performance.now() - started));
     run()
       .catch((error) => check("test page", false, "unexpected: " + (error && error.message ? error.message : error)))
       .finally(() => done());
