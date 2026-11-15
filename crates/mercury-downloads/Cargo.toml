@@ -1,0 +1,10 @@
+[package]
+name = "mercury-downloads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+mime_guess.workspace = true
+percent-encoding.workspace = true
+url.workspace = true
