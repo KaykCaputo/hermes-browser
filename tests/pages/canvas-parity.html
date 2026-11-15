@@ -578,6 +578,24 @@
       return [sample(c, "i", 4050, 4050, RED), sample(c, "i", 5, 5, BLUE), sample(c, "i", 2000, 2000, T)];
     });
 
+    run("wide-10000-incremental", () => {
+      const element = canvas(10000, 50);
+      const c = element.getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 100, 50);
+      const first = sample(c, "i", 50, 25, RED);
+      c.fillStyle = "rgb(0,0,255)"; c.fillRect(9900, 0, 100, 50);
+      return [first, sample(c, "i", 50, 25, RED), sample(c, "i", 9950, 25, BLUE)];
+    });
+
+    run("wide-10000-after-resize", () => {
+      const element = canvas(100, 50);
+      const c = element.getContext("2d");
+      element.width = 10000;
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 100, 50);
+      c.fillStyle = "rgb(0,0,255)"; c.fillRect(9900, 0, 100, 50);
+      return [sample(c, "i", 50, 25, RED), sample(c, "i", 9950, 25, BLUE)];
+    });
+
     function finish() {
       const out = document.getElementById("out");
       out.textContent = lines.join("\n");

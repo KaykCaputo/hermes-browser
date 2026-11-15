@@ -223,6 +223,13 @@ impl VelloDrawTarget {
         if GPU_CANVAS_UNAVAILABLE.load(Ordering::Relaxed) {
             return None;
         }
+        // Mercury: vello requests wgpu's default limits, so a canvas larger
+        // than the default texture size cannot get a texture; draw it on the CPU.
+        let max = vello::wgpu::Limits::default().max_texture_dimension_2d;
+        if size.width > max || size.height > max {
+            log::debug!("{size:?} canvas exceeds the GPU texture limit {max}; drawing it on the CPU");
+            return None;
+        }
         if GPU_DEVICE_LOST.load(Ordering::Relaxed) {
             // Canvases already on the lost device stay blank; new ones use the CPU.
             SHARED_GPU.set(None);

@@ -14,7 +14,7 @@ repository's MPL-2.0 `LICENSE` file applies to this directory.
 Mercury enables Servo's `vello` feature, the GPU 2D-canvas backend. The first
 commit that added this directory (`60ee59f`) holds the crate as published, so
 `git diff 60ee59f -- third_party/servo-canvas` shows every change below.
-Changes 2–8 are marked with `Mercury:` comments in the source.
+Changes 2–9 are marked with `Mercury:` comments in the source.
 
 ## 1. Build with wgpu 30 (`vello_backend.rs`, `VelloDrawTarget::map_read`)
 
@@ -160,6 +160,19 @@ defect in `vello_cpu`; this change does not touch it.)
 
 Drop it when Servo passes the fill rule itself.
 
+## 9. Draw canvases larger than the GPU texture limit on the CPU (`vello_backend.rs`, `try_new`)
+
+vello creates its device with wgpu's default limits, whose largest 2D texture
+is 8192 pixels on a side. A larger canvas (for example 10000×50) got an
+invalid texture: every draw and read-back failed with wgpu validation errors
+and the canvas stayed blank (`tests/pages/canvas-parity.html`, case
+`wide-10000-incremental`). Now such a canvas is created with the CPU backend.
+This covers the size at creation only: a GPU canvas later resized beyond the
+limit still goes blank (case `wide-10000-after-resize`); moving a live canvas
+to the other backend would need `Canvas::recreate` to swap the variant.
+
+Drop it when Servo checks the size itself.
+
 ## Known limitations (accepted)
 
 - A device lost while a read-back waits on the GPU panics inside
@@ -174,5 +187,5 @@ Drop it when Servo passes the fill rule itself.
 ## Removing this directory
 
 Remove the `[patch.crates-io]` entry and this directory once a Servo release
-compiles with the `vello` feature and contains equivalents of changes 2–8, or
+compiles with the `vello` feature and contains equivalents of changes 2–9, or
 once Mercury no longer needs them.
