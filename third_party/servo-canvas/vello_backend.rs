@@ -223,11 +223,8 @@ impl VelloDrawTarget {
         if GPU_CANVAS_UNAVAILABLE.load(Ordering::Relaxed) {
             return None;
         }
-        // Mercury: vello requests wgpu's default limits, so a canvas larger
-        // than the default texture size cannot get a texture; draw it on the CPU.
-        let max = vello::wgpu::Limits::default().max_texture_dimension_2d;
-        if size.width > max || size.height > max {
-            log::debug!("{size:?} canvas exceeds the GPU texture limit {max}; drawing it on the CPU");
+        if !Self::fits_texture(size.cast()) {
+            log::debug!("{size:?} canvas exceeds the GPU texture limit; drawing it on the CPU");
             return None;
         }
         if GPU_DEVICE_LOST.load(Ordering::Relaxed) {
@@ -243,6 +240,13 @@ impl VelloDrawTarget {
                 log::warn!("GPU 2D canvas unavailable ({reason}); drawing 2D canvases on the CPU");
             })
             .ok()
+    }
+
+    /// Mercury: vello requests wgpu's default limits, so a canvas larger than
+    /// the default texture size cannot get a texture and must use the CPU.
+    pub(crate) fn fits_texture(size: Size2D<u64>) -> bool {
+        let max = vello::wgpu::Limits::default().max_texture_dimension_2d as u64;
+        size.width <= max && size.height <= max
     }
 
     fn start(size: Size2D<u32>) -> Result<Self, String> {

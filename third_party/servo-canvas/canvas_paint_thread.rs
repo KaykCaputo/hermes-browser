@@ -636,6 +636,14 @@ impl Canvas {
     }
 
     fn recreate(&mut self, size: Option<Size2D<u64>>) {
+        // Mercury: a GPU canvas resized beyond the GPU texture limit moves to the CPU.
+        #[cfg(feature = "vello")]
+        if let (Canvas::Vello(canvas_data), Some(size)) = (&mut *self, size) {
+            if !crate::vello_backend::VelloDrawTarget::fits_texture(size) {
+                *self = Canvas::VelloCPU(canvas_data.recreate_as(size));
+                return;
+            }
+        }
         match self {
             #[cfg(feature = "vello")]
             Canvas::Vello(canvas_data) => canvas_data.recreate(size),

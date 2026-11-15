@@ -365,6 +365,22 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         self.update_image_rendering(None);
     }
 
+    /// Mercury: like `recreate`, but moves the canvas to another backend,
+    /// keeping its WebRender image key.
+    #[cfg(feature = "vello")]
+    pub(crate) fn recreate_as<Other: GenericDrawTarget>(
+        &mut self,
+        size: Size2D<u64>,
+    ) -> CanvasData<Other> {
+        let mut canvas_data = CanvasData {
+            draw_target: Other::new(size.max(MIN_WR_IMAGE_SIZE).cast()),
+            paint_api: self.paint_api.clone(),
+            image_key: self.image_key.take(),
+        };
+        canvas_data.update_image_rendering(None);
+        canvas_data
+    }
+
     /// Update image in WebRender
     pub(crate) fn update_image_rendering(&mut self, canvas_epoch: Option<Epoch>) {
         let Some(image_key) = self.image_key else {

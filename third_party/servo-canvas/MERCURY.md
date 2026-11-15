@@ -174,10 +174,12 @@ vello creates its device with wgpu's default limits, whose largest 2D texture
 is 8192 pixels on a side. A larger canvas (for example 10000×50) got an
 invalid texture: every draw and read-back failed with wgpu validation errors
 and the canvas stayed blank (`tests/pages/canvas-parity.html`, case
-`wide-10000-incremental`). Now such a canvas is created with the CPU backend.
-This covers the size at creation only: a GPU canvas later resized beyond the
-limit still goes blank (case `wide-10000-after-resize`); moving a live canvas
-to the other backend would need `Canvas::recreate` to swap the variant.
+`wide-10000-incremental`). Now such a canvas is created with the CPU backend,
+and a GPU canvas resized beyond the limit moves to the CPU backend
+(`Canvas::recreate` in `canvas_paint_thread.rs`, `CanvasData::recreate_as`,
+which keeps the canvas's WebRender image key; cases `wide-10000-after-resize`
+and `resize-past-limit-and-back`). A canvas that moved stays on the CPU when
+it is made small again.
 
 Drop it when Servo checks the size itself.
 
@@ -217,8 +219,6 @@ Left as they are; see the Task 4d report for details.
 - GPU: gradients are evaluated about half a pixel off the pixel centre
   (`gradient-radial`: 255 and 127 where the specification gives 251 and
   130); inside vello, cosmetic.
-- GPU: a canvas resized beyond 8192 pixels after creation stays blank
-  (`wide-10000-after-resize`).
 - CPU: `clearRect` ignores the clip (`clip-then-clear`), `putImageData`
   blends instead of replacing (`putimagedata-over-drawing`), `evenodd` clips
   use the non-zero rule (`clip-evenodd`).
