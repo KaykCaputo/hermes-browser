@@ -2,7 +2,7 @@ use std::fs::{DirBuilder, File, OpenOptions, TryLockError};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "macos")]
 pub(crate) const APP_DIR_NAME: &str = "Mercury Browser";
@@ -190,6 +190,11 @@ pub(crate) fn open_profile(
     override_root: Option<&Path>,
     automated_run: bool,
 ) -> Result<ActiveProfile, ProfileInUse> {
+    // Leftovers of killed runs hold their cookies; remove them before anything else.
+    let swept = sweep_stale_temporary_profiles(&std::env::temp_dir(), &SweepRules::for_this_run());
+    if swept > 0 {
+        eprintln!("mercury-browser: removed {swept} temporary profile(s) left by earlier runs");
+    }
     let mut temporary = None;
     // Servo's logger is not installed yet, so errors go to standard error directly.
     let paths = if let Some(root) = override_root {
@@ -306,6 +311,9 @@ static TEMPORARY_PROFILE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// A private profile directory under the system's temporary directory, removed when dropped.
 struct TemporaryProfile {
     root: PathBuf,
+    /// Held for the profile's lifetime, so a later run's sweep can tell it is in use; released
+    /// only after the directory has been removed (fields drop after `Drop::drop`).
+    _lock: ProfileLock,
 }
 
 impl TemporaryProfile {
@@ -314,17 +322,27 @@ impl TemporaryProfile {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
         let root = std::env::temp_dir().join(format!(
-            "mercury-browser-profile-{}-{nanoseconds}",
+            "{TEMPORARY_PROFILE_PREFIX}{}-{nanoseconds}",
             std::process::id()
         ));
         let mut builder = DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
         builder.create(&root)?;
+        let lock = match ProfileLock::acquire(&root) {
+            Ok(lock) => lock,
+            Err(error) => {
+                remove_directory(&root);
+                return Err(match error {
+                    LockError::Io(error) => error,
+                    LockError::InUse => io::Error::other("a new temporary profile was locked"),
+                });
+            }
+        };
         if let Ok(mut current) = TEMPORARY_PROFILE_ROOT.lock() {
             *current = Some(root.clone());
         }
-        Ok(Self { root })
+        Ok(Self { root, _lock: lock })
     }
 
     fn root(&self) -> &Path {
@@ -341,6 +359,135 @@ impl Drop for TemporaryProfile {
         }
         remove_directory(&self.root);
     }
+}
+
+/// Name prefix of temporary profiles; the full name is `<prefix><process id>-<nanoseconds>`.
+const TEMPORARY_PROFILE_PREFIX: &str = "mercury-browser-profile-";
+/// Leftover temporary profiles younger than this are never swept, so a run that has just
+/// created its directory and not yet locked it is safe.
+const STALE_TEMPORARY_PROFILE_AGE: Duration = Duration::from_secs(10 * 60);
+/// At most this many entries of the temporary directory are examined per start-up.
+const MAX_SWEEP_ENTRIES: usize = 4096;
+/// Overrides `STALE_TEMPORARY_PROFILE_AGE`, in seconds (used to test the sweep without waiting).
+const STALE_AGE_VARIABLE: &str = "MERCURY_STALE_PROFILE_AGE_SECONDS";
+
+/// What makes a leftover temporary profile safe to remove.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SweepRules {
+    pub now: SystemTime,
+    pub min_age: Duration,
+    /// The user whose leftovers may be removed.
+    pub owner: u32,
+    pub max_entries: usize,
+}
+
+/// Whether `name` is exactly what `TemporaryProfile::create` generates.
+fn is_temporary_profile_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(TEMPORARY_PROFILE_PREFIX) else {
+        return false;
+    };
+    let Some((process_id, nanoseconds)) = rest.split_once('-') else {
+        return false;
+    };
+    let all_digits =
+        |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    all_digits(process_id) && all_digits(nanoseconds)
+}
+
+/// Removes temporary profiles left behind by runs that were killed. Returns how many.
+///
+/// An entry of `directory` is removed only if all of these hold: its name is exactly one this
+/// code generates; it is a real directory (not a symbolic link) owned by `rules.owner` with mode
+/// 0700; it was last modified at least `rules.min_age` before `rules.now`; and an exclusive lock
+/// on its `lock` file can be taken without waiting, so no live run owns it. Process ids in names
+/// are not trusted: they repeat, and are not unique across containers sharing the directory.
+/// At most `rules.max_entries` entries are examined. Failures are skipped, never fatal.
+#[cfg(unix)]
+pub(crate) fn sweep_stale_temporary_profiles(directory: &Path, rules: &SweepRules) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    entries
+        .take(rules.max_entries)
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(is_temporary_profile_name)
+        })
+        .filter(|entry| remove_if_stale(&entry.path(), rules))
+        .count()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sweep_stale_temporary_profiles(_directory: &Path, _rules: &SweepRules) -> usize {
+    0
+}
+
+#[cfg(unix)]
+fn remove_if_stale(root: &Path, rules: &SweepRules) -> bool {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let Ok(metadata) = std::fs::symlink_metadata(root) else {
+        return false;
+    };
+    let old_enough = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| rules.now.duration_since(modified).ok())
+        .is_some_and(|age| age >= rules.min_age);
+    if !metadata.file_type().is_dir()
+        || metadata.uid() != rules.owner
+        || metadata.mode() & 0o777 != 0o700
+        || !old_enough
+    {
+        return false;
+    }
+    // Opening never creates the file and never follows a symbolic link.
+    let Ok(lock_file) = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(root.join(LOCK_FILE_NAME))
+    else {
+        return false;
+    };
+    if lock_file.try_lock().is_err() {
+        return false;
+    }
+    // `remove_dir_all` removes symbolic links themselves and never follows them. The lock is
+    // held until the directory is gone.
+    let removed = std::fs::remove_dir_all(root).is_ok();
+    drop(lock_file);
+    removed
+}
+
+impl SweepRules {
+    /// The rules for this run: the current user, now, and the stated age (or its override).
+    pub(crate) fn for_this_run() -> Self {
+        let min_age = std::env::var(STALE_AGE_VARIABLE)
+            .ok()
+            .and_then(|seconds| seconds.parse::<u64>().ok())
+            .map_or(STALE_TEMPORARY_PROFILE_AGE, Duration::from_secs);
+        Self {
+            now: SystemTime::now(),
+            min_age,
+            owner: current_user(),
+            max_entries: MAX_SWEEP_ENTRIES,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn current_user() -> u32 {
+    // SAFETY: `geteuid` has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn current_user() -> u32 {
+    0
 }
 
 /// Deletes the temporary profile, if this run created one. Safe to call more than once; call
@@ -628,6 +775,220 @@ mod tests {
         assert!(!first_root.exists());
         assert!(second_kept);
         assert!(!second_root.exists());
+    }
+
+    #[cfg(unix)]
+    mod sweep {
+        use std::os::unix::fs::MetadataExt;
+
+        use super::*;
+
+        fn base(label: &str) -> PathBuf {
+            let base = unique_temporary_directory(&format!("sweep-{label}"));
+            std::fs::create_dir_all(&base).expect("the test directory");
+            base
+        }
+
+        /// A leftover exactly as a killed run leaves it: private, with its `lock` file.
+        fn leftover(base: &Path, name: &str) -> PathBuf {
+            let root = base.join(name);
+            create_private_directory(&root.join("servo")).expect("the leftover");
+            std::fs::write(root.join("servo").join("cookie_jar.json"), "{}").expect("a file");
+            std::fs::write(root.join("lock"), "").expect("the lock file");
+            set_mode(&root, 0o700);
+            root
+        }
+
+        fn owner(path: &Path) -> u32 {
+            std::fs::symlink_metadata(path).expect("the entry").uid()
+        }
+
+        /// Rules under which every leftover in `base` is old enough.
+        fn later(base: &Path) -> SweepRules {
+            SweepRules {
+                now: SystemTime::now() + Duration::from_secs(3600),
+                min_age: Duration::from_secs(600),
+                owner: owner(base),
+                max_entries: 100,
+            }
+        }
+
+        const NAME: &str = "mercury-browser-profile-123-456";
+
+        #[test]
+        fn a_stale_unlocked_leftover_is_removed() {
+            let base = base("stale");
+            let root = leftover(&base, NAME);
+
+            let removed = sweep_stale_temporary_profiles(&base, &later(&base));
+            let exists = root.exists();
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 1);
+            assert!(!exists);
+        }
+
+        #[test]
+        fn names_that_this_code_does_not_generate_are_left_alone() {
+            let base = base("names");
+            let names = [
+                "mercury-browser-profile-123",
+                "mercury-browser-profile-123-456x",
+                "mercury-browser-profile--456",
+                "mercury-browser-profile-12a-456",
+                "Mercury-browser-profile-123-456",
+                "something-else",
+            ];
+            for name in names {
+                leftover(&base, name);
+            }
+
+            let removed = sweep_stale_temporary_profiles(&base, &later(&base));
+            let remaining = names.iter().filter(|name| base.join(name).exists()).count();
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 0);
+            assert_eq!(remaining, names.len());
+        }
+
+        #[test]
+        fn a_symbolic_link_is_left_alone_and_its_target_kept() {
+            let base = base("symlink");
+            let target = leftover(&base, "target");
+            std::os::unix::fs::symlink(&target, base.join(NAME)).expect("the test symlink");
+
+            let removed = sweep_stale_temporary_profiles(&base, &later(&base));
+            let kept = target.join("servo").join("cookie_jar.json").exists()
+                && std::fs::symlink_metadata(base.join(NAME)).is_ok();
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 0);
+            assert!(kept);
+        }
+
+        #[test]
+        fn another_users_leftover_is_left_alone() {
+            let base = base("owner");
+            let root = leftover(&base, NAME);
+            let rules = SweepRules {
+                owner: owner(&base).wrapping_add(1),
+                ..later(&base)
+            };
+
+            let removed = sweep_stale_temporary_profiles(&base, &rules);
+            let exists = root.exists();
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 0);
+            assert!(exists);
+        }
+
+        #[test]
+        fn a_directory_that_is_not_private_is_left_alone() {
+            let base = base("mode");
+            let root = leftover(&base, NAME);
+            set_mode(&root, 0o755);
+
+            let removed = sweep_stale_temporary_profiles(&base, &later(&base));
+            let exists = root.exists();
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 0);
+            assert!(exists);
+        }
+
+        #[test]
+        fn a_recent_leftover_is_left_alone() {
+            let base = base("young");
+            let root = leftover(&base, NAME);
+            let rules = SweepRules {
+                now: SystemTime::now(),
+                ..later(&base)
+            };
+
+            let removed = sweep_stale_temporary_profiles(&base, &rules);
+            let exists = root.exists();
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 0);
+            assert!(exists);
+        }
+
+        #[test]
+        fn a_profile_whose_lock_is_held_is_left_alone() {
+            let base = base("locked");
+            let root = leftover(&base, NAME);
+            let lock = ProfileLock::acquire(&root).expect("a live run's lock");
+
+            let removed = sweep_stale_temporary_profiles(&base, &later(&base));
+            let exists = root.exists();
+            drop(lock);
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 0);
+            assert!(exists);
+        }
+
+        #[test]
+        fn a_leftover_without_a_lock_file_or_with_a_linked_one_is_left_alone() {
+            let base = base("no-lock");
+            let without = leftover(&base, NAME);
+            std::fs::remove_file(without.join("lock")).expect("the lock file");
+            let linked = leftover(&base, "mercury-browser-profile-123-789");
+            std::fs::remove_file(linked.join("lock")).expect("the lock file");
+            std::fs::write(base.join("elsewhere"), "").expect("a file");
+            std::os::unix::fs::symlink(base.join("elsewhere"), linked.join("lock"))
+                .expect("the test symlink");
+
+            let removed = sweep_stale_temporary_profiles(&base, &later(&base));
+            let kept = without.exists() && linked.exists();
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 0);
+            assert!(kept);
+        }
+
+        #[test]
+        fn the_sweep_examines_a_bounded_number_of_entries() {
+            let base = base("bounded");
+            leftover(&base, NAME);
+            leftover(&base, "mercury-browser-profile-123-789");
+            let rules = SweepRules {
+                max_entries: 1,
+                ..later(&base)
+            };
+
+            let removed = sweep_stale_temporary_profiles(&base, &rules);
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 1);
+        }
+
+        #[test]
+        fn a_missing_directory_is_harmless() {
+            let base = unique_temporary_directory("sweep-missing");
+
+            assert_eq!(
+                sweep_stale_temporary_profiles(&base, &later(&std::env::temp_dir())),
+                0
+            );
+        }
+
+        #[test]
+        fn a_temporary_profile_is_locked_while_it_exists() {
+            let profile = TemporaryProfile::create().expect("a temporary profile");
+
+            let second = ProfileLock::acquire(profile.root());
+
+            assert!(matches!(second, Err(LockError::InUse)));
+            assert!(is_temporary_profile_name(
+                &profile
+                    .root()
+                    .file_name()
+                    .expect("a name")
+                    .to_string_lossy()
+            ));
+        }
     }
 
     #[test]
