@@ -188,7 +188,16 @@ pub(crate) fn dismiss_composition(
 
 #[cfg(test)]
 mod tests {
+    use talaria_core::BrowserEvent;
+
     use super::*;
+
+    fn mark_engine_ready(controller: &RefCell<BrowserController>, tab_id: TabId) {
+        let handled = controller
+            .borrow_mut()
+            .handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
+        assert!(handled);
+    }
 
     #[test]
     fn logical_keys_use_web_keyboard_event_values() {
@@ -218,6 +227,7 @@ mod tests {
     fn ime_preedit_and_commit_form_one_composition_sequence() {
         let controller = RefCell::new(BrowserController::default());
         let tab_id = controller.borrow().active_tab_id();
+        mark_engine_ready(&controller, tab_id);
         let mut composition_tab_id = None;
 
         queue_ime_input(
@@ -263,6 +273,7 @@ mod tests {
     fn ime_dismissal_stays_with_the_tab_that_started_composition() {
         let controller = RefCell::new(BrowserController::default());
         let composing_tab_id = controller.borrow().active_tab_id();
+        mark_engine_ready(&controller, composing_tab_id);
         let mut composition_tab_id = None;
         queue_ime_input(
             &controller,

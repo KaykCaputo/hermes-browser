@@ -87,7 +87,7 @@ pub fn resolve_address(input: &str) -> Result<Url, AddressResolutionError> {
 }
 
 fn is_supported_scheme(scheme: &str) -> bool {
-    matches!(scheme, "http" | "https" | "about")
+    matches!(scheme, "http" | "https" | "about" | "file")
 }
 
 fn parse_hostname(input: &str) -> Option<Url> {

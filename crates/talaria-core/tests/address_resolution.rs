@@ -24,6 +24,24 @@ fn about_url_is_preserved() {
 }
 
 #[test]
+fn file_urls_are_accepted() {
+    let target = classify_address("file:///tmp/page.html").expect("a file URL should be supported");
+
+    assert_eq!(
+        target,
+        NavigationTarget::Url(
+            Url::parse("file:///tmp/page.html").expect("the test URL should be valid")
+        )
+    );
+    assert_eq!(
+        resolve_address("file:///tmp/page.html")
+            .expect("a file URL should be supported")
+            .as_str(),
+        "file:///tmp/page.html"
+    );
+}
+
+#[test]
 fn hostname_without_scheme_uses_https() {
     let url =
         resolve_address("servo.org/downloads").expect("a hostname with a path should be accepted");

@@ -1,10 +1,24 @@
 use talaria_core::{
     AddressResolutionError, BrowserCommand, BrowserController, BrowserEvent, BrowserState,
-    LoadState, TabCommand,
+    LoadState, PointerButton, PointerButtonAction, TabActivation, TabCommand, TabId,
 };
 
 fn command(queued: Option<TabCommand>) -> Option<BrowserCommand> {
     queued.map(TabCommand::into_command)
+}
+
+/// Simulates the engine reporting the tab's first document, which makes it dispatchable.
+fn mark_engine_ready(controller: &mut BrowserController, tab_id: TabId) {
+    let handled =
+        controller.handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
+    assert!(handled);
+}
+
+fn controller_with_ready_tab() -> BrowserController {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+    mark_engine_ready(&mut controller, tab_id);
+    controller
 }
 
 #[test]
@@ -17,7 +31,7 @@ fn default_controller_starts_without_pending_commands() {
 
 #[test]
 fn queued_commands_are_returned_in_fifo_order() {
-    let mut controller = BrowserController::default();
+    let mut controller = controller_with_ready_tab();
 
     controller.queue_command(BrowserCommand::Navigate {
         url: "https://example.com".to_owned(),
@@ -80,7 +94,7 @@ fn handled_events_update_the_owned_browser_state() {
 
 #[test]
 fn queued_navigation_resolves_hostname_and_updates_state() {
-    let mut controller = BrowserController::default();
+    let mut controller = controller_with_ready_tab();
 
     let result = controller.queue_navigation("example.com/docs");
 
@@ -97,7 +111,7 @@ fn queued_navigation_resolves_hostname_and_updates_state() {
 
 #[test]
 fn queued_navigation_resolves_search_query_with_duckduckgo() {
-    let mut controller = BrowserController::default();
+    let mut controller = controller_with_ready_tab();
 
     let result = controller.queue_navigation("ownership in rust");
 
@@ -117,7 +131,7 @@ fn queued_navigation_resolves_search_query_with_duckduckgo() {
 
 #[test]
 fn invalid_navigation_does_not_change_state_or_queue_command() {
-    let mut controller = BrowserController::default();
+    let mut controller = controller_with_ready_tab();
     let original_url = controller.state().url().to_owned();
 
     let result = controller.queue_navigation("   ");
@@ -129,7 +143,7 @@ fn invalid_navigation_does_not_change_state_or_queue_command() {
 
 #[test]
 fn consecutive_pointer_moves_keep_only_the_latest_position() {
-    let mut controller = BrowserController::default();
+    let mut controller = controller_with_ready_tab();
 
     controller.queue_command(BrowserCommand::PointerMoved { x: 10.0, y: 20.0 });
     controller.queue_command(BrowserCommand::PointerMoved { x: 30.0, y: 40.0 });
@@ -143,7 +157,7 @@ fn consecutive_pointer_moves_keep_only_the_latest_position() {
 
 #[test]
 fn consecutive_scrolls_accumulate_delta_at_the_latest_position() {
-    let mut controller = BrowserController::default();
+    let mut controller = controller_with_ready_tab();
 
     controller.queue_command(BrowserCommand::Scrolled {
         delta_x: 1.0,
@@ -172,7 +186,7 @@ fn consecutive_scrolls_accumulate_delta_at_the_latest_position() {
 
 #[test]
 fn input_commands_are_not_coalesced_across_an_ordering_boundary() {
-    let mut controller = BrowserController::default();
+    let mut controller = controller_with_ready_tab();
 
     controller.queue_command(BrowserCommand::PointerMoved { x: 10.0, y: 20.0 });
     controller.queue_command(BrowserCommand::Reload);
@@ -194,7 +208,7 @@ fn input_commands_are_not_coalesced_across_an_ordering_boundary() {
 
 #[test]
 fn consecutive_focus_changes_keep_only_the_latest_state() {
-    let mut controller = BrowserController::default();
+    let mut controller = controller_with_ready_tab();
 
     controller.queue_command(BrowserCommand::FocusChanged { focused: true });
     controller.queue_command(BrowserCommand::FocusChanged { focused: false });
@@ -223,8 +237,10 @@ fn opening_a_tab_selects_it_and_preserves_the_previous_tab() {
 fn commands_remain_associated_with_the_tab_that_created_them() {
     let mut controller = BrowserController::default();
     let first_tab_id = controller.active_tab_id();
+    mark_engine_ready(&mut controller, first_tab_id);
     controller.queue_command(BrowserCommand::Reload);
     let second_tab_id = controller.open_tab();
+    mark_engine_ready(&mut controller, second_tab_id);
     controller.queue_command(BrowserCommand::GoBack);
 
     let first = controller
@@ -281,7 +297,9 @@ fn closed_tabs_discard_their_pending_commands_and_late_events() {
     let mut controller = BrowserController::default();
     let first_tab_id = controller.active_tab_id();
     let closed_tab_id = controller.open_tab();
+    mark_engine_ready(&mut controller, closed_tab_id);
     controller.queue_command(BrowserCommand::Reload);
+    assert!(controller.has_pending_commands());
 
     assert!(controller.close_tab(closed_tab_id));
     assert!(!controller.has_pending_commands());
@@ -304,4 +322,274 @@ fn next_tab_selection_wraps_in_both_directions() {
     assert_eq!(controller.active_tab_id(), first_tab_id);
     controller.select_next_tab(true);
     assert_eq!(controller.active_tab_id(), second_tab_id);
+}
+
+#[test]
+fn open_tab_with_address_sets_initial_url_and_loading_state() {
+    let mut controller = BrowserController::default();
+
+    let tab_id = controller
+        .open_tab_with(Some("example.com"), TabActivation::Foreground)
+        .expect("the address should resolve");
+
+    assert_eq!(controller.active_tab_id(), tab_id);
+    assert_eq!(controller.state().url(), "https://example.com/");
+    assert_eq!(controller.state().load_state(), &LoadState::Loading);
+    assert_eq!(
+        controller.take_initial_url(tab_id).as_deref(),
+        Some("https://example.com/")
+    );
+    assert_eq!(controller.take_initial_url(tab_id), None);
+}
+
+#[test]
+fn open_tab_with_search_terms_uses_the_search_url() {
+    let mut controller = BrowserController::default();
+
+    let tab_id = controller
+        .open_tab_with(Some("ownership in rust"), TabActivation::Foreground)
+        .expect("search terms should resolve");
+
+    let initial_url = controller
+        .take_initial_url(tab_id)
+        .expect("the tab should have an initial URL");
+    assert!(initial_url.starts_with("https://duckduckgo.com/?q="));
+    assert_eq!(controller.state().url(), initial_url);
+}
+
+#[test]
+fn background_tab_does_not_change_the_active_tab() {
+    let mut controller = BrowserController::default();
+    let first_tab_id = controller.active_tab_id();
+
+    let background_tab_id = controller
+        .open_tab_with(Some("https://example.com/"), TabActivation::Background)
+        .expect("the address should resolve");
+
+    assert_ne!(background_tab_id, first_tab_id);
+    assert_eq!(controller.active_tab_id(), first_tab_id);
+    assert_eq!(controller.tabs().len(), 2);
+    assert_eq!(controller.state().url(), "");
+    let background_tab = controller
+        .tabs()
+        .find(|tab| tab.id() == background_tab_id)
+        .expect("the background tab should exist");
+    assert_eq!(background_tab.state().url(), "https://example.com/");
+    assert_eq!(background_tab.state().load_state(), &LoadState::Loading);
+}
+
+#[test]
+fn open_tab_with_invalid_address_creates_no_tab() {
+    let mut controller = BrowserController::default();
+    let first_tab_id = controller.active_tab_id();
+
+    let result = controller.open_tab_with(Some("ftp://x"), TabActivation::Foreground);
+
+    assert!(matches!(
+        result,
+        Err(AddressResolutionError::UnsupportedScheme(ref scheme)) if scheme == "ftp"
+    ));
+    assert_eq!(controller.tabs().len(), 1);
+    assert_eq!(controller.active_tab_id(), first_tab_id);
+}
+
+#[test]
+fn open_tab_without_address_matches_open_tab() {
+    let mut controller = BrowserController::default();
+
+    let tab_id = controller
+        .open_tab_with(None, TabActivation::Foreground)
+        .expect("a blank tab needs no address");
+
+    assert_eq!(controller.active_tab_id(), tab_id);
+    assert_eq!(controller.state(), &BrowserState::default());
+    assert_eq!(controller.take_initial_url(tab_id), None);
+}
+
+#[test]
+fn set_initial_address_is_rejected_after_the_url_was_taken() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    assert!(matches!(
+        controller.set_initial_address(tab_id, "example.com"),
+        Ok(true)
+    ));
+    assert_eq!(controller.state().url(), "https://example.com/");
+    assert_eq!(controller.state().load_state(), &LoadState::Loading);
+    assert_eq!(
+        controller.take_initial_url(tab_id).as_deref(),
+        Some("https://example.com/")
+    );
+
+    assert!(matches!(
+        controller.set_initial_address(tab_id, "example.org"),
+        Ok(false)
+    ));
+    assert_eq!(controller.take_initial_url(tab_id), None);
+    assert_eq!(controller.state().url(), "https://example.com/");
+}
+
+#[test]
+fn set_initial_address_is_rejected_for_a_blank_tab_whose_web_view_exists() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    assert_eq!(controller.take_initial_url(tab_id), None);
+
+    assert!(matches!(
+        controller.set_initial_address(tab_id, "example.com"),
+        Ok(false)
+    ));
+    assert_eq!(controller.state().url(), "");
+}
+
+#[test]
+fn set_initial_address_reports_unknown_tabs_and_invalid_addresses() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    assert!(matches!(
+        controller.set_initial_address(TabId::new(99), "example.com"),
+        Ok(false)
+    ));
+    assert!(matches!(
+        controller.set_initial_address(tab_id, "ftp://x"),
+        Err(AddressResolutionError::UnsupportedScheme(_))
+    ));
+    assert_eq!(controller.take_initial_url(tab_id), None);
+}
+
+#[test]
+fn navigation_for_a_tab_that_is_not_engine_ready_is_held() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.open_tab();
+
+    controller
+        .queue_navigation("example.com")
+        .expect("navigation should be valid");
+
+    assert_eq!(command(controller.next_command()), None);
+    assert!(!controller.has_pending_commands());
+
+    let handled =
+        controller.handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
+    assert!(handled);
+
+    assert!(controller.has_pending_commands());
+    let queued = controller
+        .next_command()
+        .expect("the held navigation should be released");
+    assert_eq!(queued.tab_id(), tab_id);
+    assert_eq!(
+        queued.command(),
+        &BrowserCommand::Navigate {
+            url: "https://example.com/".to_owned(),
+        }
+    );
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn history_change_also_makes_a_tab_engine_ready() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+    controller.queue_command(BrowserCommand::Reload);
+    assert!(!controller.has_pending_commands());
+
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::HistoryChanged {
+            can_go_back: false,
+            can_go_forward: false,
+        },
+    );
+
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::Reload)
+    );
+}
+
+#[test]
+fn other_events_do_not_make_a_tab_engine_ready() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+    controller.queue_command(BrowserCommand::Reload);
+
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::LoadStateChanged {
+            state: LoadState::Loaded,
+        },
+    );
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::PageTitleChanged {
+            title: Some("Title".to_owned()),
+        },
+    );
+
+    assert!(!controller.has_pending_commands());
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn held_commands_do_not_block_other_tabs() {
+    let mut controller = BrowserController::default();
+    let first_tab_id = controller.active_tab_id();
+    controller.queue_command(BrowserCommand::Reload);
+    controller.queue_command(BrowserCommand::GoBack);
+    let second_tab_id = controller.open_tab();
+    mark_engine_ready(&mut controller, second_tab_id);
+    controller.queue_command(BrowserCommand::GoForward);
+
+    let first = controller
+        .next_command()
+        .expect("the ready tab's command should be dispatchable");
+    assert_eq!(first.tab_id(), second_tab_id);
+    assert_eq!(first.command(), &BrowserCommand::GoForward);
+    assert_eq!(command(controller.next_command()), None);
+    assert!(!controller.has_pending_commands());
+
+    mark_engine_ready(&mut controller, first_tab_id);
+
+    let held = std::iter::from_fn(|| controller.next_command()).collect::<Vec<_>>();
+    assert_eq!(
+        held,
+        vec![
+            TabCommand::new(first_tab_id, BrowserCommand::Reload),
+            TabCommand::new(first_tab_id, BrowserCommand::GoBack),
+        ]
+    );
+}
+
+#[test]
+fn pointer_commands_for_a_not_ready_tab_are_discarded() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    controller.queue_command(BrowserCommand::PointerMoved { x: 1.0, y: 2.0 });
+    controller.queue_command(BrowserCommand::PointerButton {
+        action: PointerButtonAction::Down,
+        button: PointerButton::Left,
+        x: 1.0,
+        y: 2.0,
+    });
+    controller.queue_command(BrowserCommand::Scrolled {
+        delta_x: 0.0,
+        delta_y: 5.0,
+        x: 1.0,
+        y: 2.0,
+    });
+    controller.queue_command(BrowserCommand::FocusChanged { focused: true });
+    controller.queue_command(BrowserCommand::Reload);
+
+    mark_engine_ready(&mut controller, tab_id);
+
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::Reload)
+    );
+    assert_eq!(command(controller.next_command()), None);
 }

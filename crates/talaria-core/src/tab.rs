@@ -13,15 +13,36 @@ impl TabId {
     }
 }
 
+/// Whether a newly opened tab is selected or opened behind the active tab.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabActivation {
+    Foreground,
+    Background,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InitialUrl {
+    /// The tab's web view has not been created; it will start at this URL, or blank.
+    Pending(Option<String>),
+    Taken,
+}
+
 #[derive(Debug)]
 pub struct Tab {
     id: TabId,
     state: BrowserState,
+    initial_url: InitialUrl,
+    engine_ready: bool,
 }
 
 impl Tab {
     pub fn new(id: TabId, state: BrowserState) -> Self {
-        Self { id, state }
+        Self {
+            id,
+            state,
+            initial_url: InitialUrl::Pending(None),
+            engine_ready: false,
+        }
     }
 
     pub const fn id(&self) -> TabId {
@@ -32,8 +53,36 @@ impl Tab {
         &self.state
     }
 
+    /// True once the engine has reported the tab's first address or history change, which
+    /// means its browsing context exists and commands for it can be dispatched.
+    pub const fn is_engine_ready(&self) -> bool {
+        self.engine_ready
+    }
+
     pub(crate) fn state_mut(&mut self) -> &mut BrowserState {
         &mut self.state
+    }
+
+    pub(crate) fn mark_engine_ready(&mut self) {
+        self.engine_ready = true;
+    }
+
+    /// Replaces the initial URL; returns false once the URL has been taken.
+    pub(crate) fn set_initial_url(&mut self, url: String) -> bool {
+        match &mut self.initial_url {
+            InitialUrl::Pending(initial_url) => {
+                *initial_url = Some(url);
+                true
+            }
+            InitialUrl::Taken => false,
+        }
+    }
+
+    pub(crate) fn take_initial_url(&mut self) -> Option<String> {
+        match std::mem::replace(&mut self.initial_url, InitialUrl::Taken) {
+            InitialUrl::Pending(initial_url) => initial_url,
+            InitialUrl::Taken => None,
+        }
     }
 }
 

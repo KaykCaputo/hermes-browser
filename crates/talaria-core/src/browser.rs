@@ -56,6 +56,20 @@ pub enum BrowserCommand {
     ImeInput(ImeInput),
 }
 
+impl BrowserCommand {
+    /// Input that only makes sense for the document the user currently sees. It is discarded,
+    /// rather than held, while the tab's browsing context does not exist yet.
+    pub(crate) const fn is_discarded_before_engine_ready(&self) -> bool {
+        matches!(
+            self,
+            Self::PointerMoved { .. }
+                | Self::PointerButton { .. }
+                | Self::Scrolled { .. }
+                | Self::FocusChanged { .. }
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserEvent {
     AddressChanged {
@@ -74,6 +88,16 @@ pub enum BrowserEvent {
         can_go_back: bool,
         can_go_forward: bool,
     },
+}
+
+impl BrowserEvent {
+    /// Events the engine only sends once the tab's browsing context exists.
+    pub(crate) const fn shows_engine_ready(&self) -> bool {
+        matches!(
+            self,
+            Self::AddressChanged { .. } | Self::HistoryChanged { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -335,6 +335,13 @@ mod tests {
         }
     }
 
+    fn mark_engine_ready(controller: &RefCell<BrowserController>, tab_id: TabId) {
+        let handled = controller
+            .borrow_mut()
+            .handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
+        assert!(handled);
+    }
+
     #[test]
     fn pending_browser_events_are_routed_to_their_tabs() {
         let controller = RefCell::new(BrowserController::default());
@@ -372,10 +379,12 @@ mod tests {
     fn commands_are_dispatched_to_their_own_web_views() {
         let controller = RefCell::new(BrowserController::default());
         let first_tab_id = controller.borrow().active_tab_id();
+        mark_engine_ready(&controller, first_tab_id);
         controller
             .borrow_mut()
             .queue_command(BrowserCommand::Reload);
         let second_tab_id = controller.borrow_mut().open_tab();
+        mark_engine_ready(&controller, second_tab_id);
         controller
             .borrow_mut()
             .queue_command(BrowserCommand::Reload);
@@ -396,6 +405,7 @@ mod tests {
     fn command_dispatch_is_limited_per_frame() {
         let controller = RefCell::new(BrowserController::default());
         let tab_id = controller.borrow().active_tab_id();
+        mark_engine_ready(&controller, tab_id);
         let mut web_views = HashMap::from([(tab_id, CountingWebView::default())]);
         for _ in 0..=MAX_COMMANDS_PER_FRAME {
             controller

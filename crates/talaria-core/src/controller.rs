@@ -1,8 +1,9 @@
 use std::collections::VecDeque;
 
 use crate::address::{AddressResolutionError, resolve_address};
+use crate::browser::LoadState;
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
-use crate::{Tab, TabCommand, TabId};
+use crate::{Tab, TabActivation, TabCommand, TabId};
 
 #[derive(Debug)]
 pub struct BrowserController {
@@ -51,11 +52,47 @@ impl BrowserController {
     }
 
     pub fn open_tab(&mut self) -> TabId {
-        let tab_id = TabId::new(self.next_tab_id);
-        self.next_tab_id += 1;
-        self.tabs.push(Tab::new(tab_id, BrowserState::default()));
-        self.active_tab_id = tab_id;
-        tab_id
+        self.open_blank_tab(TabActivation::Foreground)
+    }
+
+    /// Opens a tab. With `Some(address)` the address is resolved like `queue_navigation`
+    /// and becomes the tab's initial URL; the tab starts in `LoadState::Loading`.
+    pub fn open_tab_with(
+        &mut self,
+        initial_address: Option<&str>,
+        activation: TabActivation,
+    ) -> Result<TabId, AddressResolutionError> {
+        let initial_url = initial_address
+            .map(|address| resolve_address(address).map(|url| url.to_string()))
+            .transpose()?;
+        let tab_id = self.open_blank_tab(activation);
+
+        if let Some(initial_url) = initial_url {
+            let tab = self
+                .tab_mut(tab_id)
+                .expect("the tab was opened by this call");
+            set_tab_initial_url(tab, initial_url);
+        }
+
+        Ok(tab_id)
+    }
+
+    /// Sets the initial URL of a tab whose web view has not been created yet.
+    /// Returns Ok(false) if the tab does not exist or its initial URL was already taken.
+    pub fn set_initial_address(
+        &mut self,
+        tab_id: TabId,
+        address: &str,
+    ) -> Result<bool, AddressResolutionError> {
+        let url = resolve_address(address)?.to_string();
+        Ok(self
+            .tab_mut(tab_id)
+            .is_some_and(|tab| set_tab_initial_url(tab, url)))
+    }
+
+    /// Returns the tab's initial URL exactly once (None afterwards, and None for a blank tab).
+    pub fn take_initial_url(&mut self, tab_id: TabId) -> Option<String> {
+        self.tab_mut(tab_id)?.take_initial_url()
     }
 
     pub fn select_tab(&mut self, tab_id: TabId) -> bool {
@@ -128,8 +165,12 @@ impl BrowserController {
     }
 
     pub fn queue_command_for(&mut self, tab_id: TabId, command: BrowserCommand) -> bool {
-        if !self.tabs.iter().any(|tab| tab.id() == tab_id) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id() == tab_id) else {
             return false;
+        };
+
+        if !tab.is_engine_ready() && command.is_discarded_before_engine_ready() {
+            return true;
         }
 
         if let Some(last_command) = self.command_queue.back_mut() {
@@ -189,21 +230,53 @@ impl BrowserController {
         true
     }
 
+    /// Returns the oldest queued command whose tab is engine-ready. Commands for tabs whose
+    /// browsing context does not exist yet stay queued, in order, until it does.
     pub fn next_command(&mut self) -> Option<TabCommand> {
-        self.command_queue.pop_front()
+        let index = self
+            .command_queue
+            .iter()
+            .position(|queued| self.is_engine_ready(queued.tab_id()))?;
+        self.command_queue.remove(index)
     }
 
+    /// Reports whether `next_command` would return a command.
     pub fn has_pending_commands(&self) -> bool {
-        !self.command_queue.is_empty()
+        self.command_queue
+            .iter()
+            .any(|queued| self.is_engine_ready(queued.tab_id()))
     }
 
     pub fn handle_event(&mut self, tab_id: TabId, event: BrowserEvent) -> bool {
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id() == tab_id) else {
+        let Some(tab) = self.tab_mut(tab_id) else {
             return false;
         };
 
+        if event.shows_engine_ready() {
+            tab.mark_engine_ready();
+        }
         tab.state_mut().apply(event);
         true
+    }
+
+    fn open_blank_tab(&mut self, activation: TabActivation) -> TabId {
+        let tab_id = TabId::new(self.next_tab_id);
+        self.next_tab_id += 1;
+        self.tabs.push(Tab::new(tab_id, BrowserState::default()));
+        if activation == TabActivation::Foreground {
+            self.active_tab_id = tab_id;
+        }
+        tab_id
+    }
+
+    fn is_engine_ready(&self, tab_id: TabId) -> bool {
+        self.tabs
+            .iter()
+            .any(|tab| tab.id() == tab_id && tab.is_engine_ready())
+    }
+
+    fn tab_mut(&mut self, tab_id: TabId) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|tab| tab.id() == tab_id)
     }
 
     fn active_tab(&self) -> Option<&Tab> {
@@ -218,6 +291,19 @@ impl BrowserController {
             .expect("the controller always owns an active tab")
             .state_mut()
     }
+}
+
+fn set_tab_initial_url(tab: &mut Tab, url: String) -> bool {
+    if !tab.set_initial_url(url.clone()) {
+        return false;
+    }
+
+    let state = tab.state_mut();
+    state.apply(BrowserEvent::AddressChanged { url });
+    state.apply(BrowserEvent::LoadStateChanged {
+        state: LoadState::Loading,
+    });
+    true
 }
 
 impl Default for BrowserController {
