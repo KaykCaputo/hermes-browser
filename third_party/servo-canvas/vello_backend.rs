@@ -332,7 +332,10 @@ impl VelloDrawTarget {
         let device = device_handle.device.clone();
         let queue = device_handle.queue.clone();
         device.on_uncaptured_error(Arc::new(|error| {
-            log::error!("VELLO WGPU ERROR: {error}");
+            // Mercury: after a device loss every frame raises errors; stay quiet.
+            if !GPU_DEVICE_LOST.load(Ordering::Relaxed) {
+                log::error!("VELLO WGPU ERROR: {error}");
+            }
         }));
         device.set_device_lost_callback(|reason, message| {
             log::warn!("VELLO WGPU DEVICE LOST {reason:?} {message}");
@@ -900,7 +903,11 @@ impl VelloDrawTarget {
             if let Err(error) =
                 vello::util::block_on_wgpu(&self.device, receiver.receive()).unwrap()
             {
-                log::warn!("VELLO WGPU MAP ASYNC ERROR {error}");
+                // Mercury: once per process; after a device loss every frame fails.
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    log::warn!("VELLO WGPU MAP ASYNC ERROR {error}");
+                }
                 // Mercury: wgpu 30 counts the buffer as mapped from the
                 // `map_async` call on; unmap so the next read-back can map it.
                 self.rendered_buffer.unmap();
