@@ -88,38 +88,60 @@ make docs
 On macOS, Servo's media backend uses the official GStreamer framework packages from
 gstreamer.freedesktop.org. Mercury does not install them system-wide and needs no `sudo`:
 `scripts/macos/gstreamer.sh` downloads the runtime and development packages, checks their
-SHA-256, and unpacks them into `~/Library/Caches/mercury-browser/gstreamer/<version>/`
-(override with `MERCURY_GSTREAMER_CACHE`). The pinned version and checksums are at the top of
-that script.
+SHA-256 (a download that fails the check is deleted), and unpacks them into
+`~/Library/Caches/mercury-browser/gstreamer/<version>/` (override with `MERCURY_GSTREAMER_CACHE`).
+The pinned version and checksums are at the top of that script.
 
 ```bash
-make gstreamer-macos      # fetch (about 970 MB), unpack (about 4 GB), check
+make gstreamer-macos      # fetch, unpack, check
+make doctor               # also checks the GStreamer prefix on macOS
 ```
 
-The Makefile's build, lint, test and run targets load the build environment themselves. For a
-plain shell, use:
+Disk space (measured): the two packages take 0.9 GiB, the unpacked framework 4.0 GiB, so the
+cache holds **4.9 GiB** afterwards; while `unpack` runs it needs up to **9.7 GiB**, because the
+expanded development package and the assembled framework exist at the same time. Downloading
+took about a minute here and unpacking between 1 and 11 minutes, depending on disk load.
+
+The Makefile's build, check, lint, test and run targets load the build environment themselves
+and stop if it cannot be set up (so they never build against another GStreamer that
+`pkg-config` happens to find). For a plain shell, use:
 
 ```bash
-eval "$(scripts/macos/gstreamer.sh env)"   # PKG_CONFIG, PKG_CONFIG_LIBDIR, PATH, MERCURY_GSTREAMER_ROOT
+gst_env="$(scripts/macos/gstreamer.sh env)" && eval "$gst_env"   # MERCURY_GSTREAMER_PREFIX, PKG_CONFIG, PKG_CONFIG_LIBDIR, PATH
 cargo build --release -p mercury-desktop
-scripts/macos/collect-gstreamer.sh "$MERCURY_GSTREAMER_ROOT" target/release/lib
+scripts/macos/collect-gstreamer.sh "$MERCURY_GSTREAMER_PREFIX" target/release/lib
 ```
+
+Every cargo command that compiles Servo needs that environment, including `cargo check` from an
+editor.
 
 Notes:
 
 - The executable links GStreamer directly and finds it through the rpath
-  `@executable_path/lib/`, so `target/<profile>/lib` must exist before it starts.
-  `collect-gstreamer.sh` fills it: the libraries the executable links, the plugins listed in the
-  resolved `servo` crate's `gstreamer_plugin_lists/`, and their dependencies, thinned to the
-  executable's architecture. It skips the copy when the directory is up to date. `make run`,
-  `make run-debug`, `make build` and `make build-release` call it.
-- The first launch after a fresh copy is slow (about 10 seconds before media is ready) while
-  macOS checks each new library; later launches load the plugins in about 0.3 seconds.
-- Test binaries have no rpath to the libraries. Run them with
-  `DYLD_FALLBACK_LIBRARY_PATH="$MERCURY_GSTREAMER_ROOT/lib"` on the `cargo test` command line
-  itself, as `make test` does. Setting it in a parent shell script or in `make` does not work,
-  because macOS removes `DYLD_*` variables when it starts SIP-protected programs such as `make`
-  and `/bin/sh`.
+  `@executable_path/lib/`, so `target/<profile>/lib` must exist before it starts; without it the
+  program stops in the dynamic loader. `collect-gstreamer.sh` fills it: the libraries the
+  executable links, the plugins `scripts/macos/gstreamer-plugins.sh` names (Servo's list from the
+  resolved `servo` crate, minus the excluded plugins), and their dependencies, thinned to the
+  executable's architecture. A marker records what was collected; an intact, up-to-date directory
+  is not copied again, a damaged one is rebuilt, and a directory without a marker is never
+  replaced. `make run`, `make run-debug`, `make build`, `make build-release` and `make test` call it.
+- **Ogg is left out** (`DEFAULT_EXCLUDED` in `scripts/macos/gstreamer-plugins.sh`; see the user
+  guide). `MERCURY_GSTREAMER_EXCLUDE_PLUGINS` overrides the list for one run (`""` = none). If the
+  set of collected files changes, the collector stops until the library table in
+  `THIRD-PARTY-NOTICES.md` is regenerated: rerun it with `MERCURY_GSTREAMER_UPDATE_NOTICES=1` and
+  commit the table.
+- The first launch after a fresh copy is slow (2 to 10 seconds before media is ready) while macOS
+  checks each new library; later launches load the plugins in about 0.3 seconds. Users see the
+  same delay on their first launch after installing or updating Mercury. Several worktrees can
+  share one collected directory through a symlink (`ln -s <shared lib> target/release/lib`);
+  it stays warm across them.
+- Test binaries have no rpath to the libraries. `make test` builds the executable, collects
+  `target/<profile>/lib` and runs the tests with `DYLD_FALLBACK_LIBRARY_PATH` pointing at that
+  directory, on the `cargo test` command line itself: macOS removes `DYLD_*` variables when it
+  starts SIP-protected programs such as `make` and `/bin/sh`, so setting it in a parent shell
+  script or in `make` does not work. Use `make test CARGO_FLAGS=--release` (likewise `check` and
+  `lint`) for release-mode runs.
+- `make test-media-macos` runs `scripts/macos/test-media.sh`, the tests for these scripts.
 - `tests/pages/media.html` checks playback without making a sound; see `tests/media/README.md`.
 
 ## Windows prerequisites

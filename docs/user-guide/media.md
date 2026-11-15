@@ -30,23 +30,31 @@ gst-inspect-1.0 vp9dec
 
 ## macOS
 
-On macOS, Mercury ships GStreamer's own libraries in a `lib` folder next to the
-`mercury-browser` executable. Nothing needs to be installed, and Mercury does not use any
-GStreamer that may already be on your Mac.
+On macOS, Mercury ships GStreamer's own libraries in a `lib` folder inside the application
+(`Mercury Browser.app/Contents/MacOS/lib`). Nothing needs to be installed. Mercury keeps this
+GStreamer to itself: it loads plugins only from its own `lib` folder, keeps its plugin registry in
+its own cache folder (`~/Library/Caches/io.github.thepigdestroyer.mercury-browser/gstreamer`), and
+ignores GStreamer plugins, registries and GIO modules that other software installed for your
+user account (`GST_PLUGIN_PATH`, `~/.local/share/gstreamer-1.0/plugins`, `~/.cache/gstreamer-1.0`,
+`GIO_EXTRA_MODULES`).
 
-What has been checked on Apple Silicon (development build, GStreamer 1.28.9):
+What has been checked on Apple Silicon (GStreamer 1.28.9):
 
 | Format | Status |
 |---|---|
 | MP4 with H.264 video and AAC audio | Plays. Video is decoded in hardware (VideoToolbox). |
 | WebM with VP9 video and Opus audio | Plays. VP9 is decoded in hardware (VideoToolbox) where the Mac supports it. |
 | MP3, WAV | Play. |
-| Ogg (Opus or Vorbis) | **Known problem:** Ogg Opus files may stop about a second after they start, and Ogg Vorbis files may not report a duration. |
+| Ogg (Opus, Vorbis, Theora) | **Not supported for now.** |
 | Web Audio | Works, including `decodeAudioData` for MP3 and WAV. |
 
-Sites that ask `canPlayType('video/webm; codecs="vp9, opus"')` or `audio/ogg; codecs="opus"` are
-told "no": Servo's list of GStreamer plugins does not include the Opus parser that this check looks
-for. WebM files with Opus audio still play when a page uses them directly.
+Ogg is left out of the macOS build for now because GStreamer 1.24 and later can end Ogg playback
+about a second after it starts (a defect in GStreamer's Ogg demuxer, not in the files). Pages are
+told Ogg is not supported, so sites that offer another format use it instead.
+
+Sites that ask `canPlayType('video/webm; codecs="vp9, opus"')` are told "no": Servo's list of
+GStreamer plugins does not include the Opus parser that this check looks for. WebM files with Opus
+audio still play when a page uses them directly.
 
 The first start after installing or updating Mercury can take about ten seconds before media
 is ready, while macOS checks the bundled libraries. Later starts are fast.
