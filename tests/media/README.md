@@ -54,9 +54,14 @@ the canvas and `XMLHttpRequest` cannot read the files for `decodeAudioData`.
 
 ```sh
 python3 -m http.server --bind 127.0.0.1 8765 &
-./target/release/mercury-browser --screenshot media.png --window-size 1100x1000 \
-  --screenshot-delay 15000 "http://127.0.0.1:8765/tests/pages/media.html"
+./target/release/mercury-browser --screenshot media.png --window-size 1100x1300 \
+  --screenshot-delay 20000 "http://127.0.0.1:8765/tests/pages/media.html"
 kill %1
 ```
 
-Every check prints one line ending in `PASS` or `FAIL`, and a final `DONE` line.
+Every check prints one line ending in `PASS` or `FAIL` within a bounded time, and a final `DONE`
+line always appears (1100×1300 shows all of them). Playback checks compare the media position with
+the wall clock, so a stream that jumps to its end fails. Ogg is not bundled on macOS for now; the
+page then checks that an Ogg element fails promptly with "not supported", and if Ogg is bundled it
+checks that Ogg plays correctly instead. Allow 20 s: the first launch after the libraries were
+copied can take 10 s before media starts.
