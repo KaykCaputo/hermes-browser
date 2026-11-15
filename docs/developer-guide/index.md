@@ -23,6 +23,7 @@ The codebase is small enough to read, but the engine underneath it is not. This 
 | --- | --- |
 | `apps/mercury-desktop` | Desktop lifecycle, Slint callbacks, the native event loop, and runtime composition |
 | `crates/mercury-ui` | Slint components and UI-facing presentation types |
+| `crates/mercury-passwords` | Saved logins in the macOS Keychain, password generation, and login CSV import and export ([details](passwords.md)) |
 | `crates/talaria-core` | Engine-independent browser state, commands, events, tabs, and address resolution |
 | `crates/talaria-servo` | Servo WebViews, browser events, media selection, metrics, and content blocking |
 | `third_party` | Focused compatibility patches for dependencies pinned by Servo |
