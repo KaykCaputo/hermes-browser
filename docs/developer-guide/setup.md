@@ -141,8 +141,16 @@ Notes:
   starts SIP-protected programs such as `make` and `/bin/sh`, so setting it in a parent shell
   script or in `make` does not work. Use `make test CARGO_FLAGS=--release` (likewise `check` and
   `lint`) for release-mode runs.
+- **Expected start-up warning while Ogg is excluded.** Every launch logs
+  `WARN servo::servo::media_platform] Error initializing GStreamer: ErrorLoadingPlugins(["libgstogg.dylib"]). Trying fallback initialization.`
+  Servo loads its plugins by name and treats the missing Ogg plugin as an error; it then starts
+  the backend through its fallback, with the other plugins it had already loaded. Media works.
+  A real failure looks different: more than `libgstogg.dylib` in that list (a damaged or
+  incomplete `lib`), `dyld: Library not loaded: @rpath/libgst…` before anything else (no `lib`
+  at all), or `canPlayType('video/mp4; codecs="avc1.42E01E"')` answering `''` in a page.
 - `make test-media-macos` runs `scripts/macos/test-media.sh`, the tests for these scripts.
-- `tests/pages/media.html` checks playback without making a sound; see `tests/media/README.md`.
+- `tests/pages/media.html` checks playback without making a sound; serve it with
+  `scripts/serve-tests.py` (a loopback server that honours `Range`); see `tests/media/README.md`.
 
 ## Windows prerequisites
 

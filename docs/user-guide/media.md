@@ -48,8 +48,9 @@ What has been checked on Apple Silicon (GStreamer 1.28.9):
 | Ogg (Opus, Vorbis, Theora) | **Not supported for now.** |
 | Web Audio | Works, including `decodeAudioData` for MP3 and WAV. |
 
-Ogg is left out of the macOS build for now because GStreamer 1.24 and later can end Ogg playback
-about a second after it starts (a defect in GStreamer's Ogg demuxer, not in the files). Pages are
+Ogg is left out of the macOS build for now because GStreamer 1.24.13 and later (the change arrived
+in a 1.24 patch release) can end Ogg playback about a second after it starts: a defect in
+GStreamer's Ogg demuxer, not in the files. Pages are
 told Ogg is not supported, so sites that offer another format use it instead.
 
 Sites that ask `canPlayType('video/webm; codecs="vp9, opus"')` are told "no": Servo's list of
