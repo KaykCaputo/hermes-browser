@@ -16,12 +16,15 @@ license = "MPL-2.0"
 [workspace.dependencies]
 adblock = "=0.13.5"
 ash = "0.38"
+backtrace = "0.3.77"
 content-security-policy = "0.9"
+dirs = "7.0"
 dpi = "0.1"
 euclid = "0.22"
 gleam = "0.15"
 glow = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }
+libc = "0.2.191"
 log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 # The `vello` (GPU canvas) feature is on through the vendored fix in `third_party/servo-canvas`:
@@ -46,6 +49,7 @@ slint = { version = "~1.17.1", default-features = false, features = [
     "unstable-winit-030",
 ] }
 slint-build = "~1.17.1"
+signal-hook-registry = "1.4.8"
 surfman = "0.14"
 thiserror = "2"
 url = "2.5"

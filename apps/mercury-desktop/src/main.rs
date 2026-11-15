@@ -16,14 +16,21 @@ use ui_sync::sync_ui;
 
 mod callbacks;
 mod cli;
+mod crash_handler;
 mod engine;
 mod keyboard;
+mod panic_hook;
+mod profile;
 mod rendering;
 mod screenshot;
 mod shortcuts;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {
+    // Before the content-process branch, so that content processes report their crashes too.
+    crash_handler::install();
+    std::panic::set_hook(Box::new(panic_hook::panic_hook));
+
     if run_content_process_if_requested()? {
         return Ok(ExitCode::SUCCESS);
     }
@@ -45,6 +52,9 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     };
 
     use_automatic_gpu_selection();
+    // Dropped last, after the engine has saved its data: a temporary profile is deleted then.
+    let profile =
+        profile::open_profile(options.profile_dir.as_deref(), options.screenshot.is_some());
     select_hardware_accelerated_backend(options.background || options.screenshot.is_some())?;
 
     let window = MainWindow::new()?;
@@ -63,6 +73,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&web_view_focused),
         RuntimeOptions {
             gpu_canvas: options.gpu_canvas,
+            config_dir: profile.servo_config_dir(),
         },
     )?;
     sync_ui(&window, &controller.borrow());

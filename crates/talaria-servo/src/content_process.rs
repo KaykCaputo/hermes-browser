@@ -14,9 +14,40 @@ pub fn run_content_process_if_requested() -> Result<bool, ContentProcessArgument
         return Ok(false);
     };
 
+    exit_when_the_browser_process_is_gone();
     servo::run_content_process(token);
     Ok(true)
 }
+
+/// Ends this content process once the browser process that started it has gone.
+///
+/// A content process waits on IPC from the browser process. If the browser dies without
+/// shutting Servo down (for example `kill -9`, or a crash), nothing tells the content process
+/// to stop, and it would keep running as an orphan with its memory and open pages. On Unix
+/// an orphan is adopted by another process, so its parent id changes: checking once a second
+/// is cheap and catches every way the browser can end.
+#[cfg(unix)]
+fn exit_when_the_browser_process_is_gone() {
+    use std::time::Duration;
+
+    let browser_process_id = std::os::unix::process::parent_id();
+    let spawn_result = std::thread::Builder::new()
+        .name("ParentWatchdog".to_owned())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(1));
+                if std::os::unix::process::parent_id() != browser_process_id {
+                    std::process::exit(0);
+                }
+            }
+        });
+    if let Err(error) = spawn_result {
+        log::warn!("could not watch the browser process: {error}");
+    }
+}
+
+#[cfg(not(unix))]
+fn exit_when_the_browser_process_is_gone() {}
 
 fn content_process_token(
     arguments: impl IntoIterator<Item = String>,

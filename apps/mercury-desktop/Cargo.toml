@@ -9,11 +9,14 @@ name = "mercury-browser"
 path = "src/main.rs"
 
 [dependencies]
+backtrace.workspace = true
+dirs.workspace = true
 dpi.workspace = true
 euclid.workspace = true
 gleam.workspace = true
 glow.workspace = true
 image.workspace = true
+libc.workspace = true
 log.workspace = true
 mercury-ui = { path = "../../crates/mercury-ui" }
 servo.workspace = true
@@ -25,6 +28,10 @@ thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ash.workspace = true
+
+# The crash handler is compiled on macOS and Linux only, as in servoshell.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+signal-hook-registry.workspace = true
 
 [build-dependencies]
 gl_generator = "0.14"

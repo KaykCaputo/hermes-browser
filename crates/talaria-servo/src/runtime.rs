@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,15 +60,21 @@ impl servo::EventLoopWaker for EventLoopWaker {
 }
 
 /// Engine settings chosen at launch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
     /// Draw 2D canvases on the GPU (Servo's vello backend) instead of the CPU.
     pub gpu_canvas: bool,
+    /// Where Servo keeps cookies, HSTS, HTTP authentication and site storage. `None` keeps
+    /// nothing across runs.
+    pub config_dir: Option<PathBuf>,
 }
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
-        Self { gpu_canvas: true }
+        Self {
+            gpu_canvas: true,
+            config_dir: None,
+        }
     }
 }
 
@@ -82,12 +89,12 @@ impl ServoRuntime {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
-        let options = mercury_options();
+        let options = mercury_options(runtime_options.config_dir.clone());
         let multiprocess_enabled = options.multiprocess;
         let sandbox_enabled = options.sandbox;
         let inner = ServoBuilder::default()
             .opts(options)
-            .preferences(mercury_preferences(runtime_options))
+            .preferences(mercury_preferences(&runtime_options))
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
@@ -149,13 +156,17 @@ impl ServoRuntime {
     }
 }
 
-fn mercury_options() -> Opts {
+fn mercury_options(config_dir: Option<PathBuf>) -> Opts {
     Opts {
         // Servo 0.8.0 content-process isolation renders correctly in Mercury.
         // Keep the operating-system sandbox disabled independently: the
         // current Linux gaol path is not yet reliable enough for a release.
         multiprocess: true,
         sandbox: false,
+        // With `hard_fail`, a page that panics would exit the whole browser; without it,
+        // Servo replaces the page with its crash page and reports it through `notify_crashed`.
+        hard_fail: false,
+        config_dir,
         ..Opts::default()
     }
 }
@@ -170,7 +181,7 @@ impl servo::ServoDelegate for BrowserServoDelegate {
     }
 }
 
-fn mercury_preferences(runtime_options: RuntimeOptions) -> Preferences {
+fn mercury_preferences(runtime_options: &RuntimeOptions) -> Preferences {
     let mut preferences = Preferences::default();
     if runtime_options.gpu_canvas {
         preferences.dom_canvas_backend = "vello".to_owned();
@@ -362,20 +373,39 @@ mod tests {
 
     #[test]
     fn enables_content_process_isolation() {
-        assert!(mercury_options().multiprocess);
+        assert!(mercury_options(None).multiprocess);
     }
 
     #[test]
     fn keeps_the_unreliable_os_sandbox_disabled() {
-        assert!(!mercury_options().sandbox);
+        assert!(!mercury_options(None).sandbox);
     }
 
     use super::*;
 
     #[test]
+    fn hard_fail_is_disabled() {
+        assert!(!mercury_options(None).hard_fail);
+    }
+
+    #[test]
+    fn config_dir_is_passed_to_servo() {
+        let config_dir = PathBuf::from("/profile/servo");
+
+        assert_eq!(
+            mercury_options(Some(config_dir.clone())).config_dir,
+            Some(config_dir)
+        );
+        assert_eq!(mercury_options(None).config_dir, None);
+    }
+
+    #[test]
     fn mercury_keeps_servos_default_script_settings() {
         for gpu_canvas in [true, false] {
-            let preferences = mercury_preferences(RuntimeOptions { gpu_canvas });
+            let preferences = mercury_preferences(&RuntimeOptions {
+                gpu_canvas,
+                ..RuntimeOptions::default()
+            });
 
             assert_eq!(
                 preferences.dom_script_asynch,
@@ -386,14 +416,17 @@ mod tests {
 
     #[test]
     fn gpu_canvas_is_enabled_by_default() {
-        let preferences = mercury_preferences(RuntimeOptions::default());
+        let preferences = mercury_preferences(&RuntimeOptions::default());
 
         assert_eq!(preferences.dom_canvas_backend, "vello");
     }
 
     #[test]
     fn gpu_canvas_can_be_disabled() {
-        let preferences = mercury_preferences(RuntimeOptions { gpu_canvas: false });
+        let preferences = mercury_preferences(&RuntimeOptions {
+            gpu_canvas: false,
+            ..RuntimeOptions::default()
+        });
 
         assert_eq!(
             preferences.dom_canvas_backend,

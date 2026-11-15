@@ -8,6 +8,7 @@ pub(crate) struct LaunchOptions {
     pub window_size: Option<(u32, u32)>,
     pub background: bool,
     pub gpu_canvas: bool,
+    pub profile_dir: Option<PathBuf>,
 }
 
 impl Default for LaunchOptions {
@@ -18,6 +19,7 @@ impl Default for LaunchOptions {
             window_size: None,
             background: false,
             gpu_canvas: true,
+            profile_dir: None,
         }
     }
 }
@@ -48,6 +50,8 @@ Options:
   --window-size <W>x<H>            Set the window's logical size, for example 1280x800
   --background                     Start without taking focus (for automated runs)
   --disable-gpu-canvas             Draw 2D canvases on the CPU
+  --profile-dir <directory>        Keep cookies and site data in this directory
+                                   (a screenshot run otherwise uses a temporary one)
   --help                           Print this help and exit
   --version                        Print the version and exit";
 
@@ -69,6 +73,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
     let mut window_size = None;
     let mut background = false;
     let mut gpu_canvas = true;
+    let mut profile_dir = None;
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -105,6 +110,10 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
             }
             "--background" => background = true,
             "--disable-gpu-canvas" => gpu_canvas = false,
+            "--profile-dir" => {
+                let value = option_value(&mut arguments, "--profile-dir", "<directory>")?;
+                profile_dir = Some(PathBuf::from(value));
+            }
             _ if argument.starts_with("-psn_") => {}
             _ if argument.starts_with('-') => {
                 return Err(format!("unknown option '{argument}'"));
@@ -128,6 +137,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
         window_size,
         background,
         gpu_canvas,
+        profile_dir,
     }))
 }
 
@@ -208,6 +218,7 @@ mod tests {
                 window_size: Some((800, 600)),
                 background: false,
                 gpu_canvas: true,
+                profile_dir: None,
             })
         );
     }
@@ -367,6 +378,32 @@ mod tests {
 
         assert!(text.contains("--disable-gpu-canvas"));
         assert!(text.contains("Draw 2D canvases on the CPU"));
+    }
+
+    #[test]
+    fn profile_dir_is_parsed() {
+        assert_eq!(
+            parse(&["--profile-dir", "/x", "https://a.test"]),
+            CliOutcome::Run(LaunchOptions {
+                urls: vec!["https://a.test".to_owned()],
+                profile_dir: Some(PathBuf::from("/x")),
+                ..LaunchOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn help_describes_profile_dir() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains("--profile-dir <directory>"));
+    }
+
+    #[test]
+    fn profile_dir_without_a_value_is_a_usage_error() {
+        assert_eq!(exit_code(&parse(&["--profile-dir"])), Some(2));
     }
 
     #[test]
