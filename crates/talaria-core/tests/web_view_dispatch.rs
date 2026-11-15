@@ -1,5 +1,5 @@
 use talaria_core::{
-    BrowserCommand, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput,
+    BrowserCommand, ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput,
     KeyboardModifiers, PointerButton, PointerButtonAction, WebView, dispatch_command,
 };
 
@@ -29,6 +29,8 @@ enum FakeCall {
     KeyboardInput(KeyboardInput),
     ImeInput(ImeInput),
     SetPageZoom(u16),
+    SetColorScheme(ColorScheme),
+    ExitFullscreen,
     PinchZoom {
         delta: f32,
         x: f32,
@@ -127,6 +129,14 @@ impl WebView for FakeWebView {
 
     fn pinch_zoom(&mut self, delta: f32, x: f32, y: f32) -> Result<(), Self::Error> {
         self.record(FakeCall::PinchZoom { delta, x, y })
+    }
+
+    fn set_color_scheme(&mut self, scheme: ColorScheme) -> Result<(), Self::Error> {
+        self.record(FakeCall::SetColorScheme(scheme))
+    }
+
+    fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
+        self.record(FakeCall::ExitFullscreen)
     }
 }
 
@@ -338,4 +348,30 @@ fn pinch_zoom_command_forwards_delta_and_centre() {
             y: 60.0,
         }]
     );
+}
+
+#[test]
+fn set_color_scheme_command_forwards_the_scheme() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(
+        &mut web_view,
+        BrowserCommand::SetColorScheme(ColorScheme::Dark),
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        web_view.calls,
+        vec![FakeCall::SetColorScheme(ColorScheme::Dark)]
+    );
+}
+
+#[test]
+fn exit_fullscreen_command_calls_exit_fullscreen() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(&mut web_view, BrowserCommand::ExitFullscreen);
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(web_view.calls, vec![FakeCall::ExitFullscreen]);
 }

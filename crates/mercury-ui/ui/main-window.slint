@@ -5,6 +5,38 @@ export enum WebViewPointerButton {
     other,
 }
 
+export enum WebViewCursor {
+    default,
+    none,
+    help,
+    pointer,
+    progress,
+    wait,
+    crosshair,
+    text,
+    alias,
+    copy,
+    move,
+    no-drop,
+    not-allowed,
+    grab,
+    grabbing,
+    col-resize,
+    row-resize,
+    n-resize,
+    e-resize,
+    s-resize,
+    w-resize,
+    ne-resize,
+    nw-resize,
+    se-resize,
+    sw-resize,
+    ew-resize,
+    ns-resize,
+    nesw-resize,
+    nwse-resize,
+}
+
 export struct BrowserTab {
     title: string,
     icon: image,
@@ -156,6 +188,10 @@ export component MainWindow inherits Window {
     out property <length> web-view-height: web-view-area.height;
     in property <string> content-message: "Type an address or search with DuckDuckGo.";
     in property <int> zoom-percent: 100;
+    in property <WebViewCursor> web-view-cursor: WebViewCursor.default;
+    in property <string> status-text: "";
+    // The page is fullscreen: the tab strip and toolbar are hidden.
+    in property <bool> chrome-hidden: false;
     out property <bool> text-input-focused: address-input.has-focus || (root.is-new-tab && root.new-tab-search-focused);
     out property <bool> web-view-hovered: web-view-input.has-hover;
     out property <float> web-view-pointer-x: web-view-input.mouse-x / 1px;
@@ -173,6 +209,94 @@ export component MainWindow inherits Window {
     callback web-view-pointer-button(WebViewPointerButton, bool, float, float);
     callback web-view-scrolled(float, float, float, float);
     callback web-view-focus-changed(bool);
+
+    pure function mouse-cursor-for(cursor: WebViewCursor) -> MouseCursor {
+        if cursor == WebViewCursor.none {
+            return MouseCursor.none;
+        }
+        if cursor == WebViewCursor.help {
+            return MouseCursor.help;
+        }
+        if cursor == WebViewCursor.pointer {
+            return MouseCursor.pointer;
+        }
+        if cursor == WebViewCursor.progress {
+            return MouseCursor.progress;
+        }
+        if cursor == WebViewCursor.wait {
+            return MouseCursor.wait;
+        }
+        if cursor == WebViewCursor.crosshair {
+            return MouseCursor.crosshair;
+        }
+        if cursor == WebViewCursor.text {
+            return MouseCursor.text;
+        }
+        if cursor == WebViewCursor.alias {
+            return MouseCursor.alias;
+        }
+        if cursor == WebViewCursor.copy {
+            return MouseCursor.copy;
+        }
+        if cursor == WebViewCursor.move {
+            return MouseCursor.move;
+        }
+        if cursor == WebViewCursor.no-drop {
+            return MouseCursor.no-drop;
+        }
+        if cursor == WebViewCursor.not-allowed {
+            return MouseCursor.not-allowed;
+        }
+        if cursor == WebViewCursor.grab {
+            return MouseCursor.grab;
+        }
+        if cursor == WebViewCursor.grabbing {
+            return MouseCursor.grabbing;
+        }
+        if cursor == WebViewCursor.col-resize {
+            return MouseCursor.col-resize;
+        }
+        if cursor == WebViewCursor.row-resize {
+            return MouseCursor.row-resize;
+        }
+        if cursor == WebViewCursor.n-resize {
+            return MouseCursor.n-resize;
+        }
+        if cursor == WebViewCursor.e-resize {
+            return MouseCursor.e-resize;
+        }
+        if cursor == WebViewCursor.s-resize {
+            return MouseCursor.s-resize;
+        }
+        if cursor == WebViewCursor.w-resize {
+            return MouseCursor.w-resize;
+        }
+        if cursor == WebViewCursor.ne-resize {
+            return MouseCursor.ne-resize;
+        }
+        if cursor == WebViewCursor.nw-resize {
+            return MouseCursor.nw-resize;
+        }
+        if cursor == WebViewCursor.se-resize {
+            return MouseCursor.se-resize;
+        }
+        if cursor == WebViewCursor.sw-resize {
+            return MouseCursor.sw-resize;
+        }
+        if cursor == WebViewCursor.ew-resize {
+            return MouseCursor.ew-resize;
+        }
+        if cursor == WebViewCursor.ns-resize {
+            return MouseCursor.ns-resize;
+        }
+        if cursor == WebViewCursor.nesw-resize {
+            return MouseCursor.nesw-resize;
+        }
+        if cursor == WebViewCursor.nwse-resize {
+            return MouseCursor.nwse-resize;
+        }
+        return MouseCursor.default;
+    }
 
     public function focus-address-bar() {
         address-input.focus();
@@ -203,7 +327,8 @@ export component MainWindow inherits Window {
         spacing: 0px;
 
         Rectangle {
-            height: 48px;
+            height: root.chrome-hidden ? 0px : 48px;
+            visible: !root.chrome-hidden;
             background: #0b0f14;
 
             HorizontalLayout {
@@ -250,7 +375,8 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
-            height: 60px;
+            height: root.chrome-hidden ? 0px : 60px;
+            visible: !root.chrome-hidden;
             background: #11171f;
 
             HorizontalLayout {
@@ -489,6 +615,7 @@ export component MainWindow inherits Window {
 
                 web-view-input := TouchArea {
                     enabled: root.web-view-visible;
+                    mouse-cursor: root.mouse-cursor-for(root.web-view-cursor);
 
                     property <WebViewPointerButton> active-button: WebViewPointerButton.other;
 
@@ -557,6 +684,30 @@ export component MainWindow inherits Window {
 
                         accept
                     }
+                }
+            }
+
+            // Drawn above the page; plain Rectangle and Text items do not take pointer input.
+            if root.web-view-visible && root.status-text != "": Rectangle {
+                x: 6px;
+                y: parent.height - self.height - 6px;
+                width: Math.min(status-label.preferred-width + 16px, parent.width * 60%);
+                height: 24px;
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: #29323d;
+                background: #1a222c;
+
+                status-label := Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    height: parent.height;
+                    text: root.status-text;
+                    color: #c9d3de;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    wrap: no-wrap;
                 }
             }
         }

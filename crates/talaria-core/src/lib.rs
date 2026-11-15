@@ -1,6 +1,7 @@
 mod address;
 mod browser;
 mod controller;
+mod cursor;
 mod input;
 mod page_icon;
 mod tab;
@@ -12,6 +13,7 @@ pub use browser::{
     BrowserCommand, BrowserEvent, BrowserState, LoadState, PointerButton, PointerButtonAction,
 };
 pub use controller::BrowserController;
+pub use cursor::{ColorScheme, PointerCursor};
 pub use input::{
     CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, KeyboardModifiers,
 };

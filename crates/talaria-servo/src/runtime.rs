@@ -9,9 +9,10 @@ use euclid::Scale;
 use log::info;
 use rustls::crypto::CryptoProvider;
 use servo::{
-    LoadStatus, Opts, PixelFormat, Preferences, RenderingContext, ServoBuilder, WebViewBuilder,
+    Cursor, LoadStatus, Opts, PixelFormat, Preferences, RenderingContext, ServoBuilder,
+    WebViewBuilder,
 };
-use talaria_core::{BrowserEvent, LoadState, PageIcon, TabEvent, TabId};
+use talaria_core::{BrowserEvent, LoadState, PageIcon, PointerCursor, TabEvent, TabId};
 use url::Url;
 
 use crate::adblocker::ContentBlocker;
@@ -259,6 +260,22 @@ impl servo::WebViewDelegate for BrowserDelegate {
         self.send_browser_event(history_changed_event(entries.len(), current));
     }
 
+    fn notify_cursor_changed(&self, _web_view: servo::WebView, cursor: Cursor) {
+        self.send_browser_event(BrowserEvent::CursorChanged {
+            cursor: pointer_cursor_from_servo(cursor),
+        });
+    }
+
+    fn notify_status_text_changed(&self, _web_view: servo::WebView, status: Option<String>) {
+        self.send_browser_event(BrowserEvent::StatusTextChanged { text: status });
+    }
+
+    fn notify_fullscreen_state_changed(&self, _web_view: servo::WebView, is_fullscreen: bool) {
+        self.send_browser_event(BrowserEvent::FullscreenChanged {
+            fullscreen: is_fullscreen,
+        });
+    }
+
     fn notify_new_frame_ready(&self, _web_view: servo::WebView) {
         self.record_load_milestone(LoadMilestone::FirstFrame);
         self.frame_ready.mark_ready();
@@ -273,6 +290,46 @@ impl servo::WebViewDelegate for BrowserDelegate {
         self.send_browser_event(BrowserEvent::LoadStateChanged {
             state: LoadState::Failed { message: reason },
         });
+    }
+}
+
+fn pointer_cursor_from_servo(cursor: Cursor) -> PointerCursor {
+    match cursor {
+        Cursor::None => PointerCursor::None,
+        Cursor::Default => PointerCursor::Default,
+        Cursor::Pointer => PointerCursor::Pointer,
+        Cursor::ContextMenu => PointerCursor::ContextMenu,
+        Cursor::Help => PointerCursor::Help,
+        Cursor::Progress => PointerCursor::Progress,
+        Cursor::Wait => PointerCursor::Wait,
+        Cursor::Cell => PointerCursor::Cell,
+        Cursor::Crosshair => PointerCursor::Crosshair,
+        Cursor::Text => PointerCursor::Text,
+        Cursor::VerticalText => PointerCursor::VerticalText,
+        Cursor::Alias => PointerCursor::Alias,
+        Cursor::Copy => PointerCursor::Copy,
+        Cursor::Move => PointerCursor::Move,
+        Cursor::NoDrop => PointerCursor::NoDrop,
+        Cursor::NotAllowed => PointerCursor::NotAllowed,
+        Cursor::Grab => PointerCursor::Grab,
+        Cursor::Grabbing => PointerCursor::Grabbing,
+        Cursor::EResize => PointerCursor::EResize,
+        Cursor::NResize => PointerCursor::NResize,
+        Cursor::NeResize => PointerCursor::NeResize,
+        Cursor::NwResize => PointerCursor::NwResize,
+        Cursor::SResize => PointerCursor::SResize,
+        Cursor::SeResize => PointerCursor::SeResize,
+        Cursor::SwResize => PointerCursor::SwResize,
+        Cursor::WResize => PointerCursor::WResize,
+        Cursor::EwResize => PointerCursor::EwResize,
+        Cursor::NsResize => PointerCursor::NsResize,
+        Cursor::NeswResize => PointerCursor::NeswResize,
+        Cursor::NwseResize => PointerCursor::NwseResize,
+        Cursor::ColResize => PointerCursor::ColResize,
+        Cursor::RowResize => PointerCursor::RowResize,
+        Cursor::AllScroll => PointerCursor::AllScroll,
+        Cursor::ZoomIn => PointerCursor::ZoomIn,
+        Cursor::ZoomOut => PointerCursor::ZoomOut,
     }
 }
 
@@ -470,6 +527,32 @@ mod tests {
                 can_go_back: true,
                 can_go_forward: false,
             }
+        );
+    }
+
+    #[test]
+    fn every_servo_cursor_maps_to_a_pointer_cursor() {
+        assert_eq!(
+            pointer_cursor_from_servo(Cursor::Pointer),
+            PointerCursor::Pointer
+        );
+        assert_eq!(pointer_cursor_from_servo(Cursor::Text), PointerCursor::Text);
+        assert_eq!(
+            pointer_cursor_from_servo(Cursor::Grabbing),
+            PointerCursor::Grabbing
+        );
+        assert_eq!(pointer_cursor_from_servo(Cursor::None), PointerCursor::None);
+        assert_eq!(
+            pointer_cursor_from_servo(Cursor::Default),
+            PointerCursor::Default
+        );
+        assert_eq!(
+            pointer_cursor_from_servo(Cursor::NwseResize),
+            PointerCursor::NwseResize
+        );
+        assert_eq!(
+            pointer_cursor_from_servo(Cursor::ZoomOut),
+            PointerCursor::ZoomOut
         );
     }
 

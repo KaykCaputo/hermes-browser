@@ -5,16 +5,18 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use mercury_ui::MainWindow;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, GraphicsAPI, Image, RenderingState, Timer};
 use talaria_core::{
-    BrowserController, BrowserEvent, DEFAULT_ZOOM_PERCENT, LoadState, TabEvent, TabId,
-    WebView as TalariaWebView, dispatch_command,
+    BrowserCommand, BrowserController, BrowserEvent, DEFAULT_ZOOM_PERCENT, LoadState, TabEvent,
+    TabId, WebView as TalariaWebView, dispatch_command,
 };
 use talaria_servo::{
     EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ServoRuntime, ServoWebView, ServoWebViewError,
     ViewportSize,
 };
 
+use crate::keyboard::color_scheme_from_winit;
 use crate::rendering::BrowserRenderingContext;
 use crate::ui_sync::sync_ui;
 
@@ -243,6 +245,16 @@ impl EngineState {
 
         self.rendering_context = Some(Rc::new(context));
         self.wgpu_device = Some(device.clone());
+        // The window exists now, so the system appearance can be read. Later changes arrive as
+        // `ThemeChanged` window events.
+        if let Some(Some(theme)) = window
+            .window()
+            .with_winit_window(|winit_window| winit_window.theme())
+        {
+            self.controller
+                .borrow_mut()
+                .set_color_scheme(color_scheme_from_winit(theme));
+        }
         window.set_content_message(
             "Offscreen rendering initialized. Waiting for Servo WebView.".into(),
         );
@@ -319,6 +331,8 @@ impl EngineState {
                     if zoom_percent != DEFAULT_ZOOM_PERCENT {
                         let _zoom_result = created_web_view.set_page_zoom(zoom_percent);
                     }
+                    let color_scheme = self.controller.borrow().color_scheme();
+                    let _scheme_result = created_web_view.set_color_scheme(color_scheme);
                     self.web_views.insert(tab_id, created_web_view);
                     self.event_receivers.insert(tab_id, event_receiver);
                 }
@@ -330,6 +344,9 @@ impl EngineState {
         }
 
         let active_tab_changed = self.visible_tab_id != Some(active_tab_id);
+        if active_tab_changed && let Some(previous_tab_id) = self.visible_tab_id {
+            leave_page_fullscreen(&mut self.controller.borrow_mut(), previous_tab_id);
+        }
         if active_tab_changed {
             if let Some(previous_tab_id) = self.visible_tab_id
                 && let Some(previous_web_view) = self.web_views.get_mut(&previous_tab_id)
@@ -474,6 +491,16 @@ pub(crate) fn apply_pending_browser_events(
     state_changed
 }
 
+/// A tab that is switched away from while one of its pages is fullscreen leaves fullscreen.
+pub(crate) fn leave_page_fullscreen(controller: &mut BrowserController, tab_id: TabId) {
+    let is_fullscreen = controller
+        .tabs()
+        .any(|tab| tab.id() == tab_id && tab.state().is_fullscreen());
+    if is_fullscreen {
+        controller.queue_command_for(tab_id, BrowserCommand::ExitFullscreen);
+    }
+}
+
 fn tab_zoom_percent(controller: &BrowserController, tab_id: TabId) -> u16 {
     controller
         .tabs()
@@ -512,7 +539,7 @@ mod tests {
     use std::convert::Infallible;
 
     use talaria_core::{
-        BrowserCommand, ImeInput, KeyboardInput, PointerButton, PointerButtonAction,
+        ColorScheme, ImeInput, KeyboardInput, PointerButton, PointerButtonAction, TabCommand,
     };
 
     use super::*;
@@ -574,6 +601,12 @@ mod tests {
         fn pinch_zoom(&mut self, _delta: f32, _x: f32, _y: f32) -> Result<(), Self::Error> {
             Ok(())
         }
+        fn set_color_scheme(&mut self, _scheme: ColorScheme) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     fn mark_engine_ready(controller: &RefCell<BrowserController>, tab_id: TabId) {
@@ -581,6 +614,33 @@ mod tests {
             .borrow_mut()
             .handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
         assert!(handled);
+    }
+
+    #[test]
+    fn switching_away_from_a_fullscreen_tab_leaves_fullscreen() {
+        let mut controller = BrowserController::default();
+        let tab_id = controller.active_tab_id();
+        controller.handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
+        controller.handle_event(tab_id, BrowserEvent::FullscreenChanged { fullscreen: true });
+        controller.open_tab();
+
+        leave_page_fullscreen(&mut controller, tab_id);
+
+        assert_eq!(
+            controller.next_command(),
+            Some(TabCommand::new(tab_id, BrowserCommand::ExitFullscreen))
+        );
+    }
+
+    #[test]
+    fn switching_away_from_a_normal_tab_queues_nothing() {
+        let mut controller = BrowserController::default();
+        let tab_id = controller.active_tab_id();
+        controller.handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
+
+        leave_page_fullscreen(&mut controller, tab_id);
+
+        assert_eq!(controller.next_command(), None);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use talaria_core::{
     AddressResolutionError, BrowserCommand, BrowserController, BrowserEvent, BrowserState,
-    LoadState, PointerButton, PointerButtonAction, TabActivation, TabCommand, TabId,
+    ColorScheme, LoadState, PointerButton, PointerButtonAction, TabActivation, TabCommand, TabId,
 };
 
 fn command(queued: Option<TabCommand>) -> Option<BrowserCommand> {
@@ -883,4 +883,53 @@ fn select_last_tab_activates_the_final_tab() {
     controller.select_last_tab();
 
     assert_eq!(controller.active_tab_id(), last_tab_id);
+}
+
+#[test]
+fn the_colour_scheme_starts_light() {
+    assert_eq!(
+        BrowserController::default().color_scheme(),
+        ColorScheme::Light
+    );
+}
+
+#[test]
+fn a_colour_scheme_change_is_queued_for_every_tab() {
+    let mut controller = controller_with_ready_tab();
+    let first_tab_id = controller.active_tab_id();
+    let second_tab_id = controller.open_tab();
+    mark_engine_ready(&mut controller, second_tab_id);
+
+    controller.set_color_scheme(ColorScheme::Dark);
+
+    assert_eq!(controller.color_scheme(), ColorScheme::Dark);
+    let queued = std::iter::from_fn(|| controller.next_command()).collect::<Vec<_>>();
+    assert_eq!(
+        queued,
+        vec![
+            TabCommand::new(
+                first_tab_id,
+                BrowserCommand::SetColorScheme(ColorScheme::Dark)
+            ),
+            TabCommand::new(
+                second_tab_id,
+                BrowserCommand::SetColorScheme(ColorScheme::Dark)
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_colour_scheme_change_before_readiness_is_held() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    controller.set_color_scheme(ColorScheme::Dark);
+    assert_eq!(command(controller.next_command()), None);
+
+    mark_engine_ready(&mut controller, tab_id);
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::SetColorScheme(ColorScheme::Dark))
+    );
 }

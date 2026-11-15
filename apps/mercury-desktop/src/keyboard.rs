@@ -6,14 +6,17 @@ use servo::Location;
 use slint::ComponentHandle;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use talaria_core::{
-    BrowserCommand, BrowserController, CompositionState, ImeInput, KeyLocation, KeyState,
-    KeyboardInput, KeyboardModifiers, TabId,
+    BrowserCommand, BrowserController, ColorScheme, CompositionState, ImeInput, KeyLocation,
+    KeyState, KeyboardInput, KeyboardModifiers, TabId,
 };
 use winit::event::{ElementState, Ime, WindowEvent};
-use winit::keyboard::{Key, KeyLocation as WinitKeyLocation, ModifiersState, PhysicalKey};
+use winit::keyboard::{
+    Key, KeyLocation as WinitKeyLocation, ModifiersState, NamedKey, PhysicalKey,
+};
+use winit::window::Theme;
 
 use crate::keyutils;
-use crate::shortcuts::handle_browser_shortcut;
+use crate::shortcuts::{exits_fullscreen, handle_browser_shortcut};
 
 pub(crate) fn connect_native_keyboard_input(
     window: &MainWindow,
@@ -23,6 +26,7 @@ pub(crate) fn connect_native_keyboard_input(
     let weak_window = window.as_weak();
     let mut modifiers = ModifiersState::empty();
     let mut composition_tab_id: Option<TabId> = None;
+    let mut escape_exited_fullscreen = false;
 
     window
         .window()
@@ -36,6 +40,25 @@ pub(crate) fn connect_native_keyboard_input(
                     modifiers = changed.state();
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
+                    let page_fullscreen = controller.borrow().active_state().is_fullscreen();
+                    if event.state == ElementState::Pressed
+                        && exits_fullscreen(&event.logical_key, page_fullscreen)
+                    {
+                        controller
+                            .borrow_mut()
+                            .queue_command(BrowserCommand::ExitFullscreen);
+                        escape_exited_fullscreen = true;
+                        window.window().request_redraw();
+                        return EventResult::PreventDefault;
+                    }
+                    if event.state == ElementState::Released
+                        && escape_exited_fullscreen
+                        && matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                    {
+                        escape_exited_fullscreen = false;
+                        return EventResult::PreventDefault;
+                    }
+
                     if handle_browser_shortcut(
                         &window,
                         &controller,
@@ -74,6 +97,12 @@ pub(crate) fn connect_native_keyboard_input(
                     window.window().request_redraw();
                     return EventResult::PreventDefault;
                 }
+                WindowEvent::ThemeChanged(theme) => {
+                    controller
+                        .borrow_mut()
+                        .set_color_scheme(color_scheme_from_winit(*theme));
+                    window.window().request_redraw();
+                }
                 WindowEvent::Focused(false) => {
                     dismiss_composition(&controller, &mut composition_tab_id);
                 }
@@ -105,6 +134,13 @@ pub(crate) fn keyboard_input_from_winit(
         },
         repeat: event.repeat,
         is_composing,
+    }
+}
+
+pub(crate) fn color_scheme_from_winit(theme: Theme) -> ColorScheme {
+    match theme {
+        Theme::Light => ColorScheme::Light,
+        Theme::Dark => ColorScheme::Dark,
     }
 }
 
@@ -240,7 +276,7 @@ mod tests {
 
     #[test]
     fn arrow_keys_and_function_keys_map_to_w3c_names() {
-        use winit::keyboard::{KeyCode, NamedKey};
+        use winit::keyboard::KeyCode;
 
         assert_eq!(
             logical_key_string(&Key::Named(NamedKey::ArrowLeft)),
@@ -282,6 +318,12 @@ mod tests {
                 y: 0.0,
             }
         );
+    }
+
+    #[test]
+    fn winit_themes_become_colour_schemes() {
+        assert_eq!(color_scheme_from_winit(Theme::Dark), ColorScheme::Dark);
+        assert_eq!(color_scheme_from_winit(Theme::Light), ColorScheme::Light);
     }
 
     #[test]

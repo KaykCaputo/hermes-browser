@@ -1,5 +1,5 @@
 use crate::browser::{BrowserCommand, PointerButton, PointerButtonAction};
-use crate::{ImeInput, KeyboardInput};
+use crate::{ColorScheme, ImeInput, KeyboardInput};
 
 pub trait WebView {
     type Error;
@@ -22,6 +22,8 @@ pub trait WebView {
     fn ime_input(&mut self, event: ImeInput) -> Result<(), Self::Error>;
     fn set_page_zoom(&mut self, percent: u16) -> Result<(), Self::Error>;
     fn pinch_zoom(&mut self, delta: f32, x: f32, y: f32) -> Result<(), Self::Error>;
+    fn set_color_scheme(&mut self, scheme: ColorScheme) -> Result<(), Self::Error>;
+    fn exit_fullscreen(&mut self) -> Result<(), Self::Error>;
 }
 
 pub fn dispatch_command<W>(web_view: &mut W, command: BrowserCommand) -> Result<(), W::Error>
@@ -51,5 +53,7 @@ where
         BrowserCommand::ImeInput(event) => web_view.ime_input(event),
         BrowserCommand::SetPageZoom { percent } => web_view.set_page_zoom(percent),
         BrowserCommand::PinchZoom { delta, x, y } => web_view.pinch_zoom(delta, x, y),
+        BrowserCommand::SetColorScheme(scheme) => web_view.set_color_scheme(scheme),
+        BrowserCommand::ExitFullscreen => web_view.exit_fullscreen(),
     }
 }

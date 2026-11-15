@@ -6,11 +6,11 @@ use servo::{
     Code, CompositionEvent as ServoCompositionEvent, CompositionState as ServoCompositionState,
     DevicePoint, ImeEvent as ServoImeEvent, InputEvent, Key, KeyState as ServoKeyState,
     KeyboardEvent as ServoKeyboardEvent, Location, Modifiers,
-    MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
+    MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey, Theme,
     WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use talaria_core::{
-    CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
+    ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
     PointerButtonAction, TabId, WebView as TalariaWebView,
 };
 use url::Url;
@@ -197,6 +197,23 @@ impl TalariaWebView for ServoWebView {
             .adjust_pinch_zoom(delta, device_point(x, y, scale_factor));
         Ok(())
     }
+
+    fn set_color_scheme(&mut self, scheme: ColorScheme) -> Result<(), Self::Error> {
+        self.inner.notify_theme_change(servo_theme(scheme));
+        Ok(())
+    }
+
+    fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
+        self.inner.exit_fullscreen();
+        Ok(())
+    }
+}
+
+fn servo_theme(scheme: ColorScheme) -> Theme {
+    match scheme {
+        ColorScheme::Light => Theme::Light,
+        ColorScheme::Dark => Theme::Dark,
+    }
 }
 
 fn page_zoom_factor(percent: u16) -> f32 {
@@ -290,6 +307,12 @@ mod tests {
         assert_eq!(page_zoom_factor(100), 1.0);
         assert_eq!(page_zoom_factor(30), 0.3);
         assert_eq!(page_zoom_factor(500), 5.0);
+    }
+
+    #[test]
+    fn colour_schemes_map_to_servo_themes() {
+        assert_eq!(servo_theme(ColorScheme::Light), Theme::Light);
+        assert_eq!(servo_theme(ColorScheme::Dark), Theme::Dark);
     }
 
     #[test]

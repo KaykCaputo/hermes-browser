@@ -1,4 +1,4 @@
-use talaria_core::{BrowserEvent, BrowserState, LoadState, PageIcon};
+use talaria_core::{BrowserEvent, BrowserState, LoadState, PageIcon, PointerCursor};
 
 #[test]
 fn default_state_describes_the_initial_page() {
@@ -155,4 +155,90 @@ fn history_changed_updates_both_navigation_directions() {
 
     assert!(state.can_go_back());
     assert!(!state.can_go_forward());
+}
+
+#[test]
+fn page_feedback_starts_neutral() {
+    let state = BrowserState::default();
+
+    assert_eq!(state.cursor(), PointerCursor::Default);
+    assert_eq!(state.status_text(), None);
+    assert!(!state.is_fullscreen());
+}
+
+#[test]
+fn cursor_change_is_stored() {
+    let mut state = BrowserState::default();
+
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Pointer,
+    });
+
+    assert_eq!(state.cursor(), PointerCursor::Pointer);
+}
+
+#[test]
+fn status_text_is_stored_and_cleared() {
+    let mut state = BrowserState::default();
+
+    state.apply(BrowserEvent::StatusTextChanged {
+        text: Some("https://example.com/link".to_owned()),
+    });
+    assert_eq!(state.status_text(), Some("https://example.com/link"));
+
+    state.apply(BrowserEvent::StatusTextChanged { text: None });
+    assert_eq!(state.status_text(), None);
+}
+
+#[test]
+fn fullscreen_flag_follows_events() {
+    let mut state = BrowserState::default();
+
+    state.apply(BrowserEvent::FullscreenChanged { fullscreen: true });
+    assert!(state.is_fullscreen());
+
+    state.apply(BrowserEvent::FullscreenChanged { fullscreen: false });
+    assert!(!state.is_fullscreen());
+}
+
+#[test]
+fn navigation_resets_cursor_and_status_text() {
+    let mut state = BrowserState::default();
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/".to_owned(),
+    });
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Text,
+    });
+    state.apply(BrowserEvent::StatusTextChanged {
+        text: Some("https://a.test/next".to_owned()),
+    });
+
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://b.test/".to_owned(),
+    });
+
+    assert_eq!(state.cursor(), PointerCursor::Default);
+    assert_eq!(state.status_text(), None);
+}
+
+#[test]
+fn the_same_address_keeps_cursor_and_status_text() {
+    let mut state = BrowserState::default();
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/".to_owned(),
+    });
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Text,
+    });
+    state.apply(BrowserEvent::StatusTextChanged {
+        text: Some("x".to_owned()),
+    });
+
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/".to_owned(),
+    });
+
+    assert_eq!(state.cursor(), PointerCursor::Text);
+    assert_eq!(state.status_text(), Some("x"));
 }

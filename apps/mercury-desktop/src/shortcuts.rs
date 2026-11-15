@@ -130,6 +130,11 @@ pub(crate) fn yields_to_focused_text(key: &Key, platform: Platform) -> bool {
         && matches!(key, Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowRight))
 }
 
+/// Escape leaves page-requested fullscreen and is then not given to the page.
+pub(crate) fn exits_fullscreen(key: &Key, page_fullscreen: bool) -> bool {
+    page_fullscreen && matches!(key, Key::Named(NamedKey::Escape))
+}
+
 pub(crate) fn handle_browser_shortcut(
     window: &MainWindow,
     controller: &RefCell<BrowserController>,
@@ -419,6 +424,13 @@ mod tests {
     #[test]
     fn uppercase_letters_from_caps_lock_still_match() {
         assert_eq!(mac(character("T"), CMD), Some(NewTab));
+    }
+
+    #[test]
+    fn escape_exits_fullscreen_only_while_a_page_is_fullscreen() {
+        assert!(exits_fullscreen(&named(NamedKey::Escape), true));
+        assert!(!exits_fullscreen(&named(NamedKey::Escape), false));
+        assert!(!exits_fullscreen(&character("q"), true));
     }
 
     #[test]
