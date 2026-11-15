@@ -1,0 +1,2 @@
+# Lanes append entries to this file in parallel; keep both sides when merging.
+THIRD-PARTY-NOTICES.md merge=union
