@@ -9,6 +9,7 @@
 #
 #   scripts/macos/bundle.sh [--binary <path>] [--out <dir>] [--identity <id>]
 #                           [--gstreamer-prefix <dir>] [--dmg]
+#   scripts/macos/bundle.sh [--identity <id>] --print-entitlements
 #
 #   --binary <path>            the arm64 executable to bundle
 #                              (default target/release/mercury-browser)
@@ -22,6 +23,8 @@
 #                              $MERCURY_GSTREAMER_PREFIX; unset = no media)
 #   --dmg                      also build mercury-browser-<version>-macos-arm64.dmg
 #                              and its .sha256
+#   --print-entitlements       print the entitlements file the identity would
+#                              be signed with, and exit without building
 #
 # Relative paths are taken from the directory the script is started in. Safe
 # to re-run: the bundle and the disk image are rebuilt from scratch each time.
@@ -40,6 +43,18 @@ usage() {
     sed -n '/^# Assemble/,/^# to re-run/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
+# The entitlements for an identity. An ad-hoc signature ("-") has no team
+# identifier, so the hardened runtime's library validation could never accept
+# the ad-hoc libraries in Contents/MacOS/lib; the ad-hoc set therefore turns it
+# off. Any real identity gets the strict set, with validation on.
+entitlements_for_identity() {
+    if [ "$1" = "-" ]; then
+        printf '%s\n' "apps/mercury-desktop/resources/macos/entitlements-adhoc.plist"
+    else
+        printf '%s\n' "apps/mercury-desktop/resources/macos/entitlements.plist"
+    fi
+}
+
 absolute() {
     case "$1" in
         /*) printf '%s\n' "$1" ;;
@@ -54,6 +69,7 @@ OUT="dist"
 IDENTITY="${MERCURY_SIGN_IDENTITY:--}"
 GSTREAMER_PREFIX="${MERCURY_GSTREAMER_PREFIX:-}"
 MAKE_DMG=0
+PRINT_ENTITLEMENTS=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -62,6 +78,7 @@ while [ "$#" -gt 0 ]; do
         --identity) IDENTITY="${2:?--identity needs a codesign identity}"; shift 2 ;;
         --gstreamer-prefix) GSTREAMER_PREFIX="${2:?--gstreamer-prefix needs a directory}"; shift 2 ;;
         --dmg) MAKE_DMG=1; shift ;;
+        --print-entitlements) PRINT_ENTITLEMENTS=1; shift ;;
         -h | --help) usage; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
@@ -77,12 +94,17 @@ fi
 REPO="$(cd "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO"
 
+ENTITLEMENTS="$REPO/$(entitlements_for_identity "$IDENTITY")"
+if [ "$PRINT_ENTITLEMENTS" = 1 ]; then
+    printf '%s\n' "$ENTITLEMENTS"
+    exit 0
+fi
+
 for tool in codesign ditto file hdiutil install_name_tool lipo otool plutil shasum; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found (install the Xcode command-line tools)"
 done
 
 RESOURCES_SRC="apps/mercury-desktop/resources/macos"
-ENTITLEMENTS="$REPO/$RESOURCES_SRC/entitlements.plist"
 APP_NAME="Mercury Browser"
 EXECUTABLE="mercury-browser"
 IDENTIFIER="io.github.thepigdestroyer.mercury-browser"
@@ -181,9 +203,10 @@ fi
 # `--options` placed before `--sign`; with the codesign of macOS 27.2 both
 # orders gave flags=runtime, but keeping this order costs nothing.
 #
-# The hardened runtime is used even for an ad-hoc signature so that local
+# The hardened runtime is used for every identity, ad hoc included, so local
 # builds run under the same rules as a notarised release; the entitlements let
-# the JavaScript JIT work under it. A bundle's signature is stored in its main
+# the JavaScript JIT work under it, and the ad-hoc set also turns off library
+# validation (see entitlements_for_identity). A bundle's signature is stored in its main
 # executable, so signing the bundle re-signs that file: the bundle step must
 # repeat the runtime option and the entitlements or they would be dropped.
 SIGN_ARGS=(--force --sign "$IDENTITY" --options runtime)
@@ -204,17 +227,14 @@ if [ -d "$BIN_DIR/lib" ]; then
     done < <(find "$BIN_DIR/lib" -type f -print0)
 fi
 
-# The hardened runtime turns on library validation: the process may load only
-# libraries signed by Apple or by the same team. Ad-hoc signatures have no
-# team, so an ad-hoc, hardened executable cannot load an ad-hoc library from
-# Contents/MacOS/lib ("mapping process and mapped file (non-platform) have
-# different Team IDs") and would fail at launch. Refuse rather than produce
-# that bundle; sign with a Developer ID to bundle libraries.
-if [ "$IDENTITY" = "-" ] && [ "${#LIBRARIES[@]}" -gt 0 ]; then
-    die "the ${#LIBRARIES[@]} Mach-O files in Contents/MacOS/lib cannot be loaded by an ad-hoc signed executable under the hardened runtime; sign with a Developer ID (--identity) or build without them"
-fi
-
 say "signing with identity '$IDENTITY'"
+if [ "$IDENTITY" = "-" ]; then
+    say "entitlements: ad-hoc set (JIT, library validation off): ${ENTITLEMENTS#"$REPO/"}"
+else
+    say "entitlements: strict set (JIT, library validation on): ${ENTITLEMENTS#"$REPO/"}"
+fi
+# Every library gets the app's identity, so with a Developer ID they share its
+# team identifier and pass library validation.
 for lib in ${LIBRARIES[@]+"${LIBRARIES[@]}"}; do
     codesign "${SIGN_ARGS[@]}" "$lib" || die "codesign failed on $lib"
 done

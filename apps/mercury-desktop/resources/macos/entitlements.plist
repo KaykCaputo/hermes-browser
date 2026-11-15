@@ -6,8 +6,10 @@
   https://github.com/Goddv/Zervo, commit 86cb7126,
   assets/macos/entitlements.plist, MPL-2.0 (the same two keys).
 
-  Entitlements for Mercury Browser's hardened-runtime signature
-  (scripts/macos/bundle.sh signs the executable with options=runtime).
+  Entitlements for Mercury Browser's hardened-runtime signature with a real
+  (Developer ID) identity. scripts/macos/bundle.sh uses this file for every
+  identity except "-"; ad-hoc builds use entitlements-adhoc.plist, which adds
+  disable-library-validation.
 
   The hardened runtime refuses to map memory that is both writable and
   executable. SpiderMonkey, the JavaScript engine inside Servo, generates
@@ -26,8 +28,9 @@
   signed with the hardened runtime but without them cannot start its
   JavaScript engine (servo-script panics with InitFailed) and loads no page.
 
-  Deliberately absent: com.apple.security.cs.disable-library-validation (the
-  libraries in Contents/MacOS/lib are signed together with the executable) and
+  Deliberately absent: com.apple.security.cs.disable-library-validation (with
+  a Developer ID, the libraries in Contents/MacOS/lib carry the same team
+  identifier as the executable, so validation passes and stays on) and
   every App Sandbox key (Mercury Browser is not sandboxed). Camera, microphone
   and location would need Info.plist usage strings, not entitlements, and those
   features are off.

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for an AD-HOC signature only (scripts/macos/bundle.sh uses this
+  file when the identity is "-"). Never use it with a Developer ID: those
+  builds use entitlements.plist, which keeps library validation on.
+
+  The first two keys are the JavaScript JIT entitlements, exactly as in
+  entitlements.plist; see the explanation there.
+
+    com.apple.security.cs.disable-library-validation
+      The hardened runtime normally lets the process load only libraries
+      signed by Apple or by the same team as the executable. An ad-hoc
+      signature has no team identifier, so no ad-hoc library can ever pass
+      that check, and an ad-hoc build that bundles libraries in
+      Contents/MacOS/lib (the GStreamer media libraries) fails at launch with
+      "mapping process and mapped file (non-platform) have different Team IDs".
+      This key turns the check off so such builds can run.
+
+  The trade-off: with library validation off, anything able to write into the
+  application bundle can make it load a library of its choosing. A Developer
+  ID build signs every bundled library with the same team identifier and keeps
+  validation on, which closes that.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.cs.allow-jit</key>
+	<true/>
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>
