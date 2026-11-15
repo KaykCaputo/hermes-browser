@@ -4,6 +4,7 @@
 #   scripts/macos/gstreamer.sh fetch    download and verify the two .pkg files
 #   scripts/macos/gstreamer.sh unpack   expand them into a private framework prefix
 #   scripts/macos/gstreamer.sh env      print the exports a build shell needs
+#                                       (MERCURY_GSTREAMER_PREFIX, PKG_CONFIG*, PATH)
 #   scripts/macos/gstreamer.sh check    verify pkg-config resolves from that prefix
 #   scripts/macos/gstreamer.sh prefix   print the prefix (…/GStreamer.framework/Versions/1.0)
 #
@@ -20,7 +21,9 @@ GSTREAMER_RUNTIME_PKG="gstreamer-1.0-${GSTREAMER_VERSION}-universal.pkg"
 GSTREAMER_RUNTIME_SHA256="05d27c8e9b4374bbcf1788cf1604bb4b1a4bdcbdc13bc37b67d3a225c8aa86a6"
 GSTREAMER_DEVEL_PKG="gstreamer-1.0-devel-${GSTREAMER_VERSION}-universal.pkg"
 GSTREAMER_DEVEL_SHA256="54e27ccc9af096f7f12cff32b6111b7f1b867d968cb8888e80719ad46a97c777"
-GSTREAMER_URL_BASE="https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}"
+# MERCURY_GSTREAMER_URL_BASE overrides where the packages are downloaded from (a mirror,
+# or a local file:// directory); the checksums above are checked either way.
+GSTREAMER_URL_BASE="${MERCURY_GSTREAMER_URL_BASE:-https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}}"
 
 # The modules the gstreamer-*-sys and glib-*-sys crates ask pkg-config for.
 REQUIRED_MODULES="glib-2.0 gobject-2.0 gio-2.0 gstreamer-1.0 gstreamer-base-1.0 gstreamer-app-1.0
@@ -66,7 +69,8 @@ fetch_one() {
         --output "${file}.part" "${GSTREAMER_URL_BASE}/${name}"
     actual="$(sha256_of "${file}.part")"
     if [ "$actual" != "$expected" ]; then
-        die "${name}: sha256 ${actual} does not match the pinned ${expected}; kept as ${file}.part"
+        rm -f "${file}.part"
+        die "${name}: sha256 ${actual} does not match the pinned ${expected}; the download was deleted"
     fi
     mv -f "${file}.part" "$file"
     say "ok: ${name} downloaded and verified"
@@ -140,10 +144,12 @@ cmd_env() {
     [ -f "$unpacked_marker" ] || die "no unpacked GStreamer in ${prefix}; run fetch and unpack first"
     # PKG_CONFIG_LIBDIR replaces pkg-config's default search path, so only this
     # prefix's .pc files are seen (not Homebrew's, not /Library/Frameworks).
-    printf 'export MERCURY_GSTREAMER_ROOT=%q\n' "$prefix"
+    printf 'export MERCURY_GSTREAMER_PREFIX=%q\n' "$prefix"
     printf 'export PKG_CONFIG=%q\n' "${prefix}/bin/pkg-config"
     printf 'export PKG_CONFIG_LIBDIR=%q\n' "${prefix}/lib/pkgconfig"
     printf 'unset PKG_CONFIG_PATH\n'
+    # The $PATH here is meant literally: it is expanded by the shell that evals this output.
+    # shellcheck disable=SC2016
     printf 'export PATH=%q:"$PATH"\n' "${prefix}/bin"
 }
 

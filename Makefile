@@ -17,15 +17,20 @@ LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 
 # macOS builds use a private, unpacked copy of the official GStreamer framework
 # (scripts/macos/gstreamer.sh; `make gstreamer-macos` prepares it). Recipes that
-# compile or run Servo load its environment first, the executables get their
+# compile or run Servo load its environment first; the output of `gstreamer.sh env`
+# is captured before it is evaluated, so a missing or broken prefix stops the recipe
+# instead of letting pkg-config find another GStreamer. Executables get their
 # GStreamer libraries copied into target/<profile>/lib, and test binaries, which
-# have no rpath to those libraries, find them through DYLD_FALLBACK_LIBRARY_PATH.
-# That variable is set on the cargo command line itself because macOS strips
-# DYLD_* variables when the SIP-protected make and /bin/sh start.
+# have no rpath to those libraries, find that directory through
+# DYLD_FALLBACK_LIBRARY_PATH. It is set on the cargo command line itself because
+# macOS strips DYLD_* variables when the SIP-protected make and /bin/sh start.
+# CARGO_FLAGS adds flags to check, lint and test (for example --release).
+CARGO_FLAGS ?=
+PROFILE_DIR = $(if $(filter --release,$(CARGO_FLAGS)),release,debug)
 ifeq ($(shell uname -s),Darwin)
-GSTREAMER_ENV = eval "$$(scripts/macos/gstreamer.sh env)" &&
-COLLECT_GSTREAMER = scripts/macos/collect-gstreamer.sh "$$MERCURY_GSTREAMER_ROOT"
-TEST_LIBRARY_PATH = DYLD_FALLBACK_LIBRARY_PATH="$$MERCURY_GSTREAMER_ROOT/lib"
+GSTREAMER_ENV = gst_env="$$(scripts/macos/gstreamer.sh env)" && eval "$$gst_env" &&
+COLLECT_GSTREAMER = scripts/macos/collect-gstreamer.sh "$$MERCURY_GSTREAMER_PREFIX"
+TEST_LIBRARY_PATH = DYLD_FALLBACK_LIBRARY_PATH="$(CURDIR)/target/$(PROFILE_DIR)/lib"
 else
 GSTREAMER_ENV =
 COLLECT_GSTREAMER =
@@ -38,6 +43,7 @@ endif
 	setup \
 	install-linux-deps \
 	gstreamer-macos \
+	test-media-macos \
 	fetch \
 	check \
 	fmt \
@@ -66,6 +72,7 @@ help:
 		'setup' 'Install Rust components and fetch dependencies.' \
 		'install-linux-deps' 'Install Linux dependencies for the current Slint backend.' \
 		'gstreamer-macos' 'Download and unpack GStreamer for macOS (no sudo).' \
+		'test-media-macos' 'Check the macOS GStreamer scripts (needs gstreamer-macos for all checks).' \
 		'fetch' 'Download Cargo dependencies without building.' \
 		'check' 'Type-check every workspace target and feature.' \
 		'fmt' 'Format all Rust source files.' \
@@ -104,6 +111,7 @@ doctor:
 	@rustc --version
 	@"$(CARGO)" --version
 	@"$(RUSTUP)" show active-toolchain
+	@if [ "$$(uname -s)" = Darwin ]; then scripts/macos/gstreamer.sh check; fi
 
 setup: doctor
 	"$(RUSTUP)" component add rustfmt clippy
@@ -148,11 +156,14 @@ gstreamer-macos:
 	scripts/macos/gstreamer.sh unpack
 	scripts/macos/gstreamer.sh check
 
+test-media-macos:
+	scripts/macos/test-media.sh
+
 fetch:
 	"$(CARGO)" fetch --locked
 
 check:
-	$(GSTREAMER_ENV) "$(CARGO)" check --workspace --all-targets --all-features
+	$(GSTREAMER_ENV) "$(CARGO)" check $(CARGO_FLAGS) --workspace --all-targets --all-features
 
 fmt:
 	"$(CARGO)" fmt --all
@@ -161,7 +172,7 @@ fmt-check:
 	"$(CARGO)" fmt --all -- --check
 
 lint:
-	$(GSTREAMER_ENV) "$(CARGO)" clippy \
+	$(GSTREAMER_ENV) "$(CARGO)" clippy $(CARGO_FLAGS) \
 		--workspace \
 		--all-targets \
 		--all-features \
@@ -169,7 +180,9 @@ lint:
 		-D warnings
 
 test:
-	$(GSTREAMER_ENV) $(TEST_LIBRARY_PATH) "$(CARGO)" test --workspace
+	$(if $(COLLECT_GSTREAMER),$(GSTREAMER_ENV) "$(CARGO)" build $(CARGO_FLAGS) --package "$(APP_PACKAGE)")
+	$(if $(COLLECT_GSTREAMER),$(GSTREAMER_ENV) $(COLLECT_GSTREAMER) target/$(PROFILE_DIR)/lib)
+	$(GSTREAMER_ENV) $(TEST_LIBRARY_PATH) "$(CARGO)" test $(CARGO_FLAGS) --workspace
 	"$(CARGO)" test --target-dir target --manifest-path third_party/gaol/Cargo.toml --test shared-memory
 
 qa:
