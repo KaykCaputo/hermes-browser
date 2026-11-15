@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury multiple WebGL contexts test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; font-family: sans-serif; }
+  canvas { display: inline-block; vertical-align: top; margin: 10px; border: 1px solid #cccccc; }
+  #results { margin: 0 10px; font: bold 22px/1.35 monospace; }
+  .pass { color: #006400; }
+  .fail { color: #b00000; }
+</style>
+</head>
+<body>
+  <canvas id="red" width="200" height="150"></canvas>
+  <canvas id="green" width="200" height="150"></canvas>
+  <canvas id="blue" width="200" height="150"></canvas>
+  <div id="results"></div>
+  <script>
+    // Three live WebGL contexts at quit time exercise the engine's shutdown.
+    const results = document.getElementById("results");
+    const canvases = [
+      { id: "red", rgba: [1, 0, 0, 1] },
+      { id: "green", rgba: [0, 0.6, 0, 1] },
+      { id: "blue", rgba: [0, 0, 1, 1] },
+    ];
+
+    for (const { id, rgba } of canvases) {
+      const gl = document.getElementById(id).getContext("webgl");
+      const line = document.createElement("div");
+      if (gl) {
+        gl.clearColor(rgba[0], rgba[1], rgba[2], rgba[3]);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        line.className = "pass";
+        line.textContent = id + ": WebGL context created PASS";
+      } else {
+        line.className = "fail";
+        line.textContent = id + ": no WebGL context FAIL";
+      }
+      results.appendChild(line);
+    }
+  </script>
+</body>
+</html>

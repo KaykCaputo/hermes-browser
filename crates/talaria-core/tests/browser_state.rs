@@ -1,4 +1,4 @@
-use talaria_core::{BrowserEvent, BrowserState, LoadState, PageIcon};
+use talaria_core::{BrowserEvent, BrowserState, LoadState, PageIcon, PointerCursor};
 
 #[test]
 fn default_state_describes_the_initial_page() {
@@ -155,4 +155,137 @@ fn history_changed_updates_both_navigation_directions() {
 
     assert!(state.can_go_back());
     assert!(!state.can_go_forward());
+}
+
+#[test]
+fn page_feedback_starts_neutral() {
+    let state = BrowserState::default();
+
+    assert_eq!(state.cursor(), PointerCursor::Default);
+    assert_eq!(state.status_text(), None);
+    assert!(!state.is_fullscreen());
+}
+
+#[test]
+fn cursor_change_is_stored() {
+    let mut state = BrowserState::default();
+
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Pointer,
+    });
+
+    assert_eq!(state.cursor(), PointerCursor::Pointer);
+}
+
+#[test]
+fn status_text_is_stored_and_cleared() {
+    let mut state = BrowserState::default();
+
+    state.apply(BrowserEvent::StatusTextChanged {
+        text: Some("https://example.com/link".to_owned()),
+    });
+    assert_eq!(state.status_text(), Some("https://example.com/link"));
+
+    state.apply(BrowserEvent::StatusTextChanged { text: None });
+    assert_eq!(state.status_text(), None);
+}
+
+#[test]
+fn fullscreen_flag_follows_events() {
+    let mut state = BrowserState::default();
+
+    state.apply(BrowserEvent::FullscreenChanged { fullscreen: true });
+    assert!(state.is_fullscreen());
+
+    state.apply(BrowserEvent::FullscreenChanged { fullscreen: false });
+    assert!(!state.is_fullscreen());
+}
+
+/// The engine only reports cursor and status-text changes against its own cached values, so
+/// the browser must never reset its copies on navigation: a reset that the engine does not see
+/// would leave them out of step (for example an arrow shown over links after an in-page
+/// navigation, because the engine still holds the pointer cursor and never sends it again).
+#[test]
+fn an_address_change_leaves_cursor_and_status_text_to_the_engine() {
+    let mut state = BrowserState::default();
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/".to_owned(),
+    });
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Pointer,
+    });
+    state.apply(BrowserEvent::StatusTextChanged {
+        text: Some("https://a.test/next".to_owned()),
+    });
+
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/#section".to_owned(),
+    });
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://b.test/".to_owned(),
+    });
+
+    assert_eq!(state.cursor(), PointerCursor::Pointer);
+    assert_eq!(state.status_text(), Some("https://a.test/next"));
+}
+
+/// After a crash the engine still holds the pre-crash cursor, and talaria-servo reports it
+/// right after the failure; the browser must not invent a cursor of its own.
+#[test]
+fn a_failed_page_clears_fullscreen_and_status_text_but_leaves_the_cursor() {
+    let mut state = BrowserState::default();
+    state.apply(BrowserEvent::FullscreenChanged { fullscreen: true });
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Grabbing,
+    });
+    state.apply(BrowserEvent::StatusTextChanged {
+        text: Some("https://a.test/".to_owned()),
+    });
+
+    state.apply(BrowserEvent::LoadStateChanged {
+        state: LoadState::Failed {
+            message: "crashed".to_owned(),
+        },
+    });
+
+    assert!(!state.is_fullscreen());
+    assert_eq!(state.status_text(), None);
+    assert_eq!(state.cursor(), PointerCursor::Grabbing);
+}
+
+#[test]
+fn a_normal_load_state_change_keeps_page_feedback() {
+    let mut state = BrowserState::default();
+    state.apply(BrowserEvent::FullscreenChanged { fullscreen: true });
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Text,
+    });
+
+    state.apply(BrowserEvent::LoadStateChanged {
+        state: LoadState::Loaded,
+    });
+
+    assert!(state.is_fullscreen());
+    assert_eq!(state.cursor(), PointerCursor::Text);
+}
+
+#[test]
+fn the_same_address_keeps_cursor_and_status_text() {
+    let mut state = BrowserState::default();
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/".to_owned(),
+    });
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Text,
+    });
+    state.apply(BrowserEvent::StatusTextChanged {
+        text: Some("x".to_owned()),
+    });
+
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/".to_owned(),
+    });
+
+    assert_eq!(state.cursor(), PointerCursor::Text);
+    assert_eq!(state.status_text(), Some("x"));
 }
