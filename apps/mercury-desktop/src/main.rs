@@ -18,6 +18,8 @@ mod callbacks;
 mod cli;
 mod engine;
 mod keyboard;
+#[cfg(target_os = "macos")]
+mod platform_macos;
 mod rendering;
 mod screenshot;
 mod shortcuts;
