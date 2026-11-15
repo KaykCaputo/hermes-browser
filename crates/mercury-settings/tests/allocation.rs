@@ -9,7 +9,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mercury_settings::{
-    Loaded, MAX_SESSION_FILE_BYTES, MAX_SETTINGS_FILE_BYTES, SessionStore, SettingsStore,
+    Loaded, MAX_RESTORED_TABS, MAX_SESSION_FILE_BYTES, MAX_SETTINGS_FILE_BYTES, MAX_TITLE_BYTES,
+    SessionStore, SettingsStore,
 };
 
 struct Counting;
@@ -39,10 +40,12 @@ unsafe impl GlobalAlloc for Counting {
         // SAFETY: forwarded with the caller's arguments.
         let moved = unsafe { System.realloc(pointer, layout, new_size) };
         if !moved.is_null() {
+            // Counted as if the old and the new block were both alive, as they are while a
+            // moving realloc copies: an upper bound on the true peak.
+            let both = CURRENT.load(Ordering::Relaxed) + new_size;
+            PEAK.fetch_max(both, Ordering::Relaxed);
             if new_size >= layout.size() {
-                let grown = new_size - layout.size();
-                let now = CURRENT.fetch_add(grown, Ordering::Relaxed) + grown;
-                PEAK.fetch_max(now, Ordering::Relaxed);
+                CURRENT.fetch_add(new_size - layout.size(), Ordering::Relaxed);
             } else {
                 CURRENT.fetch_sub(layout.size() - new_size, Ordering::Relaxed);
             }
@@ -81,27 +84,83 @@ fn write_repeated(path: &Path, head: &str, item: &str, tail: &str, limit: u64) -
 const MIB: f64 = 1024.0 * 1024.0;
 const KIB: f64 = 1024.0;
 
+fn usize_of(bytes: u64) -> usize {
+    usize::try_from(bytes).expect("fits")
+}
+
 #[test]
 fn hostile_files_cost_little_more_than_their_own_size() {
     let dir = tempfile::tempdir().expect("a profile");
     let allowance = 4 * 1024 * 1024;
-
-    // About 5.6 million empty tabs in one window.
-    let session_size = write_repeated(
-        &dir.path().join("session.json"),
-        r#"{"format_version": 1, "exited_cleanly": false, "windows": [{"tabs": ["#,
-        "{}",
-        "]}]}",
-        MAX_SESSION_FILE_BYTES,
-    );
     let store = SessionStore::new(dir.path());
-    let session_peak = peak_growth(|| {
-        let _ = store.begin_run();
+
+    // About 600,000 real tabs in one window: decoded, 500 of them kept.
+    for (label, head) in [
+        (
+            "session",
+            r#"{"format_version": 1, "exited_cleanly": false, "windows": [{"tabs": ["#,
+        ),
+        // The same without a version: the file is scanned for one before it is decoded.
+        ("unversioned session", r#"{"windows": [{"tabs": ["#),
+    ] {
+        let size = write_repeated(
+            &dir.path().join("session.json"),
+            head,
+            r#"{"url":"https://a.example/"}"#,
+            "]}]}",
+            MAX_SESSION_FILE_BYTES,
+        );
+        let mut tabs = 0;
+        let peak = peak_growth(|| {
+            let found = store.begin_run().expect("begin_run");
+            tabs = found
+                .last
+                .map_or(0, |last| last.snapshot.windows[0].tabs.len());
+        });
+        eprintln!(
+            "{label} file {:.1} MiB: peak heap growth {:.1} KiB, {tabs} tabs decoded",
+            size as f64 / MIB,
+            peak as f64 / KIB
+        );
+        assert_eq!(
+            tabs, MAX_RESTORED_TABS,
+            "{label}: decoded, not merely tolerated"
+        );
+        assert!(peak <= usize_of(size) + allowance, "{label}: {peak} bytes");
+    }
+
+    // One enormous title: serde_json reads it whole into its scratch buffer before the
+    // decoder cuts it. The buffer grows by doubling, so at the moment it moves the old and the
+    // new block are both alive: about one and a half times the string's length at the peak,
+    // bounded here by twice the file's size limit.
+    let head =
+        r#"{"format_version": 1, "windows": [{"tabs": [{"url": "https://a.example/", "title": ""#;
+    let tail = r#""}]}]}"#;
+    let path = dir.path().join("session.json");
+    let length = usize_of(MAX_SESSION_FILE_BYTES) - head.len() - tail.len() - 1;
+    let mut text = String::with_capacity(length + head.len() + tail.len());
+    text.push_str(head);
+    text.extend(std::iter::repeat_n('t', length));
+    text.push_str(tail);
+    fs::write(&path, &text).expect("write");
+    drop(text);
+    let size = fs::metadata(&path).expect("size").len();
+    let mut title = 0;
+    let peak = peak_growth(|| {
+        let found = store.begin_run().expect("begin_run");
+        title = found
+            .last
+            .map_or(0, |last| last.snapshot.windows[0].tabs[0].title.len());
     });
     eprintln!(
-        "session file {:.1} MiB: peak heap growth {:.1} KiB",
-        session_size as f64 / MIB,
-        session_peak as f64 / KIB
+        "one-string session file {:.1} MiB: peak heap growth {:.1} MiB, title kept {title} bytes",
+        size as f64 / MIB,
+        peak as f64 / MIB
+    );
+    assert_eq!(title, MAX_TITLE_BYTES, "decoded, title cut");
+    assert!(
+        peak <= 2 * usize_of(size) + allowance,
+        "one string: {peak} bytes"
     );
 
     // About 350,000 empty custom engines.
@@ -124,35 +183,12 @@ fn hostile_files_cost_little_more_than_their_own_size() {
         settings_size as f64 / MIB,
         settings_peak as f64 / KIB
     );
-
-    // The same tabs in a file without a version: it is scanned for one before it is decoded.
-    let unversioned_size = write_repeated(
-        &dir.path().join("session.json"),
-        r#"{"windows": [{"tabs": ["#,
-        "{}",
-        "]}]}",
-        MAX_SESSION_FILE_BYTES,
-    );
-    let unversioned_peak = peak_growth(|| {
-        let _ = store.begin_run();
-    });
-    eprintln!(
-        "unversioned session file {:.1} MiB: peak heap growth {:.1} KiB",
-        unversioned_size as f64 / MIB,
-        unversioned_peak as f64 / KIB
-    );
-
     assert!(
-        unversioned_peak <= usize::try_from(unversioned_size).expect("fits") + allowance,
-        "unversioned session: {unversioned_peak} bytes"
-    );
-    assert!(
-        session_peak <= usize::try_from(session_size).expect("fits") + allowance,
-        "session: {session_peak} bytes"
-    );
-    assert!(
-        settings_peak <= usize::try_from(settings_size).expect("fits") + allowance,
+        settings_peak <= usize_of(settings_size) + allowance,
         "settings: {settings_peak} bytes"
     );
-    assert_eq!(repairs, 1, "one counted repair for the whole list");
+    assert_eq!(
+        repairs, 1,
+        "decoded, with one counted repair for the whole list"
+    );
 }

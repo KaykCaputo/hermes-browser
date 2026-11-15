@@ -6,8 +6,8 @@
 //! decode, so the caller can report one counted repair per list. A long URL or title is not
 //! *kept* whole: the value kept is at most its limit. It is still read whole once: serde_json
 //! copies every string it reads from a file into a scratch buffer before the visitor sees it,
-//! so one enormous string costs its own length in memory while it is read (at most the file's
-//! size limit). The tree used for migrations from an older version counts its nodes.
+//! so one enormous string costs up to about one and a half times its own length while it is
+//! read (the buffer doubles as it grows), which is at most twice the file's size limit. The tree used for migrations from an older version counts its nodes.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
