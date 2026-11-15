@@ -138,6 +138,22 @@ impl<'db, 's> FrecencyComputation<'db, 's> {
         })
     }
 
+    fn calculate(&self) -> Result<i64> {
+        let (num_sampled_visits, sample_score) = if self.visit_count > 0 {
+            self.score_recent_visits()?
+        } else {
+            (0, 0.0f32)
+        };
+        Ok(i64::from(if num_sampled_visits > 0 {
+            self.get_frecency_for_sample(num_sampled_visits, sample_score)
+        } else if !self.has_bookmark() {
+            0
+        } else {
+            // Unvisited bookmarks get a non-zero score so that they show up in suggestions.
+            self.compute_unvisited_bookmark_frecency()
+        }))
+    }
+
     fn has_bookmark(&self) -> bool {
         self.foreign_count > 0
     }
@@ -209,19 +225,28 @@ pub(crate) fn calculate_frecency(
     now_ms: i64,
 ) -> Result<i64> {
     let fc = FrecencyComputation::new(conn, settings, page_id, now_ms)?;
-    let (num_sampled_visits, sample_score) = if fc.visit_count > 0 {
-        fc.score_recent_visits()?
-    } else {
-        (0, 0.0f32)
-    };
-    Ok(i64::from(if num_sampled_visits > 0 {
-        fc.get_frecency_for_sample(num_sampled_visits, sample_score)
-    } else if !fc.has_bookmark() {
-        0
-    } else {
-        // Unvisited bookmarks get a non-zero score so that they show up in suggestions.
-        fc.compute_unvisited_bookmark_frecency()
-    }))
+    fc.calculate()
+}
+
+/// [`calculate_frecency`] for a page whose visit and bookmark counts the caller has already
+/// read, saving a query.
+pub(crate) fn calculate_frecency_from_counts(
+    conn: &Connection,
+    settings: &FrecencySettings,
+    page_id: i64,
+    visit_count: i64,
+    bookmark_count: i64,
+    now_ms: i64,
+) -> Result<i64> {
+    FrecencyComputation {
+        conn,
+        settings,
+        page_id,
+        now_ms,
+        visit_count,
+        foreign_count: bookmark_count,
+    }
+    .calculate()
 }
 
 /// Recomputes a page's stored frecency as of `now_ms`, and records that time.

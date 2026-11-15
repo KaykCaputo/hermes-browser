@@ -14,7 +14,7 @@
 //! `c` … `com`), a common path word, common and rare title words, an 8-character word and an
 //! input that matches nothing. The inputs are interleaved, one call each per round as
 //! successive keystrokes would arrive, for 50 rounds; it prints the median and the worst call
-//! per input. It does so with every stored score stale and again after refreshing them. It
+//! per input (and the 90th percentile, to tell a slow call from a descheduled one). It does so with every stored score stale and again after refreshing them. It
 //! also times `record_visit` and `refresh_frecencies(_, 1000)` with everything stale,
 //! everything fresh and one page in a thousand stale, and prints the database size.
 //!
@@ -272,11 +272,14 @@ fn time_suggestions(store: &Store, inputs: &[(String, String)], label: &str) {
         }
     }
     println!("\n{label}\n");
-    println!("| input | median ms | worst ms | results |");
-    println!("| --- | --- | --- | --- |");
+    println!("| input | median ms | p90 ms | worst ms | results |");
+    println!("| --- | --- | --- | --- | --- |");
     for (i, (name, input)) in inputs.iter().enumerate() {
-        let (median, worst) = summary(std::mem::take(&mut samples[i]));
-        println!("| {name} `{input}` | {median} | {worst} | {} |", results[i]);
+        let (median, p90, worst) = summary3(&mut samples[i]);
+        println!(
+            "| {name} `{input}` | {median} | {p90} | {worst} | {} |",
+            results[i]
+        );
     }
 }
 

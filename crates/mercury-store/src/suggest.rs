@@ -7,7 +7,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::Store;
 use crate::error::Result;
 use crate::frecency::{self, DEFAULT_FRECENCY_SETTINGS};
-use crate::search::{fts_query, url_key, words};
+use crate::search::{fts_query, is_token_char, url_key, words};
 
 /// The most suggestions one call returns; a larger `limit` is clamped to it.
 pub const MAX_SUGGESTIONS: u32 = 20;
@@ -16,7 +16,7 @@ pub const MAX_SUGGESTIONS: u32 = 20;
 pub const CANDIDATES_PER_RESULT: u32 = 4;
 
 /// How many pages with the best stored scores [`Store::suggest`] examines for every input.
-pub const BEST_PAGES_EXAMINED: u32 = 2_000;
+pub const BEST_PAGES_EXAMINED: u32 = 1_000;
 
 /// The most rows [`Store::suggest`] examines in each index source (URL-key prefix, page full
 /// text, bookmark-title full text), whatever the input matches.
@@ -86,8 +86,8 @@ const CANDIDATE_SQL: &str = "
     SELECT p.url,
            COALESCE((SELECT NULLIF(b.title, '') FROM bookmarks b
                      WHERE b.place_id = p.id ORDER BY b.id LIMIT 1), p.title),
-           EXISTS (SELECT 1 FROM bookmarks b WHERE b.place_id = p.id),
-           p.last_visit_at
+           (SELECT count(*) FROM bookmarks b WHERE b.place_id = p.id),
+           p.last_visit_at, p.visit_count
     FROM places p WHERE p.id = ?1 AND p.hidden = 0";
 
 /// Page ids in the order found, without repeats.
@@ -107,14 +107,47 @@ impl Candidates {
     }
 }
 
-/// Whether every input word occurs among `text_words`, the last input word as a prefix and the
-/// others whole — the full-text rule, without phrase adjacency.
-fn words_match(input_words: &[String], text_words: &[String]) -> bool {
+/// Whether `haystack` contains `needle` (already in ASCII lower case), ignoring ASCII case.
+fn contains_ignoring_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    needle.is_empty()
+        || haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// Whether every input word (in lower case) occurs among the words of `texts`, the last input
+/// word as a prefix and the others whole — the full-text rule, without phrase adjacency.
+fn words_match(input_words: &[String], texts: &[&str]) -> bool {
     let Some((last, others)) = input_words.split_last() else {
         return false;
     };
-    others.iter().all(|w| text_words.contains(w))
-        && text_words.iter().any(|t| t.starts_with(last.as_str()))
+    let mut found_last = false;
+    let mut found_others = vec![false; others.len()];
+    for text in texts {
+        for token in text
+            .split(|c: char| !is_token_char(c))
+            .filter(|t| !t.is_empty())
+        {
+            let lower;
+            let token = if token.is_ascii() {
+                if !token.bytes().any(|b| b.is_ascii_uppercase()) {
+                    token
+                } else {
+                    lower = token.to_ascii_lowercase();
+                    lower.as_str()
+                }
+            } else {
+                lower = token.to_lowercase();
+                lower.as_str()
+            };
+            found_last |= token.starts_with(last.as_str());
+            for (found, word) in found_others.iter_mut().zip(others) {
+                *found |= token == word;
+            }
+        }
+    }
+    found_last && found_others.into_iter().all(|f| f)
 }
 
 impl Store {
@@ -163,7 +196,7 @@ impl Store {
         let window = limit * CANDIDATES_PER_RESULT;
         let mut candidates = Candidates::default();
 
-        // 1. The best pages, matched in memory.
+        // 1. The best pages, matched in memory, without copying their text.
         let needle = input.to_ascii_lowercase();
         let input_words: Vec<String> = words(input).collect();
         let mut best = Vec::new();
@@ -174,17 +207,11 @@ impl Store {
                 if best.len() >= window as usize {
                     break;
                 }
-                let url: String = row.get(1)?;
-                let matched = url.to_ascii_lowercase().contains(&needle) || {
-                    let key: String = row.get(2)?;
-                    let title: Option<String> = row.get(3)?;
-                    let bookmark_title: Option<String> = row.get(4)?;
-                    let text_words: Vec<String> = words(&key)
-                        .chain(title.as_deref().map(words).into_iter().flatten())
-                        .chain(bookmark_title.as_deref().map(words).into_iter().flatten())
-                        .collect();
-                    words_match(&input_words, &text_words)
+                let text = |index| -> rusqlite::Result<&str> {
+                    Ok(row.get_ref(index)?.as_str_or_null()?.unwrap_or(""))
                 };
+                let matched = contains_ignoring_ascii_case(text(1)?, &needle)
+                    || words_match(&input_words, &[text(2)?, text(3)?, text(4)?]);
                 if matched {
                     best.push(row.get(0)?);
                 }
@@ -233,14 +260,27 @@ impl Store {
         for id in candidates.ids {
             let row = candidate
                 .query_row([id], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
                 })
                 .optional()?;
-            let Some((url, title, is_bookmark, last_visit_at)) = row else {
+            let Some((url, title, bookmarks, last_visit_at, visit_count)) = row else {
                 continue;
             };
-            let frecency =
-                frecency::calculate_frecency(&self.conn, &DEFAULT_FRECENCY_SETTINGS, id, now_ms)?;
+            let is_bookmark = bookmarks > 0;
+            let frecency = frecency::calculate_frecency_from_counts(
+                &self.conn,
+                &DEFAULT_FRECENCY_SETTINGS,
+                id,
+                visit_count,
+                bookmarks,
+                now_ms,
+            )?;
             ranked.push((
                 Suggestion {
                     url,
@@ -296,7 +336,7 @@ impl Store {
 
 #[cfg(test)]
 mod tests {
-    use super::words_match;
+    use super::{contains_ignoring_ascii_case, words_match};
 
     fn w(s: &[&str]) -> Vec<String> {
         s.iter().map(|s| s.to_string()).collect()
@@ -304,10 +344,21 @@ mod tests {
 
     #[test]
     fn words_match_like_the_full_text_rule() {
-        let text = w(&["daily", "news", "example", "org"]);
-        assert!(words_match(&w(&["daily", "ne"]), &text));
-        assert!(words_match(&w(&["exa"]), &text));
-        assert!(!words_match(&w(&["dai", "news"]), &text));
-        assert!(!words_match(&w(&[]), &text));
+        let texts = ["example.org/news", "Daily NEWS", ""];
+        assert!(words_match(&w(&["daily", "ne"]), &texts));
+        assert!(words_match(&w(&["exa"]), &texts));
+        assert!(!words_match(&w(&["dai", "news"]), &texts));
+        assert!(!words_match(&w(&[]), &texts));
+        assert!(words_match(&w(&["bücher"]), &["Bücher und Mehr"]));
+    }
+
+    #[test]
+    fn substring_ignores_ascii_case() {
+        assert!(contains_ignoring_ascii_case(
+            "https://Example.COM/",
+            "example.com"
+        ));
+        assert!(!contains_ignoring_ascii_case("https://a.b/", "zz"));
+        assert!(contains_ignoring_ascii_case("", ""));
     }
 }
