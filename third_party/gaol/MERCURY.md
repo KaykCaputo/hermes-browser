@@ -12,5 +12,10 @@ original zero-byte limit killed content processes with `SIGXFSZ`. Filesystem
 access remains constrained by gaol's mount namespace and chroot profile;
 network access remains absent from content processes.
 
+Mercury also made three warning-only edits so builds print no warnings:
+`try!(…)` became `…?` in `sandbox.rs`, the `extern` block in
+`platform/macos/mod.rs` names the `"C"` ABI, and an unnecessary `unsafe` block
+around the wait-status macros in `platform/unix/process.rs` was removed.
+
 Remove the `[patch.crates-io]` entry and this directory after equivalent sandbox
 updates land in the Servo release used by Mercury.

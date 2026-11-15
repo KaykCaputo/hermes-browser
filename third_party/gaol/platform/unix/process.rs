@@ -76,12 +76,10 @@ impl Process {
             }
         }
 
-        unsafe {
-            if WIFEXITED(stat) {
-                Ok(ExitStatus::Code(WEXITSTATUS(stat) as i32))
-            } else {
-                Ok(ExitStatus::Signal(WTERMSIG(stat) as i32))
-            }
+        if WIFEXITED(stat) {
+            Ok(ExitStatus::Code(WEXITSTATUS(stat) as i32))
+        } else {
+            Ok(ExitStatus::Signal(WTERMSIG(stat) as i32))
         }
     }
 }

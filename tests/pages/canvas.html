@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury canvas test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  canvas { display: block; margin: 20px; border: 1px solid #cccccc; }
+</style>
+</head>
+<body>
+  <canvas id="canvas" width="400" height="300"></canvas>
+  <script>
+    const context = document.getElementById("canvas").getContext("2d");
+
+    context.fillStyle = "#ff8000";
+    context.fillRect(20, 20, 160, 100);
+
+    context.fillStyle = "#800080";
+    context.beginPath();
+    context.arc(300, 80, 60, 0, 2 * Math.PI);
+    context.fill();
+
+    context.strokeStyle = "#000000";
+    context.lineWidth = 4;
+    context.beginPath();
+    context.moveTo(20, 280);
+    context.lineTo(380, 160);
+    context.stroke();
+
+    context.fillStyle = "#000000";
+    context.font = "bold 32px sans-serif";
+    context.fillText("canvas ok", 40, 200);
+  </script>
+</body>
+</html>

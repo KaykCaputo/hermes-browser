@@ -1,3 +1,4 @@
 [env]
-# Stylo's 512 KiB default can overflow in debug builds during hover-driven style updates.
-SERVO_STYLE_THREAD_STACK_SIZE_KB = "2048"
+# Stylo's 512 KiB default can overflow during hover-driven style updates; 8 MiB is Servo 0.8's own value.
+SERVO_STYLE_THREAD_STACK_SIZE_KB = "8192"
+MACOSX_DEPLOYMENT_TARGET = "13.0"

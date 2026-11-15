@@ -9,7 +9,6 @@ name = "mercury-browser"
 path = "src/main.rs"
 
 [dependencies]
-ash.workspace = true
 dpi.workspace = true
 euclid.workspace = true
 gleam.workspace = true
@@ -23,6 +22,9 @@ surfman.workspace = true
 talaria-core = { path = "../../crates/talaria-core" }
 talaria-servo = { path = "../../crates/talaria-servo" }
 thiserror.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ash.workspace = true
 
 [build-dependencies]
 gl_generator = "0.14"

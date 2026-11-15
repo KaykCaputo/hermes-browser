@@ -333,7 +333,7 @@ impl EngineState {
             }
 
             if let Some(active_web_view) = self.web_views.get_mut(&active_tab_id) {
-                // Servo 0.7 couples visibility and throttling: show() resumes the active
+                // Servo 0.8 couples visibility and throttling: show() resumes the active
                 // pipeline and hide() throttles background tabs.
                 active_web_view.show();
                 let _focus_result = active_web_view.set_focus(self.web_view_focused.get());

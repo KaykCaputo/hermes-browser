@@ -76,7 +76,7 @@ impl Command {
 
     /// Constructs a new `Command` for launching the current executable.
     pub fn me() -> io::Result<Command> {
-        Ok(Command::new(try!(env::current_exe())))
+        Ok(Command::new(env::current_exe()?))
     }
 
     /// Adds an argument to pass to the program.

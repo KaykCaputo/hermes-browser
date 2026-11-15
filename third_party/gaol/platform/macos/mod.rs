@@ -173,7 +173,7 @@ fn write_quoted_string(sandbox_profile: &mut Vec<u8>, string: &[u8]) {
     sandbox_profile.write_all(&[b'"']).unwrap()
 }
 
-extern {
+extern "C" {
     fn sandbox_init(profile: *const c_char, flags: u64, errorbuf: *mut *mut c_char) -> c_int;
     fn sandbox_free_error(errorbuf: *mut c_char);
 }

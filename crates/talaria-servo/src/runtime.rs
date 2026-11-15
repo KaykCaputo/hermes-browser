@@ -138,7 +138,7 @@ impl ServoRuntime {
 
 fn mercury_options() -> Opts {
     Opts {
-        // Servo 0.7.0 content-process isolation renders correctly in Mercury.
+        // Servo 0.8.0 content-process isolation renders correctly in Mercury.
         // Keep the operating-system sandbox disabled independently: the
         // current Linux gaol path is not yet reliable enough for a release.
         multiprocess: true,
@@ -158,11 +158,7 @@ impl servo::ServoDelegate for BrowserServoDelegate {
 }
 
 fn mercury_preferences() -> Preferences {
-    Preferences {
-        dom_script_asynch: true,
-        dom_canvas_backend: "vello".to_owned(),
-        ..Preferences::default()
-    }
+    Preferences::default()
 }
 
 struct BrowserDelegate {
@@ -234,6 +230,7 @@ impl servo::WebViewDelegate for BrowserDelegate {
             }
             LoadStatus::HeadParsed => self.record_load_milestone(LoadMilestone::HeadParsed),
             LoadStatus::Complete => self.record_load_milestone(LoadMilestone::Complete),
+            LoadStatus::Stopped => info!("tab {}: page load stopped", self.tab_id.value()),
         }
 
         self.send_browser_event(BrowserEvent::LoadStateChanged {
@@ -320,7 +317,7 @@ fn page_icon_from_pixels(
 fn load_state_from_servo(status: LoadStatus) -> LoadState {
     match status {
         LoadStatus::Started | LoadStatus::HeadParsed => LoadState::Loading,
-        LoadStatus::Complete => LoadState::Loaded,
+        LoadStatus::Complete | LoadStatus::Stopped => LoadState::Loaded,
     }
 }
 
@@ -359,12 +356,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mercury_enables_async_scripts_and_gpu_canvas_by_default() {
+    fn mercury_keeps_servos_default_canvas_and_script_settings() {
         let preferences = mercury_preferences();
 
-        assert!(preferences.dom_script_asynch);
-        assert!(!preferences.dom_servoparser_async_html_tokenizer_enabled);
-        assert_eq!(preferences.dom_canvas_backend, "vello");
+        assert_eq!(
+            preferences.dom_canvas_backend,
+            Preferences::default().dom_canvas_backend
+        );
+        assert_eq!(
+            preferences.dom_script_asynch,
+            Preferences::default().dom_script_asynch
+        );
     }
 
     #[test]
@@ -383,6 +385,14 @@ mod tests {
     fn complete_is_a_loaded_state() {
         assert_eq!(
             load_state_from_servo(LoadStatus::Complete),
+            LoadState::Loaded
+        );
+    }
+
+    #[test]
+    fn stopped_is_a_loaded_state() {
+        assert_eq!(
+            load_state_from_servo(LoadStatus::Stopped),
             LoadState::Loaded
         );
     }
