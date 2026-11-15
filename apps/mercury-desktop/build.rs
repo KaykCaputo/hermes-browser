@@ -19,6 +19,27 @@ fn main() {
     // executable; this rpath lets the dynamic linker find them.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/lib/");
+        record_gstreamer_version();
+    }
+}
+
+/// The GStreamer version the media backend is built against, which names the private registry
+/// (src/media_isolation.rs). It comes from the pkg-config the gstreamer-sys crates use.
+fn record_gstreamer_version() {
+    for variable in ["PKG_CONFIG", "PKG_CONFIG_LIBDIR", "PKG_CONFIG_PATH"] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+    let pkg_config = env::var_os("PKG_CONFIG").unwrap_or_else(|| "pkg-config".into());
+    let output = std::process::Command::new(pkg_config)
+        .args(["--modversion", "gstreamer-1.0"])
+        .output();
+    if let Ok(output) = output
+        && output.status.success()
+    {
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !version.is_empty() {
+            println!("cargo:rustc-env=MERCURY_GSTREAMER_VERSION={version}");
+        }
     }
 }
 

@@ -18,12 +18,19 @@ mod callbacks;
 mod cli;
 mod engine;
 mod keyboard;
+#[cfg(target_os = "macos")]
+mod media_isolation;
 mod rendering;
 mod screenshot;
 mod shortcuts;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {
+    // Media: keep the bundled GStreamer away from the user's own plugins and registry. First,
+    // before any thread starts; content processes are this executable and inherit it.
+    #[cfg(target_os = "macos")]
+    media_isolation::isolate_gstreamer_from_user_environment();
+
     if run_content_process_if_requested()? {
         return Ok(ExitCode::SUCCESS);
     }
