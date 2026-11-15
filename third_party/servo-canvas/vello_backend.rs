@@ -351,7 +351,8 @@ impl GenericDrawTarget for VelloDrawTarget {
     fn clear_rect(&mut self, rect: &Rect<f32>, transform: Transform2D<f64>) {
         // vello scene only ever grows,
         // so we use every opportunity to shrink it
-        if self.is_viewport_cleared(rect, transform) {
+        // Mercury: not while a clip is active; the shortcut would drop it.
+        if self.clips.is_empty() && self.is_viewport_cleared(rect, transform) {
             self.scene.reset();
             self.clips.clear(); // no clips are affecting rendering
             self.state = State::Drawing;
