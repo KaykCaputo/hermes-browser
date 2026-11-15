@@ -1,3 +1,5 @@
+import { Palette } from "std-widgets.slint";
+
 export enum WebViewPointerButton {
     left,
     middle,
@@ -197,6 +199,8 @@ export component MainWindow inherits Window {
     out property <float> web-view-pointer-x: web-view-input.mouse-x / 1px;
     out property <float> web-view-pointer-y: web-view-input.mouse-y / 1px;
     property <bool> new-tab-search-focused: false;
+    // The window's colour scheme as Slint determined it, used when winit reports none.
+    out property <ColorScheme> system-color-scheme: Palette.color-scheme;
 
     callback navigate(string);
     callback go-back;
@@ -209,6 +213,7 @@ export component MainWindow inherits Window {
     callback web-view-pointer-button(WebViewPointerButton, bool, float, float);
     callback web-view-scrolled(float, float, float, float);
     callback web-view-focus-changed(bool);
+    callback web-view-pointer-left();
 
     pure function mouse-cursor-for(cursor: WebViewCursor) -> MouseCursor {
         if cursor == WebViewCursor.none {
@@ -617,6 +622,12 @@ export component MainWindow inherits Window {
                     enabled: root.web-view-visible;
                     mouse-cursor: root.mouse-cursor-for(root.web-view-cursor);
 
+                    changed has-hover => {
+                        if !self.has-hover {
+                            root.web-view-pointer-left();
+                        }
+                    }
+
                     property <WebViewPointerButton> active-button: WebViewPointerButton.other;
 
                     function map-pointer-button(
@@ -688,7 +699,7 @@ export component MainWindow inherits Window {
             }
 
             // Drawn above the page; plain Rectangle and Text items do not take pointer input.
-            if root.web-view-visible && root.status-text != "": Rectangle {
+            if root.web-view-visible && root.web-view-hovered && root.status-text != "": Rectangle {
                 x: 6px;
                 y: parent.height - self.height - 6px;
                 width: Math.min(status-label.preferred-width + 16px, parent.width * 60%);

@@ -933,3 +933,26 @@ fn a_colour_scheme_change_before_readiness_is_held() {
         Some(BrowserCommand::SetColorScheme(ColorScheme::Dark))
     );
 }
+
+#[test]
+fn pointer_left_for_a_not_ready_tab_is_discarded() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    controller.queue_command(BrowserCommand::PointerLeft);
+    mark_engine_ready(&mut controller, tab_id);
+
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn pointer_left_for_a_ready_tab_is_queued() {
+    let mut controller = controller_with_ready_tab();
+
+    controller.queue_command(BrowserCommand::PointerLeft);
+
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::PointerLeft)
+    );
+}

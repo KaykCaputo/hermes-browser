@@ -201,25 +201,70 @@ fn fullscreen_flag_follows_events() {
     assert!(!state.is_fullscreen());
 }
 
+/// The engine only reports cursor and status-text changes against its own cached values, so
+/// the browser must never reset its copies on navigation: a reset that the engine does not see
+/// would leave them out of step (for example an arrow shown over links after an in-page
+/// navigation, because the engine still holds the pointer cursor and never sends it again).
 #[test]
-fn navigation_resets_cursor_and_status_text() {
+fn an_address_change_leaves_cursor_and_status_text_to_the_engine() {
     let mut state = BrowserState::default();
     state.apply(BrowserEvent::AddressChanged {
         url: "https://a.test/".to_owned(),
     });
     state.apply(BrowserEvent::CursorChanged {
-        cursor: PointerCursor::Text,
+        cursor: PointerCursor::Pointer,
     });
     state.apply(BrowserEvent::StatusTextChanged {
         text: Some("https://a.test/next".to_owned()),
     });
 
     state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/#section".to_owned(),
+    });
+    state.apply(BrowserEvent::AddressChanged {
         url: "https://b.test/".to_owned(),
     });
 
-    assert_eq!(state.cursor(), PointerCursor::Default);
+    assert_eq!(state.cursor(), PointerCursor::Pointer);
+    assert_eq!(state.status_text(), Some("https://a.test/next"));
+}
+
+#[test]
+fn a_failed_page_clears_fullscreen_status_text_and_cursor() {
+    let mut state = BrowserState::default();
+    state.apply(BrowserEvent::FullscreenChanged { fullscreen: true });
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Grabbing,
+    });
+    state.apply(BrowserEvent::StatusTextChanged {
+        text: Some("https://a.test/".to_owned()),
+    });
+
+    state.apply(BrowserEvent::LoadStateChanged {
+        state: LoadState::Failed {
+            message: "crashed".to_owned(),
+        },
+    });
+
+    assert!(!state.is_fullscreen());
     assert_eq!(state.status_text(), None);
+    assert_eq!(state.cursor(), PointerCursor::Default);
+}
+
+#[test]
+fn a_normal_load_state_change_keeps_page_feedback() {
+    let mut state = BrowserState::default();
+    state.apply(BrowserEvent::FullscreenChanged { fullscreen: true });
+    state.apply(BrowserEvent::CursorChanged {
+        cursor: PointerCursor::Text,
+    });
+
+    state.apply(BrowserEvent::LoadStateChanged {
+        state: LoadState::Loaded,
+    });
+
+    assert!(state.is_fullscreen());
+    assert_eq!(state.cursor(), PointerCursor::Text);
 }
 
 #[test]

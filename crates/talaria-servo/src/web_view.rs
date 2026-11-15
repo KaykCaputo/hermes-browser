@@ -6,8 +6,8 @@ use servo::{
     Code, CompositionEvent as ServoCompositionEvent, CompositionState as ServoCompositionState,
     DevicePoint, ImeEvent as ServoImeEvent, InputEvent, Key, KeyState as ServoKeyState,
     KeyboardEvent as ServoKeyboardEvent, Location, Modifiers,
-    MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey, Theme,
-    WebViewPoint, WheelDelta, WheelEvent, WheelMode,
+    MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseLeftViewportEvent,
+    MouseMoveEvent, NamedKey, Theme, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use talaria_core::{
     ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
@@ -200,6 +200,13 @@ impl TalariaWebView for ServoWebView {
 
     fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
         self.inner.exit_fullscreen();
+        Ok(())
+    }
+
+    fn pointer_left(&mut self) -> Result<(), Self::Error> {
+        let _event_id = self.inner.notify_input_event(InputEvent::MouseLeftViewport(
+            MouseLeftViewportEvent::default(),
+        ));
         Ok(())
     }
 }

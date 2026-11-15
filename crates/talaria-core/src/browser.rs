@@ -66,6 +66,8 @@ pub enum BrowserCommand {
     },
     SetColorScheme(ColorScheme),
     ExitFullscreen,
+    /// The pointer left the web view, or the tab stopped being shown.
+    PointerLeft,
 }
 
 impl BrowserCommand {
@@ -78,6 +80,7 @@ impl BrowserCommand {
                 | Self::PointerButton { .. }
                 | Self::Scrolled { .. }
                 | Self::PinchZoom { .. }
+                | Self::PointerLeft
         )
     }
 
@@ -202,11 +205,12 @@ impl BrowserState {
     pub fn apply(&mut self, event: BrowserEvent) {
         match event {
             BrowserEvent::AddressChanged { url } => {
+                // Cursor and status text are deliberately not reset here: the engine only
+                // reports changes against its own cached values, so the engine's notifications
+                // must stay the only source of both.
                 if self.url != url {
                     self.url = url;
                     self.page_icon = None;
-                    self.cursor = PointerCursor::Default;
-                    self.status_text = None;
                 }
             }
             BrowserEvent::PageTitleChanged { title } => {
@@ -218,6 +222,13 @@ impl BrowserState {
                 self.page_icon = icon;
             }
             BrowserEvent::LoadStateChanged { state } => {
+                if matches!(state, LoadState::Failed { .. }) {
+                    // A failed or crashed page can no longer leave fullscreen or report that
+                    // the pointer moved, so nothing would ever clear these.
+                    self.fullscreen = false;
+                    self.status_text = None;
+                    self.cursor = PointerCursor::Default;
+                }
                 self.load_state = state;
             }
             BrowserEvent::HistoryChanged {

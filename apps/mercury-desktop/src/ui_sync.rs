@@ -63,7 +63,9 @@ fn sync_fullscreen(window: &MainWindow, page_fullscreen: bool) {
         return;
     }
     window.set_chrome_hidden(page_fullscreen);
-    // Slint makes the window borderless-fullscreen on its current monitor.
+    // Slint makes the window borderless-fullscreen on its current monitor. Leaving page
+    // fullscreen also ends window fullscreen that the user had turned on before; this matches
+    // servoshell and is deliberate.
     window.window().set_fullscreen(page_fullscreen);
 }
 

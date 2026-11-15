@@ -16,7 +16,7 @@ use talaria_servo::{
     ViewportSize,
 };
 
-use crate::keyboard::color_scheme_from_winit;
+use crate::keyboard::system_color_scheme;
 use crate::rendering::BrowserRenderingContext;
 use crate::ui_sync::sync_ui;
 
@@ -247,13 +247,12 @@ impl EngineState {
         self.wgpu_device = Some(device.clone());
         // The window exists now, so the system appearance can be read. Later changes arrive as
         // `ThemeChanged` window events.
-        if let Some(Some(theme)) = window
+        let winit_theme = window
             .window()
             .with_winit_window(|winit_window| winit_window.theme())
-        {
-            self.controller
-                .borrow_mut()
-                .set_color_scheme(color_scheme_from_winit(theme));
+            .flatten();
+        if let Some(scheme) = system_color_scheme(winit_theme, window.get_system_color_scheme()) {
+            self.controller.borrow_mut().set_color_scheme(scheme);
         }
         window.set_content_message(
             "Offscreen rendering initialized. Waiting for Servo WebView.".into(),
@@ -345,7 +344,7 @@ impl EngineState {
 
         let active_tab_changed = self.visible_tab_id != Some(active_tab_id);
         if active_tab_changed && let Some(previous_tab_id) = self.visible_tab_id {
-            leave_page_fullscreen(&mut self.controller.borrow_mut(), previous_tab_id);
+            queue_leaving_tab(&mut self.controller.borrow_mut(), previous_tab_id);
         }
         if active_tab_changed {
             if let Some(previous_tab_id) = self.visible_tab_id
@@ -491,8 +490,10 @@ pub(crate) fn apply_pending_browser_events(
     state_changed
 }
 
-/// A tab that is switched away from while one of its pages is fullscreen leaves fullscreen.
-pub(crate) fn leave_page_fullscreen(controller: &mut BrowserController, tab_id: TabId) {
+/// The tab being switched away from: its page is told the pointer left (clearing hover state,
+/// cursor and status text), and a fullscreen page leaves fullscreen.
+pub(crate) fn queue_leaving_tab(controller: &mut BrowserController, tab_id: TabId) {
+    controller.queue_command_for(tab_id, BrowserCommand::PointerLeft);
     let is_fullscreen = controller
         .tabs()
         .any(|tab| tab.id() == tab_id && tab.state().is_fullscreen());
@@ -607,6 +608,9 @@ mod tests {
         fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
+        fn pointer_left(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     fn mark_engine_ready(controller: &RefCell<BrowserController>, tab_id: TabId) {
@@ -624,22 +628,30 @@ mod tests {
         controller.handle_event(tab_id, BrowserEvent::FullscreenChanged { fullscreen: true });
         controller.open_tab();
 
-        leave_page_fullscreen(&mut controller, tab_id);
+        queue_leaving_tab(&mut controller, tab_id);
 
+        let queued = std::iter::from_fn(|| controller.next_command()).collect::<Vec<_>>();
         assert_eq!(
-            controller.next_command(),
-            Some(TabCommand::new(tab_id, BrowserCommand::ExitFullscreen))
+            queued,
+            vec![
+                TabCommand::new(tab_id, BrowserCommand::PointerLeft),
+                TabCommand::new(tab_id, BrowserCommand::ExitFullscreen),
+            ]
         );
     }
 
     #[test]
-    fn switching_away_from_a_normal_tab_queues_nothing() {
+    fn switching_away_from_a_normal_tab_only_reports_the_pointer_leaving() {
         let mut controller = BrowserController::default();
         let tab_id = controller.active_tab_id();
         controller.handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
 
-        leave_page_fullscreen(&mut controller, tab_id);
+        queue_leaving_tab(&mut controller, tab_id);
 
+        assert_eq!(
+            controller.next_command(),
+            Some(TabCommand::new(tab_id, BrowserCommand::PointerLeft))
+        );
         assert_eq!(controller.next_command(), None);
     }
 

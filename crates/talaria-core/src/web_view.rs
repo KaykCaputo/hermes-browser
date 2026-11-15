@@ -24,6 +24,7 @@ pub trait WebView {
     fn pinch_zoom(&mut self, delta: f32, x: f32, y: f32) -> Result<(), Self::Error>;
     fn set_color_scheme(&mut self, scheme: ColorScheme) -> Result<(), Self::Error>;
     fn exit_fullscreen(&mut self) -> Result<(), Self::Error>;
+    fn pointer_left(&mut self) -> Result<(), Self::Error>;
 }
 
 pub fn dispatch_command<W>(web_view: &mut W, command: BrowserCommand) -> Result<(), W::Error>
@@ -55,5 +56,6 @@ where
         BrowserCommand::PinchZoom { delta, x, y } => web_view.pinch_zoom(delta, x, y),
         BrowserCommand::SetColorScheme(scheme) => web_view.set_color_scheme(scheme),
         BrowserCommand::ExitFullscreen => web_view.exit_fullscreen(),
+        BrowserCommand::PointerLeft => web_view.pointer_left(),
     }
 }

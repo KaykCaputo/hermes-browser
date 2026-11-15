@@ -31,6 +31,7 @@ enum FakeCall {
     SetPageZoom(u16),
     SetColorScheme(ColorScheme),
     ExitFullscreen,
+    PointerLeft,
     PinchZoom {
         delta: f32,
         x: f32,
@@ -137,6 +138,10 @@ impl WebView for FakeWebView {
 
     fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
         self.record(FakeCall::ExitFullscreen)
+    }
+
+    fn pointer_left(&mut self) -> Result<(), Self::Error> {
+        self.record(FakeCall::PointerLeft)
     }
 }
 
@@ -374,4 +379,14 @@ fn exit_fullscreen_command_calls_exit_fullscreen() {
 
     assert_eq!(result, Ok(()));
     assert_eq!(web_view.calls, vec![FakeCall::ExitFullscreen]);
+}
+
+#[test]
+fn pointer_left_command_calls_pointer_left() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(&mut web_view, BrowserCommand::PointerLeft);
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(web_view.calls, vec![FakeCall::PointerLeft]);
 }

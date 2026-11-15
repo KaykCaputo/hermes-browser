@@ -3,6 +3,7 @@ use std::rc::Rc;
 
 use mercury_ui::MainWindow;
 use slint::ComponentHandle;
+use slint::language::ColorScheme as SlintColorScheme;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use talaria_core::{
     BrowserCommand, BrowserController, ColorScheme, CompositionState, ImeInput, KeyLocation,
@@ -76,6 +77,21 @@ pub(crate) fn connect_native_keyboard_input(
                     window.window().request_redraw();
                     return EventResult::PreventDefault;
                 }
+                // The user left window fullscreen through the system (for example Ctrl+Cmd+F)
+                // while a page is fullscreen: let the page leave too, so the chrome returns.
+                WindowEvent::Resized(_)
+                    if window.get_chrome_hidden()
+                        && controller.borrow().active_state().is_fullscreen()
+                        && window
+                            .window()
+                            .with_winit_window(|winit_window| winit_window.fullscreen().is_none())
+                            .unwrap_or(false) =>
+                {
+                    controller
+                        .borrow_mut()
+                        .queue_command(BrowserCommand::ExitFullscreen);
+                    window.window().request_redraw();
+                }
                 WindowEvent::ThemeChanged(theme) => {
                     controller
                         .borrow_mut()
@@ -122,6 +138,22 @@ pub(crate) fn color_scheme_from_winit(theme: Theme) -> ColorScheme {
     match theme {
         Theme::Light => ColorScheme::Light,
         Theme::Dark => ColorScheme::Dark,
+    }
+}
+
+/// The system appearance when rendering starts: winit's report, or else the colour scheme
+/// Slint determined for the window (on Linux it also asks the desktop settings portal).
+pub(crate) fn system_color_scheme(
+    winit_theme: Option<Theme>,
+    slint_scheme: SlintColorScheme,
+) -> Option<ColorScheme> {
+    if let Some(theme) = winit_theme {
+        return Some(color_scheme_from_winit(theme));
+    }
+    match slint_scheme {
+        SlintColorScheme::Dark => Some(ColorScheme::Dark),
+        SlintColorScheme::Light => Some(ColorScheme::Light),
+        _ => None,
     }
 }
 
@@ -305,6 +337,23 @@ mod tests {
     fn winit_themes_become_colour_schemes() {
         assert_eq!(color_scheme_from_winit(Theme::Dark), ColorScheme::Dark);
         assert_eq!(color_scheme_from_winit(Theme::Light), ColorScheme::Light);
+    }
+
+    #[test]
+    fn the_start_up_scheme_prefers_winit_then_slint() {
+        assert_eq!(
+            system_color_scheme(Some(Theme::Dark), SlintColorScheme::Light),
+            Some(ColorScheme::Dark)
+        );
+        assert_eq!(
+            system_color_scheme(None, SlintColorScheme::Dark),
+            Some(ColorScheme::Dark)
+        );
+        assert_eq!(
+            system_color_scheme(None, SlintColorScheme::Light),
+            Some(ColorScheme::Light)
+        );
+        assert_eq!(system_color_scheme(None, SlintColorScheme::Unknown), None);
     }
 
     #[test]

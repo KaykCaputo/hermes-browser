@@ -128,7 +128,7 @@ impl ServoRuntime {
         let frame_ready = FrameReadySignal::default();
         let delegate = Rc::new(BrowserDelegate {
             tab_id,
-            browser_event_sender,
+            browser_event_sender: browser_event_sender.clone(),
             frame_ready: frame_ready.clone(),
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
@@ -140,6 +140,9 @@ impl ServoRuntime {
             .delegate(delegate)
             .build();
 
+        for event in new_web_view_feedback(inner.cursor(), inner.status_text()) {
+            let _send_result = browser_event_sender.send(TabEvent::new(tab_id, event));
+        }
         info!("created Servo WebView for tab {}", tab_id.value());
         Ok(ServoWebView::new(inner, frame_ready, tab_id, scale_factor))
     }
@@ -291,6 +294,19 @@ impl servo::WebViewDelegate for BrowserDelegate {
             state: LoadState::Failed { message: reason },
         });
     }
+}
+
+/// What a freshly built web view's own caches hold. Servo only notifies changes against these
+/// caches (and starts with `Cursor::Pointer`), so the tab's copies must start from the same
+/// values, also when the web view replaces an earlier one.
+fn new_web_view_feedback(cursor: Cursor, status_text: Option<String>) -> [BrowserEvent; 3] {
+    [
+        BrowserEvent::CursorChanged {
+            cursor: pointer_cursor_from_servo(cursor),
+        },
+        BrowserEvent::StatusTextChanged { text: status_text },
+        BrowserEvent::FullscreenChanged { fullscreen: false },
+    ]
 }
 
 fn pointer_cursor_from_servo(cursor: Cursor) -> PointerCursor {
@@ -532,27 +548,64 @@ mod tests {
 
     #[test]
     fn every_servo_cursor_maps_to_a_pointer_cursor() {
+        let pairs = [
+            (Cursor::None, PointerCursor::None),
+            (Cursor::Default, PointerCursor::Default),
+            (Cursor::Pointer, PointerCursor::Pointer),
+            (Cursor::ContextMenu, PointerCursor::ContextMenu),
+            (Cursor::Help, PointerCursor::Help),
+            (Cursor::Progress, PointerCursor::Progress),
+            (Cursor::Wait, PointerCursor::Wait),
+            (Cursor::Cell, PointerCursor::Cell),
+            (Cursor::Crosshair, PointerCursor::Crosshair),
+            (Cursor::Text, PointerCursor::Text),
+            (Cursor::VerticalText, PointerCursor::VerticalText),
+            (Cursor::Alias, PointerCursor::Alias),
+            (Cursor::Copy, PointerCursor::Copy),
+            (Cursor::Move, PointerCursor::Move),
+            (Cursor::NoDrop, PointerCursor::NoDrop),
+            (Cursor::NotAllowed, PointerCursor::NotAllowed),
+            (Cursor::Grab, PointerCursor::Grab),
+            (Cursor::Grabbing, PointerCursor::Grabbing),
+            (Cursor::EResize, PointerCursor::EResize),
+            (Cursor::NResize, PointerCursor::NResize),
+            (Cursor::NeResize, PointerCursor::NeResize),
+            (Cursor::NwResize, PointerCursor::NwResize),
+            (Cursor::SResize, PointerCursor::SResize),
+            (Cursor::SeResize, PointerCursor::SeResize),
+            (Cursor::SwResize, PointerCursor::SwResize),
+            (Cursor::WResize, PointerCursor::WResize),
+            (Cursor::EwResize, PointerCursor::EwResize),
+            (Cursor::NsResize, PointerCursor::NsResize),
+            (Cursor::NeswResize, PointerCursor::NeswResize),
+            (Cursor::NwseResize, PointerCursor::NwseResize),
+            (Cursor::ColResize, PointerCursor::ColResize),
+            (Cursor::RowResize, PointerCursor::RowResize),
+            (Cursor::AllScroll, PointerCursor::AllScroll),
+            (Cursor::ZoomIn, PointerCursor::ZoomIn),
+            (Cursor::ZoomOut, PointerCursor::ZoomOut),
+        ];
+        assert_eq!(pairs.len(), 35);
+        for (servo_cursor, pointer_cursor) in pairs {
+            assert_eq!(
+                pointer_cursor_from_servo(servo_cursor),
+                pointer_cursor,
+                "{servo_cursor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_web_view_reports_the_engines_starting_feedback() {
         assert_eq!(
-            pointer_cursor_from_servo(Cursor::Pointer),
-            PointerCursor::Pointer
-        );
-        assert_eq!(pointer_cursor_from_servo(Cursor::Text), PointerCursor::Text);
-        assert_eq!(
-            pointer_cursor_from_servo(Cursor::Grabbing),
-            PointerCursor::Grabbing
-        );
-        assert_eq!(pointer_cursor_from_servo(Cursor::None), PointerCursor::None);
-        assert_eq!(
-            pointer_cursor_from_servo(Cursor::Default),
-            PointerCursor::Default
-        );
-        assert_eq!(
-            pointer_cursor_from_servo(Cursor::NwseResize),
-            PointerCursor::NwseResize
-        );
-        assert_eq!(
-            pointer_cursor_from_servo(Cursor::ZoomOut),
-            PointerCursor::ZoomOut
+            new_web_view_feedback(Cursor::Pointer, None),
+            [
+                BrowserEvent::CursorChanged {
+                    cursor: PointerCursor::Pointer,
+                },
+                BrowserEvent::StatusTextChanged { text: None },
+                BrowserEvent::FullscreenChanged { fullscreen: false },
+            ]
         );
     }
 
