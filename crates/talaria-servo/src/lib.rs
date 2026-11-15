@@ -4,6 +4,7 @@ mod error;
 mod frame_ready;
 mod load_metrics;
 mod opengl_context;
+mod page_defaults;
 mod runtime;
 mod web_view;
 

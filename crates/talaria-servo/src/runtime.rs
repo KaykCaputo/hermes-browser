@@ -18,6 +18,7 @@ use url::Url;
 use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
+use crate::page_defaults::page_defaults_user_content;
 use crate::{ServoWebView, ServoWebViewError};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
@@ -76,6 +77,7 @@ pub struct ServoRuntime {
     inner: servo::Servo,
     redraw_waker: EventLoopWaker,
     content_blocker: Rc<ContentBlocker>,
+    user_content: Rc<servo::UserContentManager>,
 }
 
 impl ServoRuntime {
@@ -108,11 +110,13 @@ impl ServoRuntime {
         inner.set_delegate(Rc::new(BrowserServoDelegate {
             content_blocker: Rc::clone(&content_blocker),
         }));
+        let user_content = page_defaults_user_content(&inner);
 
         Self {
             inner,
             redraw_waker,
             content_blocker,
+            user_content,
         }
     }
 
@@ -138,6 +142,7 @@ impl ServoRuntime {
             .url(initial_url)
             .hidpi_scale_factor(Scale::new(scale_factor))
             .delegate(delegate)
+            .user_content_manager(Rc::clone(&self.user_content))
             .build();
 
         for event in new_web_view_feedback(inner.cursor(), inner.status_text()) {
