@@ -76,6 +76,8 @@ Signing goes inside out and never uses `codesign --deep`: every Mach-O file in `
 
 The default identity is `-`, an ad-hoc signature: valid for running on the machine that built it, but not trusted by Gatekeeper on other Macs. Set `--identity` or `MERCURY_SIGN_IDENTITY` to sign with a certificate from your keychain (`security find-identity -v -p codesigning` lists them). A real identity also gets a secure timestamp (`--timestamp`), and the disk image is signed too.
 
+Besides ad hoc, only identities that carry a team identifier are supported: a Developer ID Application certificate for releases, or an Apple Development certificate for testing. A self-signed certificate has no team, so library validation would reject the bundled libraries at launch even though `codesign --verify` passes; the script refuses that combination after signing. The script also refuses identities that are empty, start with `-` (other than `-` itself) or have leading or trailing spaces, since those are almost always typing mistakes.
+
 #### Entitlements
 
 The identity decides which of two entitlement files in `apps/mercury-desktop/resources/macos/` is used, and the script prints which one:
@@ -83,15 +85,21 @@ The identity decides which of two entitlement files in `apps/mercury-desktop/res
 | Identity | File | Grants |
 |---|---|---|
 | `-` (ad hoc, the default) | `entitlements-adhoc.plist` | `com.apple.security.cs.allow-jit`, `com.apple.security.cs.allow-unsigned-executable-memory`, `com.apple.security.cs.disable-library-validation` |
-| anything else (Developer ID) | `entitlements.plist` | `com.apple.security.cs.allow-jit`, `com.apple.security.cs.allow-unsigned-executable-memory` |
+| anything else (Developer ID, Apple Development) | `entitlements.plist` | `com.apple.security.cs.allow-jit`, `com.apple.security.cs.allow-unsigned-executable-memory` |
 
 The two JIT entitlements are needed by SpiderMonkey to run JavaScript under the hardened runtime; without them no page loads.
 
 `disable-library-validation` exists only because of ad-hoc signing. The hardened runtime normally lets a process load only libraries signed by Apple or by its own team, and an ad-hoc signature has no team identifier, so an ad-hoc build could never load the libraries it bundles in `Contents/MacOS/lib`: it would stop at launch with "mapping process and mapped file (non-platform) have different Team IDs". The ad-hoc file turns that check off.
 
-The trade-off is real: with library validation off, any process that can write into the application bundle can make Mercury load a library of its own. That is acceptable for a build you made and run yourself. A Developer ID build closes the gap: every bundled library is signed with the same team identifier as the executable, validation stays on, and `entitlements-adhoc.plist` must never be used with a Developer ID.
+The trade-off is real: with library validation off, any process that can write into the application bundle can make Mercury load a library of its own. That is acceptable for a build you made and run yourself. Until releases are signed with a Developer ID, the builds published for download are ad hoc too, so they also run with library validation off. A Developer ID build closes the gap: every bundled library is signed with the same team identifier as the executable, validation stays on, and `entitlements-adhoc.plist` must never be used with a Developer ID.
 
-`scripts/macos/test-bundle.sh` checks which file each identity gets (`scripts/macos/bundle.sh --identity <id> --print-entitlements` prints it without building) and what each file grants.
+#### Checks after signing
+
+`codesign --verify` checks neither the hardened runtime nor the entitlements, so after verifying the bundle the script reads both back from the executable and from the bundle. It stops if the `runtime` flag is missing or if the granted entitlements differ from the chosen file.
+
+#### Testing the script
+
+`make test-bundle-macos` (or `scripts/macos/test-bundle.sh`) runs without a build or a signing identity. It checks which entitlement file each identity gets (`scripts/macos/bundle.sh --identity <id> --print-entitlements` prints it without building), the refused identities, what each file grants, and the helpers in `scripts/macos/lib.sh` that parse `otool` and `codesign` output. That includes a load-command listing far larger than a pipe buffer, which a parser that stops reading early would turn into a silent exit.
 
 Check a bundle with:
 
@@ -108,7 +116,7 @@ spctl --assess --type execute -vv "dist/Mercury Browser.app" # "rejected" for ad
 
 Servo loads its GStreamer libraries from `Contents/MacOS/lib`, found through the executable's `@executable_path/lib/` rpath (the script adds it when the build did not). When `scripts/macos/collect-gstreamer.sh` exists and a GStreamer prefix is given with `--gstreamer-prefix` or `MERCURY_GSTREAMER_PREFIX`, the script runs `collect-gstreamer.sh <prefix> "Contents/MacOS/lib"` before signing. Otherwise it prints that media libraries were not bundled.
 
-The collected libraries are signed with the same identity as the app. Ad-hoc builds can load them because of the ad-hoc entitlement set described under [Entitlements](#entitlements).
+Only libraries and loadable plugins belong in `Contents/MacOS/lib`. They are signed without entitlements, so an executable placed there (a plugin scanner, for example) would run with library validation on and, in an ad-hoc build, fail to load the libraries next to it; the script stops if it finds one. The collected libraries are signed with the same identity as the app. Ad-hoc builds can load them because of the ad-hoc entitlement set described under [Entitlements](#entitlements).
 
 ### Developer ID and notarisation
 
