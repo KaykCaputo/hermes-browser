@@ -21,5 +21,16 @@ tokio = { workspace = true, features = [
 ] }
 url.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2.workspace = true
+objc2-foundation = { workspace = true, features = [
+    "std",
+    "NSDictionary",
+    "NSError",
+    "NSObject",
+    "NSString",
+    "NSURL",
+] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["net"] }

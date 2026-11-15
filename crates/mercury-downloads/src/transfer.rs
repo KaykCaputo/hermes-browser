@@ -28,6 +28,7 @@ use url::Url;
 use crate::error::TransferError;
 use crate::manager::{DownloadEvent, DownloadId, DownloadRequest, ResumeFrom, Timeouts};
 use crate::naming::{self, PART_SUFFIX};
+use crate::quarantine;
 
 const MAX_REDIRECTS: usize = 20;
 /// Progress is reported at most this often (plus once at the end).
@@ -70,6 +71,7 @@ struct OnDisk {
 /// A body written completely to the partial file.
 struct Complete {
     dir: PathBuf,
+    final_url: Url,
     part: PathBuf,
     target: PathBuf,
     received: u64,
@@ -114,10 +116,17 @@ impl Transfer {
             }
             // From here the download is complete: a late cancel no longer applies.
             Some(Ok(complete)) => match publish(&complete) {
-                Ok(target_path) => Outcome::Finished {
-                    target_path,
-                    received_bytes: complete.received,
-                },
+                Ok(target_path) => {
+                    quarantine::mark_downloaded(
+                        &target_path,
+                        &complete.final_url,
+                        self.request.referrer.as_ref(),
+                    );
+                    Outcome::Finished {
+                        target_path,
+                        received_bytes: complete.received,
+                    }
+                }
                 Err(error) => {
                     remove_partial(Some(&complete.part));
                     Outcome::Failed {
@@ -229,7 +238,7 @@ impl Transfer {
             partial_path: part.clone(),
             total_bytes: total,
             mime_type,
-            final_url,
+            final_url: final_url.clone(),
             etag,
             last_modified,
         });
@@ -237,6 +246,7 @@ impl Transfer {
         let received = self.write_body(&mut response, file, offset, total).await?;
         Ok(Complete {
             dir,
+            final_url,
             part,
             target,
             received,

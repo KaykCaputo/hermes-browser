@@ -5343,6 +5343,8 @@ dependencies = [
  "futures-util",
  "log",
  "mime_guess",
+ "objc2 0.6.5",
+ "objc2-foundation 0.3.2",
  "percent-encoding",
  "reqwest",
  "thiserror 2.0.21",

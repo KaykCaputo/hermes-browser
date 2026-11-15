@@ -10,6 +10,7 @@ mod content_disposition;
 mod error;
 mod manager;
 pub mod naming;
+mod quarantine;
 mod transfer;
 
 pub use manager::{
