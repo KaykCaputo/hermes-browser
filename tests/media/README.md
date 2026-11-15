@@ -48,20 +48,29 @@ ffmpeg -hide_banner -loglevel error -y -f lavfi -i "sine=frequency=441:sample_ra
 ## Running the checks
 
 The page keeps every element muted with volume 0 and checks Web Audio with an
-`OfflineAudioContext`, so it never makes a sound. Serve the repository over HTTP on the loopback
-interface: from a `file://` URL the clips count as cross-origin, so drawing a video frame taints
-the canvas and `XMLHttpRequest` cannot read the files for `decodeAudioData`.
+`OfflineAudioContext`, so it never makes a sound. Serve `tests/` over HTTP on the loopback
+interface with `scripts/serve-tests.py`: it picks a free port, prints it, answers `Range` requests
+as real media servers do (python's own `http.server` does not), and stops when the shell that
+started it exits.
 
 ```sh
-python3 -m http.server --bind 127.0.0.1 8765 &
+python3 scripts/serve-tests.py >serve.port &
+sleep 1; port="$(head -n 1 serve.port)"
 ./target/release/mercury-browser --screenshot media.png --window-size 1100x1300 \
-  --screenshot-delay 20000 "http://127.0.0.1:8765/tests/pages/media.html"
-kill %1
+  --screenshot-delay 30000 "http://127.0.0.1:$port/pages/media.html"
+kill %1; rm serve.port
 ```
 
-Every check prints one line ending in `PASS` or `FAIL` within a bounded time, and a final `DONE`
-line always appears (1100×1300 shows all of them). Playback checks compare the media position with
-the wall clock, so a stream that jumps to its end fails. Ogg is not bundled on macOS for now; the
-page then checks that an Ogg element fails promptly with "not supported", and if Ogg is bundled it
-checks that Ogg plays correctly instead. Allow 20 s: the first launch after the libraries were
-copied can take 10 s before media starts.
+Every check prints one line ending in `PASS` or `FAIL`, and a final `DONE` line always appears
+within 25 s of the page starting, inside the 30 s delay (1100×1300 shows all lines). Video checks
+compare the position with the wall clock at two moments: more than 0.3 s ahead (a jump) or more
+than 0.5 s behind (slow or stalled playback) fails; audio must reach `ended` in about the clip's
+length. Ogg is not bundled on macOS for now; the page then checks that an Ogg element fails
+promptly with "not supported", and if Ogg is bundled it checks that Ogg plays correctly instead.
+
+Loaded from a `file://` URL, the clips count as cross-origin: the two frame-colour read-backs and
+the two `decodeAudioData` loads are then printed as `SKIP` with that reason, and the timing checks
+still run. A `FAIL` therefore always means something is wrong.
+
+`scripts/macos/test-media.sh` (`make test-media-macos`) runs the page from the build tree and from
+`dist/Mercury Browser.app` with a scratch home directory and checks what the run leaves on disk.
