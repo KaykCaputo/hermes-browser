@@ -9,11 +9,14 @@ name = "mercury-browser"
 path = "src/main.rs"
 
 [dependencies]
+backtrace.workspace = true
+dirs.workspace = true
 dpi.workspace = true
 euclid.workspace = true
 gleam.workspace = true
 glow.workspace = true
 image.workspace = true
+libc.workspace = true
 log.workspace = true
 mercury-ui = { path = "../../crates/mercury-ui" }
 servo.workspace = true
@@ -27,8 +30,23 @@ thiserror.workspace = true
 ash.workspace = true
 
 # The same objc2 generation as wgpu-hal 29's Metal backend (not winit's objc2 0.5 / objc2-metal 0.2).
+# `objc2-app-kit` and `objc2-foundation`: `NSScreen.visibleFrame`, the screen area outside the menu
+# bar and Dock (`window.screen.avail*`), and `deviceDescription` to find the monitor's screen.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.3"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSGraphics",
+    "NSScreen",
+] }
+objc2-foundation = { workspace = true, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSString",
+    "NSValue",
+] }
 objc2-metal = { version = "0.3.2", default-features = false, features = [
     "std",
     "MTLAllocation",
@@ -38,6 +56,10 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLTexture",
     "objc2-io-surface",
 ] }
+
+# The crash handler is compiled on macOS and Linux only, as in servoshell.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+signal-hook-registry.workspace = true
 
 [build-dependencies]
 gl_generator = "0.14"

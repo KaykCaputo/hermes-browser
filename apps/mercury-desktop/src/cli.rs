@@ -8,6 +8,8 @@ pub(crate) struct LaunchOptions {
     pub window_size: Option<(u32, u32)>,
     pub background: bool,
     pub gpu_canvas: bool,
+    pub profile_dir: Option<PathBuf>,
+    pub experimental_web_features: bool,
 }
 
 impl Default for LaunchOptions {
@@ -18,7 +20,16 @@ impl Default for LaunchOptions {
             window_size: None,
             background: false,
             gpu_canvas: true,
+            profile_dir: None,
+            experimental_web_features: true,
         }
+    }
+}
+
+impl LaunchOptions {
+    /// Screenshot and background runs are automated: they never use the user's own profile.
+    pub(crate) fn is_automated(&self) -> bool {
+        self.screenshot.is_some() || self.background
     }
 }
 
@@ -48,8 +59,37 @@ Options:
   --window-size <W>x<H>            Set the window's logical size, for example 1280x800
   --background                     Start without taking focus (for automated runs)
   --disable-gpu-canvas             Draw 2D canvases on the CPU
+  --disable-experimental-web-features
+                                   Leave off Servo's experimental web-platform features
+                                   (servoshell's list minus the async clipboard and
+                                   WebGPU, which are always off)
+  --profile-dir <directory>        Keep cookies and site data in this directory
+                                   (screenshot and background runs otherwise use a temporary one)
   --help                           Print this help and exit
-  --version                        Print the version and exit";
+  --version                        Print the version and exit
+
+Exit status:
+  0  Success
+  1  Failure, or a screenshot could not be saved
+  2  Invalid command line
+  3  The screenshot's page did not finish loading
+  4  The profile is in use by another Mercury Browser";
+
+/// `--profile-dir` and `--screenshot` need paths that are valid UTF-8; anything else would be
+/// silently altered by the conversion to `String`. Returns the usage error to print, if any.
+pub(crate) fn reject_non_utf8_paths(arguments: &[std::ffi::OsString]) -> Option<CliOutcome> {
+    let pair = arguments.windows(2).find(|pair| {
+        (pair[0] == "--profile-dir" || pair[0] == "--screenshot") && pair[1].to_str().is_none()
+    })?;
+    Some(CliOutcome::PrintAndExit {
+        text: format!(
+            "mercury-browser: the {} path '{}' is not valid UTF-8; choose another path\n\n{USAGE}",
+            pair[0].to_string_lossy(),
+            pair[1].to_string_lossy()
+        ),
+        code: 2,
+    })
+}
 
 /// Parses the command line, excluding the program name.
 pub(crate) fn parse_arguments(arguments: impl IntoIterator<Item = String>) -> CliOutcome {
@@ -69,6 +109,8 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
     let mut window_size = None;
     let mut background = false;
     let mut gpu_canvas = true;
+    let mut profile_dir = None;
+    let mut experimental_web_features = true;
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -105,6 +147,11 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
             }
             "--background" => background = true,
             "--disable-gpu-canvas" => gpu_canvas = false,
+            "--disable-experimental-web-features" => experimental_web_features = false,
+            "--profile-dir" => {
+                let value = option_value(&mut arguments, "--profile-dir", "<directory>")?;
+                profile_dir = Some(PathBuf::from(value));
+            }
             _ if argument.starts_with("-psn_") => {}
             _ if argument.starts_with('-') => {
                 return Err(format!("unknown option '{argument}'"));
@@ -128,6 +175,8 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
         window_size,
         background,
         gpu_canvas,
+        profile_dir,
+        experimental_web_features,
     }))
 }
 
@@ -208,6 +257,8 @@ mod tests {
                 window_size: Some((800, 600)),
                 background: false,
                 gpu_canvas: true,
+                profile_dir: None,
+                experimental_web_features: true,
             })
         );
     }
@@ -367,6 +418,130 @@ mod tests {
 
         assert!(text.contains("--disable-gpu-canvas"));
         assert!(text.contains("Draw 2D canvases on the CPU"));
+    }
+
+    #[test]
+    fn profile_dir_is_parsed() {
+        assert_eq!(
+            parse(&["--profile-dir", "/x", "https://a.test"]),
+            CliOutcome::Run(LaunchOptions {
+                urls: vec!["https://a.test".to_owned()],
+                profile_dir: Some(PathBuf::from("/x")),
+                ..LaunchOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn help_describes_profile_dir() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains("--profile-dir <directory>"));
+    }
+
+    #[test]
+    fn screenshot_and_background_runs_are_automated() {
+        let automated = |arguments: &[&str]| {
+            let CliOutcome::Run(options) = parse(arguments) else {
+                panic!("these arguments should run the browser");
+            };
+            options.is_automated()
+        };
+
+        assert!(!automated(&[]));
+        assert!(!automated(&["--profile-dir", "/x"]));
+        assert!(automated(&["--screenshot", "out.png"]));
+        assert!(automated(&["--background"]));
+    }
+
+    #[test]
+    fn help_says_automated_runs_use_a_temporary_profile() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains("screenshot and background runs otherwise use a temporary one"));
+    }
+
+    #[test]
+    fn help_documents_the_profile_in_use_exit_status() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains(&format!(
+            "  {}  The profile is in use by another Mercury Browser",
+            crate::profile::EXIT_PROFILE_IN_USE
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_options_that_are_not_utf8_are_usage_errors() {
+        use std::ffi::{OsStr, OsString};
+        use std::os::unix::ffi::OsStrExt;
+
+        let arguments = [
+            OsString::from("--profile-dir"),
+            OsStr::from_bytes(b"/tmp/\xffprofile").to_owned(),
+        ];
+
+        assert_eq!(
+            reject_non_utf8_paths(&arguments)
+                .as_ref()
+                .and_then(exit_code),
+            Some(2)
+        );
+        assert_eq!(
+            reject_non_utf8_paths(&[OsString::from("--profile-dir"), OsString::from("/x")]),
+            None
+        );
+        assert_eq!(
+            reject_non_utf8_paths(&[
+                OsString::from("--screenshot"),
+                OsStr::from_bytes(b"\xff.png").to_owned()
+            ])
+            .as_ref()
+            .and_then(exit_code),
+            Some(2)
+        );
+        assert_eq!(
+            reject_non_utf8_paths(&[OsString::from("--screenshot"), OsString::from("out.png")]),
+            None
+        );
+    }
+
+    #[test]
+    fn profile_dir_without_a_value_is_a_usage_error() {
+        assert_eq!(exit_code(&parse(&["--profile-dir"])), Some(2));
+    }
+
+    #[test]
+    fn experimental_web_features_are_on_by_default_and_can_be_disabled() {
+        let CliOutcome::Run(default_options) = parse(&["https://a.test"]) else {
+            panic!("a URL alone should run the browser");
+        };
+        assert!(default_options.experimental_web_features);
+
+        assert_eq!(
+            parse(&["--disable-experimental-web-features", "https://a.test"]),
+            CliOutcome::Run(LaunchOptions {
+                urls: vec!["https://a.test".to_owned()],
+                experimental_web_features: false,
+                ..LaunchOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn help_describes_disable_experimental_web_features() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains("--disable-experimental-web-features"));
     }
 
     #[test]

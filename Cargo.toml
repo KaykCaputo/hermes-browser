@@ -21,8 +21,10 @@ license = "MPL-2.0"
 [workspace.dependencies]
 adblock = "=0.13.5"
 ash = "0.38"
+backtrace = "0.3.77"
 content-security-policy = "0.9"
 core-foundation = "0.10"
+dirs = "7.0"
 dpi = "0.1"
 euclid = "0.22"
 futures-util = "0.3.34"
@@ -47,6 +49,7 @@ serde_json = "1"
 # (`vello_backend.rs:756`, `get_mapped_range` returns a `Result`). See its MERCURY.md.
 # The build therefore carries two `wgpu` majors: 29 for Slint's FemtoVG renderer (Slint is held at
 # 1.17, see below) and 30 for vello 0.11, which Servo's GPU canvas requires. They do not share state.
+serde_json = "1.0.154"
 servo = { version = "=0.8.0", features = [
     "vello",
     "webgl",
@@ -64,6 +67,7 @@ slint = { version = "~1.17.1", default-features = false, features = [
     "unstable-winit-030",
 ] }
 slint-build = "~1.17.1"
+signal-hook-registry = "1.4.8"
 surfman = "0.14"
 tempfile = "3.27"
 thiserror = "2"

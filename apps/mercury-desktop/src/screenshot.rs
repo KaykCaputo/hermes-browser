@@ -149,6 +149,7 @@ pub(crate) fn start_screenshot(
             eprintln!(
                 "mercury-browser: failed to quit the event loop after the screenshot ({error}); exiting"
             );
+            crate::profile::remove_temporary_profile();
             std::process::exit(i32::from(outcome.exit_code()));
         }
     });

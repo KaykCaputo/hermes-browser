@@ -1,4 +1,5 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,7 +10,7 @@ use euclid::Scale;
 use log::info;
 use rustls::crypto::CryptoProvider;
 use servo::{
-    Cursor, LoadStatus, Opts, PixelFormat, Preferences, RenderingContext, ServoBuilder,
+    Cursor, LoadStatus, Opts, PixelFormat, PrefValue, Preferences, RenderingContext, ServoBuilder,
     WebViewBuilder,
 };
 use talaria_core::{BrowserEvent, LoadState, PageIcon, PointerCursor, TabEvent, TabId};
@@ -18,6 +19,8 @@ use url::Url;
 use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
+use crate::screen::ScreenMetrics;
+use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
 use crate::{ServoWebView, ServoWebViewError};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
@@ -60,15 +63,25 @@ impl servo::EventLoopWaker for EventLoopWaker {
 }
 
 /// Engine settings chosen at launch.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeOptions {
     /// Draw 2D canvases on the GPU (Servo's vello backend) instead of the CPU.
     pub gpu_canvas: bool,
+    /// Where Servo keeps cookies, HSTS, HTTP authentication and site storage. `None` keeps
+    /// nothing across runs.
+    pub config_dir: Option<PathBuf>,
+    /// Turn on servoshell's experimental web-platform features, except the async clipboard and
+    /// WebGPU (see `EXCLUDED_EXPERIMENTAL_PREFS`).
+    pub experimental_web_features: bool,
 }
 
 impl Default for RuntimeOptions {
     fn default() -> Self {
-        Self { gpu_canvas: true }
+        Self {
+            gpu_canvas: true,
+            config_dir: None,
+            experimental_web_features: true,
+        }
     }
 }
 
@@ -76,6 +89,10 @@ pub struct ServoRuntime {
     inner: servo::Servo,
     redraw_waker: EventLoopWaker,
     content_blocker: Rc<ContentBlocker>,
+    screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
+    /// Declared after `inner`, so it is dropped after this handle to Servo. Every web view's
+    /// delegate holds a clone too; see `AfterEngineCleanup`.
+    after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }
 
 impl ServoRuntime {
@@ -83,15 +100,26 @@ impl ServoRuntime {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
-        let options = mercury_options();
+        // Servo reads its saved files when it starts. Session cookies and HTTP credentials in
+        // them belong to an earlier session that was not ended (killed, or cut short by the
+        // shutdown watchdog); remove them from the files before Servo can load them.
+        if let Some(config_dir) = &runtime_options.config_dir {
+            clean_up_before_engine_start(config_dir);
+        }
+        let options = mercury_options(runtime_options.config_dir.clone());
         let multiprocess_enabled = options.multiprocess;
         let sandbox_enabled = options.sandbox;
         let inner = ServoBuilder::default()
             .opts(options)
-            .preferences(mercury_preferences(runtime_options))
+            .preferences(mercury_preferences(&runtime_options))
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
+        let after_engine_cleanup = runtime_options.config_dir.clone().map(|config_dir| {
+            // Session cookies saved by a run that did not end them (it was killed) end now.
+            end_session_cookies(&inner);
+            Rc::new(AfterEngineCleanup::new(config_dir))
+        });
         if multiprocess_enabled {
             info!(
                 "Servo content process isolation enabled; operating-system sandbox {}",
@@ -113,7 +141,14 @@ impl ServoRuntime {
             inner,
             redraw_waker,
             content_blocker,
+            screen_metrics: Rc::default(),
+            after_engine_cleanup,
         }
+    }
+
+    /// What pages see as the screen and window geometry; `None` lets Servo use its defaults.
+    pub fn set_screen_metrics(&self, metrics: Option<ScreenMetrics>) {
+        self.screen_metrics.set(metrics);
     }
 
     pub fn create_web_view(
@@ -132,6 +167,8 @@ impl ServoRuntime {
             frame_ready: frame_ready.clone(),
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
+            screen_metrics: Rc::clone(&self.screen_metrics),
+            _after_engine_cleanup: self.after_engine_cleanup.clone(),
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -153,13 +190,26 @@ impl ServoRuntime {
     }
 }
 
-fn mercury_options() -> Opts {
+impl Drop for ServoRuntime {
+    /// Ends the session cookies while Servo still runs, before it saves its cookie jar.
+    fn drop(&mut self) {
+        if self.after_engine_cleanup.is_some() {
+            end_session_cookies(&self.inner);
+        }
+    }
+}
+
+fn mercury_options(config_dir: Option<PathBuf>) -> Opts {
     Opts {
         // Servo 0.8.0 content-process isolation renders correctly in Mercury.
         // Keep the operating-system sandbox disabled independently: the
         // current Linux gaol path is not yet reliable enough for a release.
         multiprocess: true,
         sandbox: false,
+        // With `hard_fail`, a page that panics would exit the whole browser; without it,
+        // Servo replaces the page with its crash page and reports it through `notify_crashed`.
+        hard_fail: false,
+        config_dir,
         ..Opts::default()
     }
 }
@@ -174,12 +224,83 @@ impl servo::ServoDelegate for BrowserServoDelegate {
     }
 }
 
-fn mercury_preferences(runtime_options: RuntimeOptions) -> Preferences {
+fn mercury_preferences(runtime_options: &RuntimeOptions) -> Preferences {
     let mut preferences = Preferences::default();
     if runtime_options.gpu_canvas {
         preferences.dom_canvas_backend = "vello".to_owned();
     }
+    if runtime_options.experimental_web_features {
+        for name in EXPERIMENTAL_PREFS
+            .iter()
+            .filter(|name| !EXCLUDED_EXPERIMENTAL_PREFS.contains(name))
+        {
+            preferences.set_value(name, PrefValue::Bool(true));
+        }
+    }
+    // Always off: in Servo 0.8.0 `navigator.clipboard.readText()`/`writeText()` skip the
+    // permission and user-activation checks (`dom/clipboard/clipboard.rs`, the "check clipboard
+    // read permission" step is a TODO), and with no `ClipboardDelegate` installed Servo's default
+    // one reads and writes the system clipboard. Any secure page or iframe could read copied
+    // passwords on load. Re-enable only with a delegate that answers after a user gesture.
+    preferences.dom_async_clipboard_enabled = false;
+    // Always off while Mercury does not build Servo's `webgpu` cargo feature: the preference alone
+    // exposes `GPUCanvasContext` and other WebGPU names over unimplemented stubs, which makes
+    // feature detection report WebGPU that is not there.
+    preferences.dom_webgpu_enabled = false;
+    // Always off: in Servo 0.8.0 `getUserMedia` opens the camera and microphone without asking
+    // the embedder for permission (`mediadevices.rs`), so WebRTC must stay disabled until
+    // Mercury can gate device access itself.
+    preferences.dom_webrtc_enabled = false;
+    preferences.user_agent = firefox_compatible_user_agent(&preferences.user_agent);
     preferences
+}
+
+// From Servo's servoshell, https://github.com/servo/servo, tag `v0.8.0` (commit
+// `4e136d8ef31b7c4748fbfac606ca463f3efd7537`), `ports/servoshell/prefs.rs` lines 29-53
+// (`EXPERIMENTAL_PREFS`). Licensed under the Mozilla Public License 2.0.
+/// Preferences that servoshell turns on with `--enable-experimental-web-platform-features`:
+/// implemented in Servo but off by default. Mercury enables this list minus
+/// `EXCLUDED_EXPERIMENTAL_PREFS`.
+const EXPERIMENTAL_PREFS: &[&str] = &[
+    "dom_async_clipboard_enabled",
+    "dom_exec_command_enabled",
+    "dom_fontface_enabled",
+    "dom_indexeddb_enabled",
+    "dom_intersection_observer_enabled",
+    "dom_navigator_protocol_handlers_enabled",
+    "dom_notification_enabled",
+    "dom_offscreen_canvas_enabled",
+    "dom_permissions_enabled",
+    "dom_sanitizer_enabled",
+    "dom_storage_manager_api_enabled",
+    "dom_webgl2_enabled",
+    "dom_webgpu_enabled",
+    "layout_css_backdrop_filter_enabled",
+    "layout_css_columns_enabled",
+    "layout_css_container_queries_enabled",
+    "layout_css_ellipse_corners_enabled",
+    "layout_css_font_variations_enabled",
+];
+
+/// Entries of `EXPERIMENTAL_PREFS` that Mercury leaves off; the reasons are given where they
+/// are pinned in `mercury_preferences`.
+const EXCLUDED_EXPERIMENTAL_PREFS: &[&str] = &["dom_async_clipboard_enabled", "dom_webgpu_enabled"];
+
+/// Servo's user agent already names the Firefox release it matches, but carries a `Servo/x.y`
+/// token where Firefox has `Gecko/20100101`; some sites refuse to serve unrecognised browsers.
+/// Replaces that token, keeping the rest of Servo's string (platform and Firefox version).
+fn firefox_compatible_user_agent(servo_user_agent: &str) -> String {
+    servo_user_agent
+        .split(' ')
+        .map(|token| {
+            if token.starts_with("Servo/") {
+                "Gecko/20100101"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 struct BrowserDelegate {
@@ -188,6 +309,9 @@ struct BrowserDelegate {
     frame_ready: FrameReadySignal,
     load_metrics: RefCell<PageLoadMetrics>,
     content_blocker: Rc<ContentBlocker>,
+    screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
+    /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
+    _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }
 
 impl BrowserDelegate {
@@ -215,6 +339,12 @@ impl BrowserDelegate {
 }
 
 impl servo::WebViewDelegate for BrowserDelegate {
+    fn screen_geometry(&self, _web_view: servo::WebView) -> Option<servo::ScreenGeometry> {
+        self.screen_metrics
+            .get()
+            .map(ScreenMetrics::to_servo_geometry)
+    }
+
     fn load_web_resource(&self, web_view: servo::WebView, load: servo::WebResourceLoad) {
         self.content_blocker
             .handle_web_resource_load(Some(&web_view), load);
@@ -449,20 +579,39 @@ mod tests {
 
     #[test]
     fn enables_content_process_isolation() {
-        assert!(mercury_options().multiprocess);
+        assert!(mercury_options(None).multiprocess);
     }
 
     #[test]
     fn keeps_the_unreliable_os_sandbox_disabled() {
-        assert!(!mercury_options().sandbox);
+        assert!(!mercury_options(None).sandbox);
     }
 
     use super::*;
 
     #[test]
+    fn hard_fail_is_disabled() {
+        assert!(!mercury_options(None).hard_fail);
+    }
+
+    #[test]
+    fn config_dir_is_passed_to_servo() {
+        let config_dir = PathBuf::from("/profile/servo");
+
+        assert_eq!(
+            mercury_options(Some(config_dir.clone())).config_dir,
+            Some(config_dir)
+        );
+        assert_eq!(mercury_options(None).config_dir, None);
+    }
+
+    #[test]
     fn mercury_keeps_servos_default_script_settings() {
         for gpu_canvas in [true, false] {
-            let preferences = mercury_preferences(RuntimeOptions { gpu_canvas });
+            let preferences = mercury_preferences(&RuntimeOptions {
+                gpu_canvas,
+                ..RuntimeOptions::default()
+            });
 
             assert_eq!(
                 preferences.dom_script_asynch,
@@ -473,19 +622,126 @@ mod tests {
 
     #[test]
     fn gpu_canvas_is_enabled_by_default() {
-        let preferences = mercury_preferences(RuntimeOptions::default());
+        let preferences = mercury_preferences(&RuntimeOptions::default());
 
         assert_eq!(preferences.dom_canvas_backend, "vello");
     }
 
     #[test]
     fn gpu_canvas_can_be_disabled() {
-        let preferences = mercury_preferences(RuntimeOptions { gpu_canvas: false });
+        let preferences = mercury_preferences(&RuntimeOptions {
+            gpu_canvas: false,
+            ..RuntimeOptions::default()
+        });
 
         assert_eq!(
             preferences.dom_canvas_backend,
             Preferences::default().dom_canvas_backend
         );
+    }
+
+    fn preferences_with_experimental_web_features(enabled: bool) -> Preferences {
+        mercury_preferences(&RuntimeOptions {
+            experimental_web_features: enabled,
+            ..RuntimeOptions::default()
+        })
+    }
+
+    #[test]
+    fn experimental_features_enable_servoshells_list_except_the_excluded_ones() {
+        let preferences = preferences_with_experimental_web_features(true);
+
+        assert_eq!(EXPERIMENTAL_PREFS.len(), 18);
+        assert_eq!(
+            EXCLUDED_EXPERIMENTAL_PREFS,
+            &["dom_async_clipboard_enabled", "dom_webgpu_enabled"]
+        );
+        let enabled = EXPERIMENTAL_PREFS
+            .iter()
+            .filter(|name| !EXCLUDED_EXPERIMENTAL_PREFS.contains(name))
+            .collect::<Vec<_>>();
+        assert_eq!(enabled.len(), 16);
+        for name in enabled {
+            assert_eq!(preferences.get_value(name), PrefValue::Bool(true), "{name}");
+        }
+    }
+
+    #[test]
+    fn async_clipboard_stays_disabled() {
+        for enabled in [true, false] {
+            assert!(
+                !preferences_with_experimental_web_features(enabled).dom_async_clipboard_enabled
+            );
+        }
+    }
+
+    #[test]
+    fn webgpu_stays_disabled_while_the_webgpu_feature_is_not_built() {
+        for enabled in [true, false] {
+            assert!(!preferences_with_experimental_web_features(enabled).dom_webgpu_enabled);
+        }
+    }
+
+    #[test]
+    fn experimental_features_are_on_by_default() {
+        assert!(RuntimeOptions::default().experimental_web_features);
+    }
+
+    #[test]
+    fn experimental_features_can_be_disabled() {
+        let preferences = preferences_with_experimental_web_features(false);
+        let defaults = Preferences::default();
+
+        for name in EXPERIMENTAL_PREFS {
+            assert_eq!(
+                preferences.get_value(name),
+                defaults.get_value(name),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn webrtc_stays_disabled() {
+        for enabled in [true, false] {
+            assert!(!preferences_with_experimental_web_features(enabled).dom_webrtc_enabled);
+        }
+    }
+
+    #[test]
+    fn user_agent_drops_the_servo_token() {
+        assert_eq!(
+            firefox_compatible_user_agent(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Servo/0.8.0 Firefox/153.0"
+            ),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Gecko/20100101 Firefox/153.0"
+        );
+        assert_eq!(
+            firefox_compatible_user_agent(
+                "Mozilla/5.0 (X11; Linux aarch64; rv:153.0) Servo/0.8.0 Firefox/153.0"
+            ),
+            "Mozilla/5.0 (X11; Linux aarch64; rv:153.0) Gecko/20100101 Firefox/153.0"
+        );
+    }
+
+    #[test]
+    fn user_agent_without_a_servo_token_is_unchanged() {
+        let user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0";
+
+        assert_eq!(firefox_compatible_user_agent(user_agent), user_agent);
+    }
+
+    #[test]
+    fn the_user_agent_is_firefox_compatible_in_both_modes() {
+        for enabled in [true, false] {
+            let user_agent = preferences_with_experimental_web_features(enabled).user_agent;
+
+            assert!(!user_agent.contains("Servo/"), "{user_agent}");
+            assert!(
+                user_agent.contains(" Gecko/20100101 Firefox/"),
+                "{user_agent}"
+            );
+        }
     }
 
     #[test]

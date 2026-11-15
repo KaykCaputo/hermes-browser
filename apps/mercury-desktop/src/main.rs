@@ -4,39 +4,54 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use callbacks::connect_ui_callbacks;
-use cli::{CliOutcome, parse_arguments};
+use cli::{CliOutcome, LaunchOptions, parse_arguments, reject_non_utf8_paths};
 use engine::{connect_servo_runtime, shut_down_engine};
 use keyboard::connect_native_keyboard_input;
 use mercury_ui::MainWindow;
+use profile::{ActiveProfile, EXIT_PROFILE_IN_USE, ProfileInUse};
 use screenshot::{ScreenshotResult, start_screenshot};
 use slint::{BackendSelector, ComponentHandle, LogicalSize};
 use talaria_core::{BrowserController, TabActivation};
-use talaria_servo::{RuntimeOptions, run_content_process_if_requested};
+use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
 mod callbacks;
 mod cli;
+mod crash_handler;
 mod engine;
 mod keyboard;
 mod keyutils;
+mod panic_hook;
 #[cfg(target_os = "macos")]
 mod platform_macos;
+mod profile;
 mod rendering;
+mod screen_metrics;
 mod screenshot;
 mod shortcuts;
 mod shutdown;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {
+    // Before the content-process branch, so that content processes report their crashes too.
+    crash_handler::install();
+    std::panic::set_hook(Box::new(panic_hook::panic_hook));
+
     if run_content_process_if_requested()? {
         return Ok(ExitCode::SUCCESS);
     }
+    // With the early environment changes: before any thread exists, and only in the browser.
+    record_browser_process_id();
 
-    let options = match parse_arguments(
-        std::env::args_os()
-            .skip(1)
-            .map(|argument| argument.to_string_lossy().into_owned()),
-    ) {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let parsed = reject_non_utf8_paths(&arguments).unwrap_or_else(|| {
+        parse_arguments(
+            arguments
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+        )
+    });
+    let options = match parsed {
         CliOutcome::Run(options) => options,
         CliOutcome::PrintAndExit { text, code } => {
             if code == 0 {
@@ -49,7 +64,23 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     };
 
     use_automatic_gpu_selection();
-    select_hardware_accelerated_backend(options.background || options.screenshot.is_some())?;
+    // Dropped last, after the engine has saved its data: a temporary profile is deleted then.
+    let profile = match profile::open_profile(
+        options.profile_dir.as_deref(),
+        options.is_automated(),
+        &profile::TemporaryProfileArea::for_this_run(),
+    ) {
+        Ok(profile) => profile,
+        Err(ProfileInUse { root }) => {
+            eprintln!(
+                "mercury-browser: the profile at {} is in use by another Mercury Browser; \
+                 close it or choose another --profile-dir",
+                root.display()
+            );
+            return Ok(ExitCode::from(EXIT_PROFILE_IN_USE));
+        }
+    };
+    select_hardware_accelerated_backend(options.is_automated())?;
 
     let window = MainWindow::new()?;
     if let Some((width, height)) = options.window_size {
@@ -65,9 +96,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         &window,
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
-        RuntimeOptions {
-            gpu_canvas: options.gpu_canvas,
-        },
+        runtime_options(&options, &profile),
     )?;
     sync_ui(&window, &controller.borrow());
     connect_ui_callbacks(
@@ -110,6 +139,15 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     Ok(ExitCode::from(exit_code))
 }
 
+/// Engine settings for this run: the launch options and the profile's Servo directory.
+fn runtime_options(options: &LaunchOptions, profile: &ActiveProfile) -> RuntimeOptions {
+    RuntimeOptions {
+        gpu_canvas: options.gpu_canvas,
+        config_dir: profile.servo_config_dir(),
+        experimental_web_features: options.experimental_web_features,
+    }
+}
+
 /// The first resolvable address becomes the initial URL of the first tab; each further one
 /// opens a background tab. Addresses that do not resolve are reported and skipped.
 fn open_start_up_tabs(controller: &mut BrowserController, addresses: &[String]) {
@@ -142,8 +180,10 @@ fn use_automatic_gpu_selection() {
         // such as `1` on a single-GPU machine causes every GL context to try a
         // nonexistent second device before falling back to the default GPU.
         //
-        // SAFETY: This is the first operation in main, before Slint, Servo, or
-        // GStreamer can create worker threads or read the process environment.
+        // SAFETY: This runs in main before Slint, Servo, or GStreamer can create worker
+        // threads or read the process environment. The work done before it (installing the
+        // crash handler and panic hook, the content-process check, parsing the command line)
+        // starts no threads and does not read DRI_PRIME.
         unsafe {
             std::env::remove_var("DRI_PRIME");
         }
@@ -248,6 +288,38 @@ mod tests {
                 Some("https://a.test/".to_owned()),
                 Some("https://b.test/".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn the_engine_keeps_its_data_in_the_opened_profile() {
+        let root = std::env::temp_dir().join(format!(
+            "mercury-runtime-options-test-{}",
+            std::process::id()
+        ));
+        let area = profile::TemporaryProfileArea {
+            directory: root.join("area"),
+            ..profile::TemporaryProfileArea::for_this_run()
+        };
+        let profile =
+            profile::open_profile(Some(&root), false, &area).expect("the profile is free");
+        let options = LaunchOptions {
+            gpu_canvas: false,
+            experimental_web_features: false,
+            ..LaunchOptions::default()
+        };
+
+        let runtime_options = runtime_options(&options, &profile);
+        drop(profile);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(
+            runtime_options,
+            RuntimeOptions {
+                gpu_canvas: false,
+                config_dir: Some(root.join("servo")),
+                experimental_web_features: false,
+            }
         );
     }
 
