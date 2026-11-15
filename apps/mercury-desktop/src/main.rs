@@ -11,7 +11,7 @@ use mercury_ui::MainWindow;
 use screenshot::{ScreenshotResult, start_screenshot};
 use slint::{BackendSelector, ComponentHandle, LogicalSize};
 use talaria_core::{BrowserController, TabActivation};
-use talaria_servo::run_content_process_if_requested;
+use talaria_servo::{RuntimeOptions, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
 mod callbacks;
@@ -61,6 +61,9 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         &window,
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
+        RuntimeOptions {
+            gpu_canvas: options.gpu_canvas,
+        },
     )?;
     sync_ui(&window, &controller.borrow());
     connect_ui_callbacks(

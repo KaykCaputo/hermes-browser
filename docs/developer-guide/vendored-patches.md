@@ -47,6 +47,17 @@ Media uses Servo's upstream GStreamer backend without a local patch. It still ne
 
 Servo 0.8.0's GPU 2D canvas (`vello` feature, preference `dom_canvas_backend = "vello"`) does not compile as published: in wgpu 30, which vello 0.11 requires, `BufferSlice::get_mapped_range()` returns a `Result`. The vendored copy handles the error in `VelloDrawTarget::map_read` the way that function already handles a failed `map_async`; `third_party/servo-canvas/MERCURY.md` describes the change. The first commit that added the directory holds the crate exactly as published, so `git diff` against it shows the whole patch.
 
+Mercury draws 2D canvases on the GPU by default. `--disable-gpu-canvas` selects Servo's CPU backend instead. Check both modes with `tests/pages/canvas-readback.html`, whose read-back lines must all end in `PASS`:
+
+```bash
+./target/release/mercury-browser --screenshot gpu.png --window-size 1000x800 \
+  "file://$PWD/tests/pages/canvas-readback.html"
+./target/release/mercury-browser --disable-gpu-canvas --screenshot cpu.png --window-size 1000x800 \
+  "file://$PWD/tests/pages/canvas-readback.html"
+```
+
+To confirm which backend drew, run with `RUST_LOG=vello=debug,wgpu_core=trace`. With the GPU canvas, a page that creates a 2D canvas logs a second `Created Device DeviceId(…)` (wgpu 30; Slint's wgpu 29 logs `Created Device Id(…)`) and many `vello` lines. With `--disable-gpu-canvas` only Slint's device appears and nothing mentions `vello`.
+
 ## Remove a patch
 
 When an equivalent fix reaches the Servo dependency graph used by Mercury:

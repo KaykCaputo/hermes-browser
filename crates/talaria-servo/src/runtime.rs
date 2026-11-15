@@ -58,6 +58,19 @@ impl servo::EventLoopWaker for EventLoopWaker {
     }
 }
 
+/// Engine settings chosen at launch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RuntimeOptions {
+    /// Draw 2D canvases on the GPU (Servo's vello backend) instead of the CPU.
+    pub gpu_canvas: bool,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self { gpu_canvas: true }
+    }
+}
+
 pub struct ServoRuntime {
     inner: servo::Servo,
     redraw_waker: EventLoopWaker,
@@ -65,7 +78,7 @@ pub struct ServoRuntime {
 }
 
 impl ServoRuntime {
-    pub fn new(event_loop_waker: EventLoopWaker) -> Self {
+    pub fn new(event_loop_waker: EventLoopWaker, runtime_options: RuntimeOptions) -> Self {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
@@ -74,7 +87,7 @@ impl ServoRuntime {
         let sandbox_enabled = options.sandbox;
         let inner = ServoBuilder::default()
             .opts(options)
-            .preferences(mercury_preferences())
+            .preferences(mercury_preferences(runtime_options))
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
@@ -157,8 +170,12 @@ impl servo::ServoDelegate for BrowserServoDelegate {
     }
 }
 
-fn mercury_preferences() -> Preferences {
-    Preferences::default()
+fn mercury_preferences(runtime_options: RuntimeOptions) -> Preferences {
+    let mut preferences = Preferences::default();
+    if runtime_options.gpu_canvas {
+        preferences.dom_canvas_backend = "vello".to_owned();
+    }
+    preferences
 }
 
 struct BrowserDelegate {
@@ -356,16 +373,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mercury_keeps_servos_default_canvas_and_script_settings() {
-        let preferences = mercury_preferences();
+    fn mercury_keeps_servos_default_script_settings() {
+        for gpu_canvas in [true, false] {
+            let preferences = mercury_preferences(RuntimeOptions { gpu_canvas });
+
+            assert_eq!(
+                preferences.dom_script_asynch,
+                Preferences::default().dom_script_asynch
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_canvas_is_enabled_by_default() {
+        let preferences = mercury_preferences(RuntimeOptions::default());
+
+        assert_eq!(preferences.dom_canvas_backend, "vello");
+    }
+
+    #[test]
+    fn gpu_canvas_can_be_disabled() {
+        let preferences = mercury_preferences(RuntimeOptions { gpu_canvas: false });
 
         assert_eq!(
             preferences.dom_canvas_backend,
             Preferences::default().dom_canvas_backend
-        );
-        assert_eq!(
-            preferences.dom_script_asynch,
-            Preferences::default().dom_script_asynch
         );
     }
 

@@ -1,12 +1,25 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct LaunchOptions {
     pub urls: Vec<String>,
     pub screenshot: Option<ScreenshotOptions>,
     pub window_size: Option<(u32, u32)>,
     pub background: bool,
+    pub gpu_canvas: bool,
+}
+
+impl Default for LaunchOptions {
+    fn default() -> Self {
+        Self {
+            urls: Vec::new(),
+            screenshot: None,
+            window_size: None,
+            background: false,
+            gpu_canvas: true,
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -34,6 +47,7 @@ Options:
                                    Wait this long after the page has loaded (default 1000)
   --window-size <W>x<H>            Set the window's logical size, for example 1280x800
   --background                     Start without taking focus (for automated runs)
+  --disable-gpu-canvas             Draw 2D canvases on the CPU
   --help                           Print this help and exit
   --version                        Print the version and exit";
 
@@ -54,6 +68,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
     let mut screenshot_delay = None;
     let mut window_size = None;
     let mut background = false;
+    let mut gpu_canvas = true;
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -89,6 +104,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
                 })?);
             }
             "--background" => background = true,
+            "--disable-gpu-canvas" => gpu_canvas = false,
             _ if argument.starts_with("-psn_") => {}
             _ if argument.starts_with('-') => {
                 return Err(format!("unknown option '{argument}'"));
@@ -111,6 +127,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
         screenshot,
         window_size,
         background,
+        gpu_canvas,
     }))
 }
 
@@ -190,6 +207,7 @@ mod tests {
                 }),
                 window_size: Some((800, 600)),
                 background: false,
+                gpu_canvas: true,
             })
         );
     }
@@ -322,6 +340,33 @@ mod tests {
 
         assert!(text.contains("--background"));
         assert!(text.contains("Start without taking focus (for automated runs)"));
+    }
+
+    #[test]
+    fn gpu_canvas_is_on_by_default_and_disable_gpu_canvas_turns_it_off() {
+        let CliOutcome::Run(default_options) = parse(&["https://a.test"]) else {
+            panic!("a URL alone should run the browser");
+        };
+        assert!(default_options.gpu_canvas);
+
+        assert_eq!(
+            parse(&["--disable-gpu-canvas", "https://a.test"]),
+            CliOutcome::Run(LaunchOptions {
+                urls: vec!["https://a.test".to_owned()],
+                gpu_canvas: false,
+                ..LaunchOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn help_describes_disable_gpu_canvas() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains("--disable-gpu-canvas"));
+        assert!(text.contains("Draw 2D canvases on the CPU"));
     }
 
     #[test]

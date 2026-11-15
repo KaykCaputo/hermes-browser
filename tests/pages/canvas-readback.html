@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury canvas read-back test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; font-family: sans-serif; }
+  canvas, img { display: inline-block; vertical-align: top; margin: 10px; border: 1px solid #cccccc; }
+  #results { margin: 0 10px; font: bold 22px/1.35 monospace; }
+  .pass { color: #006400; }
+  .fail { color: #b00000; }
+</style>
+</head>
+<body>
+  <canvas id="canvas" width="600" height="260"></canvas>
+  <div id="results"></div>
+  <script>
+    const results = document.getElementById("results");
+    const canvas = document.getElementById("canvas");
+    const context = canvas.getContext("2d");
+
+    function report(label, actual, expected) {
+      const ok = actual !== null
+        && actual.length === expected.length
+        && expected.every((value, index) => Math.abs(actual[index] - value) <= 1);
+      const line = document.createElement("div");
+      line.className = ok ? "pass" : "fail";
+      const shown = actual === null ? "nothing" : "[" + Array.from(actual).join(",") + "]";
+      line.textContent = label + " " + shown + " want [" + expected.join(",") + "] "
+        + (ok ? "PASS" : "FAIL");
+      results.appendChild(line);
+    }
+
+    function pixel(ctx, x, y) {
+      return ctx.getImageData(x, y, 1, 1).data;
+    }
+
+    // Solid swatches at known positions; the read-backs below sample their centres.
+    const swatches = [
+      { label: "red", style: "rgb(255, 0, 0)", x: 10, rgba: [255, 0, 0, 255] },
+      { label: "green", style: "rgb(0, 128, 0)", x: 70, rgba: [0, 128, 0, 255] },
+      { label: "blue", style: "rgb(0, 0, 255)", x: 130, rgba: [0, 0, 255, 255] },
+      { label: "mixed", style: "rgb(18, 52, 86)", x: 190, rgba: [18, 52, 86, 255] },
+      { label: "half-alpha", style: "rgba(255, 0, 0, 0.5)", x: 250, rgba: [255, 0, 0, 128] },
+    ];
+    for (const swatch of swatches) {
+      context.fillStyle = swatch.style;
+      context.fillRect(swatch.x, 10, 50, 50);
+    }
+
+    // A second canvas, drawn onto the first with drawImage.
+    const source = document.createElement("canvas");
+    source.width = 50;
+    source.height = 50;
+    const sourceContext = source.getContext("2d");
+    sourceContext.fillStyle = "rgb(255, 0, 255)";
+    sourceContext.fillRect(0, 0, 50, 50);
+    sourceContext.fillStyle = "rgb(255, 255, 0)";
+    sourceContext.fillRect(10, 10, 30, 30);
+    context.drawImage(source, 310, 10);
+
+    // Visible drawing only: gradient, curved path, round-capped line, text.
+    const gradient = context.createLinearGradient(380, 0, 590, 0);
+    gradient.addColorStop(0, "#0050ff");
+    gradient.addColorStop(1, "#ff8000");
+    context.fillStyle = gradient;
+    context.fillRect(380, 10, 210, 50);
+
+    context.fillStyle = "#800080";
+    context.beginPath();
+    context.moveTo(10, 200);
+    context.bezierCurveTo(60, 80, 160, 80, 210, 200);
+    context.quadraticCurveTo(110, 250, 10, 200);
+    context.fill();
+
+    context.strokeStyle = "#000000";
+    context.lineWidth = 16;
+    context.lineCap = "round";
+    context.beginPath();
+    context.moveTo(250, 230);
+    context.lineTo(560, 110);
+    context.stroke();
+
+    context.fillStyle = "#000000";
+    context.font = "bold 30px sans-serif";
+    context.fillText("read-back", 260, 100);
+
+    // getImageData read-backs.
+    for (const swatch of swatches) {
+      report("getImageData " + swatch.label, pixel(context, swatch.x + 25, 35), swatch.rgba);
+    }
+    report("getImageData untouched", pixel(context, 5, 255), [0, 0, 0, 0]);
+    report("drawImage edge", pixel(context, 315, 15), [255, 0, 255, 255]);
+    report("drawImage centre", pixel(context, 335, 35), [255, 255, 0, 255]);
+
+    // toDataURL: decode the PNG into an image in the document (which holds back the load
+    // event), then read a swatch back from a fresh canvas.
+    const url = canvas.toDataURL("image/png");
+    const prefix = "data:image/png;base64,";
+    const urlLine = document.createElement("div");
+    const prefixOk = url.startsWith(prefix) && url.length > 1000;
+    urlLine.className = prefixOk ? "pass" : "fail";
+    urlLine.textContent = "toDataURL " + url.slice(0, prefix.length) + " length "
+      + url.length + " " + (prefixOk ? "PASS" : "FAIL");
+    results.appendChild(urlLine);
+
+    const decoded = document.createElement("img");
+    decoded.width = 300;
+    decoded.height = 130;
+    decoded.alt = "toDataURL round trip";
+    decoded.onload = () => {
+      const check = document.createElement("canvas");
+      check.width = 600;
+      check.height = 260;
+      const checkContext = check.getContext("2d");
+      checkContext.drawImage(decoded, 0, 0);
+      report("toDataURL red", pixel(checkContext, 35, 35), [255, 0, 0, 255]);
+      report("toDataURL blue", pixel(checkContext, 155, 35), [0, 0, 255, 255]);
+    };
+    decoded.onerror = () => report("toDataURL decode", null, [1]);
+    decoded.src = url;
+    document.body.insertBefore(decoded, results);
+  </script>
+</body>
+</html>

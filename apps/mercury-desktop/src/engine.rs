@@ -11,7 +11,8 @@ use talaria_core::{
     dispatch_command,
 };
 use talaria_servo::{
-    EventLoopWaker, NEW_TAB_URL, ServoRuntime, ServoWebView, ServoWebViewError, ViewportSize,
+    EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ServoRuntime, ServoWebView, ServoWebViewError,
+    ViewportSize,
 };
 
 use crate::rendering::BrowserRenderingContext;
@@ -62,6 +63,7 @@ pub(crate) fn connect_servo_runtime(
     window: &MainWindow,
     controller: Rc<RefCell<BrowserController>>,
     web_view_focused: Rc<Cell<bool>>,
+    runtime_options: RuntimeOptions,
 ) -> Result<(), slint::SetRenderingNotifierError> {
     let event_loop_waker = EventLoopWaker::new(|| {
         let _queued = slint::invoke_from_event_loop(pump_after_wake);
@@ -70,7 +72,7 @@ pub(crate) fn connect_servo_runtime(
     let engine = Rc::new(Engine {
         window: window.as_weak(),
         state: RefCell::new(EngineState {
-            runtime: ServoRuntime::new(event_loop_waker),
+            runtime: ServoRuntime::new(event_loop_waker, runtime_options),
             controller,
             web_view_focused,
             rendering_context: None,

@@ -24,10 +24,17 @@ glow = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
-# The `vello` (GPU canvas) feature is off: servo-canvas 0.8.0's vello backend does not compile
-# against wgpu 30 (`vello_backend.rs:756`, `get_mapped_range` returns a `Result`). Re-enable it when a
-# Servo release fixes that.
-servo = { version = "=0.8.0", features = ["webgl", "subtlecrypto", "brotli-compression-stream"] }
+# The `vello` (GPU canvas) feature is on through the vendored fix in `third_party/servo-canvas`:
+# servo-canvas 0.8.0's vello backend does not compile against wgpu 30 as published
+# (`vello_backend.rs:756`, `get_mapped_range` returns a `Result`). See its MERCURY.md.
+# The build therefore carries two `wgpu` majors: 29 for Slint's FemtoVG renderer (Slint is held at
+# 1.17, see below) and 30 for vello 0.11, which Servo's GPU canvas requires. They do not share state.
+servo = { version = "=0.8.0", features = [
+    "vello",
+    "webgl",
+    "subtlecrypto",
+    "brotli-compression-stream",
+] }
 # Slint is held at 1.17: i-slint-compiler 1.18 needs icu_properties ^2.2, while Servo 0.8.0's
 # mozjs_sys pins icu_capi =2.1.2 (icu_properties ~2.1). Move to 1.18 when one of them relaxes its pin.
 slint = { version = "~1.17.1", default-features = false, features = [
