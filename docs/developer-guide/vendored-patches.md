@@ -13,7 +13,7 @@ Mercury vendors code when a pinned Servo dependency needs a small, reviewable co
 | --- | --- | --- |
 | `third_party/gaol` | 0.2.1 | Modern Linux syscall compatibility and a non-zero file-size limit for Servo shared-memory IPC |
 | `third_party/surfman` | 0.14.0 | Avoid process-global `DRI_PRIME=1` selection and its race with media initialization |
-| `third_party/servo-canvas` | 0.8.0 | Make Servo's GPU 2D-canvas backend (`vello` feature) build against wgpu 30, fall back to the CPU backend when it cannot start, and survive failed renders |
+| `third_party/servo-canvas` | 0.8.0 | Make Servo's GPU 2D-canvas backend (`vello` feature) build against wgpu 30, fall back to the CPU backend when it cannot start, and survive failed renders and read-backs |
 
 The gaol and Surfman patches were introduced by [Hermes Browser](https://github.com/KaykCaputo/hermes-browser), the project Mercury is derived from, and Mercury continues to carry them. Mercury added the servo-canvas patch.
 
@@ -51,6 +51,7 @@ The vendored copy also makes the GPU backend robust:
 
 - **CPU fallback.** When a canvas cannot get a GPU adapter or device, or vello's renderer cannot be created, that canvas is drawn by the CPU backend (the one `--disable-gpu-canvas` selects). One warning, `GPU 2D canvas unavailable (<reason>); drawing 2D canvases on the CPU`, is logged per process, and later canvases go straight to the CPU backend without trying the GPU again.
 - **Failed renders** are logged once (`VELLO RENDER ERROR …`) instead of panicking Servo's Canvas thread, which would leave the session without any 2D canvas.
+- **Failed read-backs** unmap the buffer, so the next read-back on that canvas can succeed.
 
 `third_party/servo-canvas/MERCURY.md` lists each change, why it is needed and when it can be dropped. The first commit that added the directory holds the crate exactly as published, so `git diff 60ee59f -- third_party/servo-canvas` shows the whole patch.
 

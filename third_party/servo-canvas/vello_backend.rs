@@ -796,6 +796,9 @@ impl VelloDrawTarget {
                 vello::util::block_on_wgpu(&self.device, receiver.receive()).unwrap()
             {
                 log::warn!("VELLO WGPU MAP ASYNC ERROR {error}");
+                // Mercury: wgpu 30 counts the buffer as mapped from the
+                // `map_async` call on; unmap so the next read-back can map it.
+                self.rendered_buffer.unmap();
                 return f(None);
             }
             match buf_slice.get_mapped_range() {

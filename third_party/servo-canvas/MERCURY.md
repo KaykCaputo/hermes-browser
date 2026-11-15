@@ -14,7 +14,7 @@ repository's MPL-2.0 `LICENSE` file applies to this directory.
 Mercury enables Servo's `vello` feature, the GPU 2D-canvas backend. The first
 commit that added this directory (`60ee59f`) holds the crate as published, so
 `git diff 60ee59f -- third_party/servo-canvas` shows every change below.
-Changes 2 and 3 are marked with `Mercury:` comments in the source.
+Changes 2–4 are marked with `Mercury:` comments in the source.
 
 ## 1. Build with wgpu 30 (`vello_backend.rs`, `VelloDrawTarget::map_read`)
 
@@ -64,8 +64,24 @@ render that succeeds draws the kept scene.
 
 Drop it when Servo handles render errors.
 
+## 4. Keep a canvas usable after a failed read-back (`vello_backend.rs`, `map_read`)
+
+wgpu 30 records a buffer as mapped as soon as `map_async` is called
+(`wgpu-30.0.2/src/api/buffer.rs`, `BufferSlice::map_async`), before the result
+is known. As published, the failure path returns without `unmap()`, so every
+later read-back on that canvas fails at once. Now that path calls `unmap()`
+first. When wgpu-core never mapped the buffer, `unmap()` reports a validation
+error to the device's uncaptured-error handler, which logs it
+(`VELLO WGPU ERROR`); it does not panic.
+
+On this error path, and on the `get_mapped_range()` error path of change 1,
+the callback receives `None`: `getImageData` and friends see transparent black,
+and the canvas's displayed frame is zero-filled as well.
+
+Drop it when Servo unmaps on this path.
+
 ## Removing this directory
 
 Remove the `[patch.crates-io]` entry and this directory once a Servo release
-compiles with the `vello` feature and contains equivalents of changes 2 and 3, or
+compiles with the `vello` feature and contains equivalents of changes 2–4, or
 once Mercury no longer needs them.
