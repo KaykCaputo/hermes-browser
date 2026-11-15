@@ -49,7 +49,6 @@ serde_json = "1"
 # (`vello_backend.rs:756`, `get_mapped_range` returns a `Result`). See its MERCURY.md.
 # The build therefore carries two `wgpu` majors: 29 for Slint's FemtoVG renderer (Slint is held at
 # 1.17, see below) and 30 for vello 0.11, which Servo's GPU canvas requires. They do not share state.
-serde_json = "1.0.154"
 servo = { version = "=0.8.0", features = [
     "vello",
     "webgl",
