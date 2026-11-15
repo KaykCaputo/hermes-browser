@@ -9,13 +9,16 @@ adblock.workspace = true
 content-security-policy.workspace = true
 dpi.workspace = true
 euclid.workspace = true
-libc.workspace = true
 log.workspace = true
 rustls.workspace = true
 serde_json.workspace = true
 servo.workspace = true
 talaria-core = { path = "../talaria-core" }
 url.workspace = true
+
+# The content process's parent watchdog (`content_process.rs`) is Unix-only.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 # Servo defaults to a no-op media backend. Linux builds opt into the production
 # GStreamer backend so HTML audio/video, Web Audio, and WebRTC have a real media

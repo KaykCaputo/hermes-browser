@@ -10,7 +10,9 @@ mod screen;
 mod session_data;
 mod web_view;
 
-pub use content_process::{ContentProcessArgumentError, run_content_process_if_requested};
+pub use content_process::{
+    ContentProcessArgumentError, record_browser_process_id, run_content_process_if_requested,
+};
 pub use error::ServoWebViewError;
 pub use opengl_context::ViewportSize;
 pub use panics::{hard_fail_in_single_process, should_panic_hook_suppress_termination};

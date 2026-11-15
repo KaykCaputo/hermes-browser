@@ -3,6 +3,23 @@ use std::fmt;
 
 const CONTENT_PROCESS_ARGUMENT: &str = "--content-process";
 
+/// Environment variable in which the browser records its own process id for its content
+/// processes, which inherit it.
+const BROWSER_PROCESS_ID_VARIABLE: &str = "MERCURY_BROWSER_PROCESS_ID";
+
+/// Records this browser's process id for the content processes Servo will start, so that they
+/// can tell when it has gone (`exit_when_the_browser_process_is_gone`).
+///
+/// Call it in `main` after `run_content_process_if_requested` has returned `false` (a content
+/// process must keep its browser's value) and before any other thread exists.
+pub fn record_browser_process_id() {
+    // SAFETY: called on the main thread before any other thread has been started, so nothing
+    // can read the environment concurrently.
+    unsafe {
+        std::env::set_var(BROWSER_PROCESS_ID_VARIABLE, std::process::id().to_string());
+    }
+}
+
 /// Runs Servo's unprivileged content-process entry point when this executable
 /// was spawned by the multiprocess constellation.
 ///
@@ -29,7 +46,11 @@ pub fn run_content_process_if_requested() -> Result<bool, ContentProcessArgument
 /// shutting Servo down (for example `kill -9`, or a crash), nothing tells the content process
 /// to stop, and it would keep running as an orphan with its memory and open pages. On Unix
 /// an orphan is adopted by another process, so its parent id changes: checking once a second
-/// is cheap and catches every way the browser can end. The process ends with `_exit`, which
+/// is cheap and catches every way the browser can end. The browser's id comes from
+/// `MERCURY_BROWSER_PROCESS_ID` (see `record_browser_process_id`), not from a guess: the
+/// browser may itself be process 1, as a container's entry process. If the variable is missing
+/// or unparsable (a browser that did not record it), the parent at start-up is watched instead
+/// and a warning is logged; a healthy child keeps running. The process ends with `_exit`, which
 /// skips destructors and `atexit` handlers that could otherwise run while Servo's script
 /// threads are still executing.
 ///
@@ -41,7 +62,19 @@ pub fn run_content_process_if_requested() -> Result<bool, ContentProcessArgument
 fn exit_when_the_browser_process_is_gone() {
     use std::time::Duration;
 
-    let browser_process_id = std::os::unix::process::parent_id();
+    let recorded = std::env::var(BROWSER_PROCESS_ID_VARIABLE).ok();
+    let parent_at_start = std::os::unix::process::parent_id();
+    let browser_process_id = expected_browser_process_id(recorded.as_deref(), parent_at_start);
+    if recorded
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_none()
+    {
+        log::warn!(
+            "{BROWSER_PROCESS_ID_VARIABLE} is missing or invalid; watching the parent at start-up \
+             ({parent_at_start}) instead"
+        );
+    }
     let spawn_result = std::thread::Builder::new()
         .name("ParentWatchdog".to_owned())
         .spawn(move || {
@@ -62,13 +95,20 @@ fn exit_when_the_browser_process_is_gone() {
 #[cfg(not(unix))]
 fn exit_when_the_browser_process_is_gone() {}
 
-/// Whether the browser process that started this content process is gone, given the parent id
-/// recorded at start-up and the current one.
+/// Whether the browser process is gone: the current parent is no longer the expected browser
+/// process. A browser that is itself process 1 stays "present" as long as it is the parent.
 #[cfg_attr(not(unix), allow(dead_code))]
-fn parent_changed(recorded: u32, current: u32) -> bool {
-    // A recorded parent of 1 (init or launchd) means the browser had already exited and this
-    // process was adopted before it could record its real parent.
-    recorded == 1 || current != recorded
+fn parent_changed(expected: u32, current: u32) -> bool {
+    current != expected
+}
+
+/// The browser process this content process belongs to: the id recorded in the environment,
+/// or the parent at start-up when there is no usable record.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn expected_browser_process_id(recorded: Option<&str>, parent_at_start: u32) -> u32 {
+    recorded
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(parent_at_start)
 }
 
 fn content_process_token(
@@ -106,7 +146,10 @@ impl Error for ContentProcessArgumentError {}
 
 #[cfg(test)]
 mod tests {
-    use super::{ContentProcessArgumentError, content_process_token, parent_changed};
+    use super::{
+        ContentProcessArgumentError, content_process_token, expected_browser_process_id,
+        parent_changed,
+    };
 
     fn arguments(values: &[&str]) -> impl Iterator<Item = String> {
         values.iter().map(|value| (*value).to_owned())
@@ -124,8 +167,33 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_parent_of_one_means_the_browser_was_already_gone() {
-        assert!(parent_changed(1, 1));
+    fn a_browser_running_as_process_one_is_still_there() {
+        assert!(!parent_changed(1, 1));
+    }
+
+    #[test]
+    fn the_recorded_browser_process_id_is_the_expected_parent() {
+        assert_eq!(expected_browser_process_id(Some("4242"), 1), 4242);
+        assert_eq!(expected_browser_process_id(Some("1"), 1), 1);
+    }
+
+    #[test]
+    fn without_a_usable_record_the_parent_at_start_is_expected() {
+        assert_eq!(expected_browser_process_id(None, 4242), 4242);
+        assert_eq!(expected_browser_process_id(Some(""), 4242), 4242);
+        assert_eq!(
+            expected_browser_process_id(Some("not a number"), 4242),
+            4242
+        );
+        assert_eq!(expected_browser_process_id(Some("-5"), 4242), 4242);
+    }
+
+    #[test]
+    fn a_child_whose_browser_died_before_it_started_is_detected() {
+        // The browser (4242) recorded itself, then died; the child was adopted by process 1.
+        let expected = expected_browser_process_id(Some("4242"), 1);
+
+        assert!(parent_changed(expected, 1));
     }
 
     #[test]

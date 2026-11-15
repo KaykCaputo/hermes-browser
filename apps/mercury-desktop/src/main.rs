@@ -12,7 +12,7 @@ use profile::{ActiveProfile, EXIT_PROFILE_IN_USE, ProfileInUse};
 use screenshot::{ScreenshotResult, start_screenshot};
 use slint::{BackendSelector, ComponentHandle, LogicalSize};
 use talaria_core::{BrowserController, TabActivation};
-use talaria_servo::{RuntimeOptions, run_content_process_if_requested};
+use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
 mod callbacks;
@@ -36,6 +36,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     if run_content_process_if_requested()? {
         return Ok(ExitCode::SUCCESS);
     }
+    // With the early environment changes: before any thread exists, and only in the browser.
+    record_browser_process_id();
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let parsed = reject_non_utf8_profile_dir(&arguments).unwrap_or_else(|| {
