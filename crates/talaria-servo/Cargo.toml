@@ -12,6 +12,7 @@ euclid.workspace = true
 libc.workspace = true
 log.workspace = true
 rustls.workspace = true
+serde_json.workspace = true
 servo.workspace = true
 talaria-core = { path = "../talaria-core" }
 url.workspace = true

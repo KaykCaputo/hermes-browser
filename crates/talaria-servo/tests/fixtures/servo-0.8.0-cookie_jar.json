@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "cookies_map": {
+    "httpbin.org": [
+      {
+        "cookie": "mercury=1; Secure; Path=/; Domain=httpbin.org",
+        "host_only": true,
+        "persistent": false,
+        "creation_time": {
+          "secs_since_epoch": 1794774806,
+          "nanos_since_epoch": 817135000
+        },
+        "last_access": {
+          "secs_since_epoch": 1794774809,
+          "nanos_since_epoch": 229283000
+        },
+        "expiry_time": null
+      }
+    ],
+    "127.0.0.1": [
+      {
+        "cookie": "persistent_cookie=PERSISTVALUE42; Path=/; Domain=127.0.0.1; Max-Age=86400; Expires=Mon, 16 Nov 2026 21:18:55 GMT",
+        "host_only": true,
+        "persistent": true,
+        "creation_time": {
+          "secs_since_epoch": 1794777535,
+          "nanos_since_epoch": 146644000
+        },
+        "last_access": {
+          "secs_since_epoch": 1794777565,
+          "nanos_since_epoch": 768949000
+        },
+        "expiry_time": {
+          "secs_since_epoch": 1794863935,
+          "nanos_since_epoch": 146643000
+        }
+      }
+    ]
+  },
+  "max_per_host": 150
+}

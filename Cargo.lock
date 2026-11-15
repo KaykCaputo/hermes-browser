@@ -10716,6 +10716,7 @@ dependencies = [
  "libc",
  "log",
  "rustls",
+ "serde_json",
  "servo",
  "talaria-core",
  "url",
