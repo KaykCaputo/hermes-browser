@@ -229,8 +229,10 @@ fn an_address_change_leaves_cursor_and_status_text_to_the_engine() {
     assert_eq!(state.status_text(), Some("https://a.test/next"));
 }
 
+/// After a crash the engine still holds the pre-crash cursor, and talaria-servo reports it
+/// right after the failure; the browser must not invent a cursor of its own.
 #[test]
-fn a_failed_page_clears_fullscreen_status_text_and_cursor() {
+fn a_failed_page_clears_fullscreen_and_status_text_but_leaves_the_cursor() {
     let mut state = BrowserState::default();
     state.apply(BrowserEvent::FullscreenChanged { fullscreen: true });
     state.apply(BrowserEvent::CursorChanged {
@@ -248,7 +250,7 @@ fn a_failed_page_clears_fullscreen_status_text_and_cursor() {
 
     assert!(!state.is_fullscreen());
     assert_eq!(state.status_text(), None);
-    assert_eq!(state.cursor(), PointerCursor::Default);
+    assert_eq!(state.cursor(), PointerCursor::Grabbing);
 }
 
 #[test]

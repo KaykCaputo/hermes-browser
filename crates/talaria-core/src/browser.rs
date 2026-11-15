@@ -223,11 +223,11 @@ impl BrowserState {
             }
             BrowserEvent::LoadStateChanged { state } => {
                 if matches!(state, LoadState::Failed { .. }) {
-                    // A failed or crashed page can no longer leave fullscreen or report that
-                    // the pointer moved, so nothing would ever clear these.
+                    // A failed or crashed page can no longer leave fullscreen, so nothing else
+                    // would clear these. The cursor is left to the engine: after a crash the
+                    // web view still caches its old cursor and reports it again.
                     self.fullscreen = false;
                     self.status_text = None;
-                    self.cursor = PointerCursor::Default;
                 }
                 self.load_state = state;
             }

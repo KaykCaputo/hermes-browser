@@ -264,10 +264,18 @@ impl EngineState {
     fn pump(&mut self, window: &MainWindow) {
         self.runtime.spin_event_loop();
 
+        let ready_before = {
+            let controller = self.controller.borrow();
+            is_engine_ready(&controller, controller.active_tab_id())
+        };
         let mut state_changed = false;
         for receiver in self.event_receivers.values() {
             state_changed |= apply_pending_browser_events(&self.controller, receiver);
         }
+        let active_became_ready = !ready_before && {
+            let controller = self.controller.borrow();
+            is_engine_ready(&controller, controller.active_tab_id())
+        };
         if state_changed {
             sync_ui(window, &self.controller.borrow());
         }
@@ -368,6 +376,16 @@ impl EngineState {
                 web_view.set_scale_factor(scale_factor);
             }
             self.current_scale_factor = Some(scale_factor);
+        }
+
+        if let Some(pointer_move) = resting_pointer_move(
+            active_tab_changed,
+            active_became_ready,
+            window.get_web_view_hovered(),
+            window.get_web_view_pointer_x(),
+            window.get_web_view_pointer_y(),
+        ) {
+            self.controller.borrow_mut().queue_command(pointer_move);
         }
 
         if (active_tab_changed || self.current_viewport_size != Some(viewport_size))
@@ -488,6 +506,20 @@ pub(crate) fn apply_pending_browser_events(
     }
 
     state_changed
+}
+
+/// A page that has just been shown or has just become ready under a resting pointer gets one
+/// pointer move at the pointer's position, so the engine hit-tests (cursor, status text,
+/// hover) without waiting for the user to move.
+pub(crate) fn resting_pointer_move(
+    active_tab_changed: bool,
+    became_ready: bool,
+    pointer_over_web_view: bool,
+    x: f32,
+    y: f32,
+) -> Option<BrowserCommand> {
+    ((active_tab_changed || became_ready) && pointer_over_web_view)
+        .then_some(BrowserCommand::PointerMoved { x, y })
 }
 
 /// The tab being switched away from: its page is told the pointer left (clearing hover state,
@@ -653,6 +685,20 @@ mod tests {
             Some(TabCommand::new(tab_id, BrowserCommand::PointerLeft))
         );
         assert_eq!(controller.next_command(), None);
+    }
+
+    #[test]
+    fn a_resting_pointer_is_replayed_only_for_a_newly_shown_or_ready_page_under_it() {
+        assert_eq!(
+            resting_pointer_move(true, false, true, 12.0, 34.0),
+            Some(BrowserCommand::PointerMoved { x: 12.0, y: 34.0 })
+        );
+        assert_eq!(
+            resting_pointer_move(false, true, true, 1.0, 2.0),
+            Some(BrowserCommand::PointerMoved { x: 1.0, y: 2.0 })
+        );
+        assert_eq!(resting_pointer_move(true, true, false, 1.0, 2.0), None);
+        assert_eq!(resting_pointer_move(false, false, true, 1.0, 2.0), None);
     }
 
     #[test]

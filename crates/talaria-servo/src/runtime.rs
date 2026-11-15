@@ -284,15 +284,10 @@ impl servo::WebViewDelegate for BrowserDelegate {
         self.frame_ready.mark_ready();
     }
 
-    fn notify_crashed(
-        &self,
-        _web_view: servo::WebView,
-        reason: String,
-        _backtrace: Option<String>,
-    ) {
-        self.send_browser_event(BrowserEvent::LoadStateChanged {
-            state: LoadState::Failed { message: reason },
-        });
+    fn notify_crashed(&self, web_view: servo::WebView, reason: String, _backtrace: Option<String>) {
+        for event in crash_feedback(reason, web_view.cursor(), web_view.status_text()) {
+            self.send_browser_event(event);
+        }
     }
 }
 
@@ -306,6 +301,25 @@ fn new_web_view_feedback(cursor: Cursor, status_text: Option<String>) -> [Browse
         },
         BrowserEvent::StatusTextChanged { text: status_text },
         BrowserEvent::FullscreenChanged { fullscreen: false },
+    ]
+}
+
+/// A crashed page never answers a pointer leave, so the web view's caches keep their pre-crash
+/// values and Servo will only notify changes against those. The tab copies them right after
+/// the failure, so it stays in step when the page is reloaded.
+fn crash_feedback(
+    reason: String,
+    cursor: Cursor,
+    status_text: Option<String>,
+) -> [BrowserEvent; 3] {
+    [
+        BrowserEvent::LoadStateChanged {
+            state: LoadState::Failed { message: reason },
+        },
+        BrowserEvent::CursorChanged {
+            cursor: pointer_cursor_from_servo(cursor),
+        },
+        BrowserEvent::StatusTextChanged { text: status_text },
     ]
 }
 
@@ -593,6 +607,30 @@ mod tests {
                 "{servo_cursor:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_crash_reports_the_failure_then_the_web_views_cached_feedback() {
+        assert_eq!(
+            crash_feedback(
+                "boom".to_owned(),
+                Cursor::Pointer,
+                Some("https://a.test/".to_owned())
+            ),
+            [
+                BrowserEvent::LoadStateChanged {
+                    state: LoadState::Failed {
+                        message: "boom".to_owned(),
+                    },
+                },
+                BrowserEvent::CursorChanged {
+                    cursor: PointerCursor::Pointer,
+                },
+                BrowserEvent::StatusTextChanged {
+                    text: Some("https://a.test/".to_owned()),
+                },
+            ]
+        );
     }
 
     #[test]

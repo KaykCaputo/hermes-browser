@@ -79,8 +79,14 @@ pub(crate) fn connect_native_keyboard_input(
                 }
                 // The user left window fullscreen through the system (for example Ctrl+Cmd+F)
                 // while a page is fullscreen: let the page leave too, so the chrome returns.
+                // winit keeps its fullscreen state until the exit animation has finished, so
+                // this fires on the first resize after that, which may be a later one; until
+                // then Escape restores the chrome. macOS only: on Wayland winit's state follows
+                // the compositor's last configure, so an unrelated resize before the compositor
+                // answers Mercury's own request would end page fullscreen.
                 WindowEvent::Resized(_)
-                    if window.get_chrome_hidden()
+                    if cfg!(target_os = "macos")
+                        && window.get_chrome_hidden()
                         && controller.borrow().active_state().is_fullscreen()
                         && window
                             .window()
