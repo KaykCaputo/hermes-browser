@@ -17,6 +17,7 @@ mod error;
 mod frecency;
 mod history;
 mod import;
+mod limits;
 mod schema;
 mod search;
 mod suggest;
@@ -30,6 +31,10 @@ pub use downloads::{DownloadRecord, DownloadRecordId, DownloadState, NewDownload
 pub use error::{Result, StoreError};
 pub use history::{ClearRange, HistoryCursor, HistoryEntry, VisitId, VisitTransition};
 pub use import::{BOOKMARK_IMPORT_MAX_DEPTH, BookmarkImport, VisitImport};
+pub use limits::{
+    MAX_ERROR_CHARS, MAX_MIME_TYPE_CHARS, MAX_PATH_BYTES, MAX_TITLE_CHARS, MAX_URL_BYTES,
+    MAX_VALIDATOR_BYTES,
+};
 pub use suggest::{
     CANDIDATES_PER_RESULT, FRECENCY_REFRESH_AGE_MS, SUBSTRING_SCAN_ROWS, Suggestion,
 };
@@ -60,7 +65,55 @@ impl Store {
     }
 
     fn init(mut conn: Connection) -> Result<Self> {
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);
         schema::prepare(&mut conn)?;
         Ok(Self { conn })
+    }
+}
+
+/// How long a statement waits for another connection's lock before failing with "busy".
+const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Prepared statements kept for reuse; above the number of distinct statements in the crate
+/// (checked by a test).
+const STATEMENT_CACHE_CAPACITY: usize = 128;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn busy_timeout_is_five_seconds() {
+        let store = Store::open_in_memory().unwrap();
+        let ms: i64 = store
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))
+            .unwrap();
+        assert_eq!(ms, 5000);
+    }
+
+    #[test]
+    fn the_statement_cache_holds_every_cached_statement() {
+        let sources = [
+            include_str!("bookmarks.rs"),
+            include_str!("downloads.rs"),
+            include_str!("frecency.rs"),
+            include_str!("history.rs"),
+            include_str!("import.rs"),
+            include_str!("lib.rs"),
+            include_str!("schema.rs"),
+            include_str!("suggest.rs"),
+        ];
+        // Every call site is counted, so this over-counts statements used in several places.
+        let call_sites: usize = sources
+            .iter()
+            .map(|s| s.matches(".prepare_cached(").count())
+            .sum();
+        assert!(call_sites > 40, "counted {call_sites}");
+        assert!(
+            call_sites < STATEMENT_CACHE_CAPACITY,
+            "counted {call_sites}"
+        );
     }
 }

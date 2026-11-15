@@ -4,6 +4,9 @@ use rusqlite::params;
 
 use crate::Store;
 use crate::error::{Result, StoreError};
+use crate::limits::{
+    MAX_ERROR_CHARS, MAX_MIME_TYPE_CHARS, MAX_VALIDATOR_BYTES, check_path, check_url, cut,
+};
 
 /// Identifies one download record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -95,7 +98,16 @@ pub struct DownloadRecord {
 
 impl Store {
     /// Records a new download in progress. `guid` must be unique.
+    ///
+    /// URLs longer than [`MAX_URL_BYTES`](crate::MAX_URL_BYTES) and paths longer than
+    /// [`MAX_PATH_BYTES`](crate::MAX_PATH_BYTES) are refused; the MIME type is cut to
+    /// [`MAX_MIME_TYPE_CHARS`].
     pub fn insert_download(&mut self, download: &NewDownload<'_>) -> Result<DownloadRecordId> {
+        check_url(download.url)?;
+        download.referrer.map(check_url).transpose()?;
+        check_path(download.target_path)?;
+        download.temp_path.map(check_path).transpose()?;
+        let mime_type = download.mime_type.map(|m| cut(m, MAX_MIME_TYPE_CHARS));
         let tx = self.conn.transaction()?;
         let taken: bool = tx
             .prepare_cached("SELECT EXISTS (SELECT 1 FROM downloads WHERE guid = ?1)")?
@@ -114,7 +126,7 @@ impl Store {
             download.referrer,
             download.target_path,
             download.temp_path,
-            download.mime_type,
+            mime_type,
             download.total_bytes,
             DownloadState::InProgress as u8,
             download.started_at_ms,
@@ -125,6 +137,8 @@ impl Store {
     }
 
     /// Stores the bytes received so far. `total_bytes: None` leaves the stored total unchanged.
+    /// Only a download in progress can make progress; otherwise this fails with
+    /// [`StoreError::InvalidState`] and changes nothing.
     pub fn update_download_progress(
         &mut self,
         id: DownloadRecordId,
@@ -132,13 +146,17 @@ impl Store {
         total_bytes: Option<i64>,
     ) -> Result<()> {
         self.update_one(
+            id,
             "UPDATE downloads SET received_bytes = ?2, total_bytes = coalesce(?3, total_bytes)
-             WHERE id = ?1",
+             WHERE id = ?1 AND state = 0",
             params![id.0, received_bytes, total_bytes],
+            "the download is not in progress",
         )
     }
 
-    /// Stores the final URL and the validators needed to resume. `None` clears a value.
+    /// Stores the final URL and the validators needed to resume, in any state. `None` clears a
+    /// value. A final URL longer than [`MAX_URL_BYTES`](crate::MAX_URL_BYTES) is refused; a
+    /// validator longer than [`MAX_VALIDATOR_BYTES`] is stored as `None`.
     pub fn set_download_validators(
         &mut self,
         id: DownloadRecordId,
@@ -146,14 +164,25 @@ impl Store {
         etag: Option<&str>,
         last_modified: Option<&str>,
     ) -> Result<()> {
+        final_url.map(check_url).transpose()?;
+        let fits = |v: &&str| v.len() <= MAX_VALIDATOR_BYTES;
         self.update_one(
+            id,
             "UPDATE downloads SET final_url = ?2, etag = ?3, last_modified = ?4 WHERE id = ?1",
-            params![id.0, final_url, etag, last_modified],
+            params![
+                id.0,
+                final_url,
+                etag.filter(fits),
+                last_modified.filter(fits)
+            ],
+            "unreachable: any state is allowed",
         )
     }
 
-    /// Marks a download complete, cancelled or interrupted. `state` must not be
-    /// [`DownloadState::InProgress`].
+    /// Marks a download in progress complete, cancelled or interrupted. `state` must not be
+    /// [`DownloadState::InProgress`]. A download that is not in progress is left unchanged and
+    /// this fails with [`StoreError::InvalidState`], so a late cancel cannot rewrite a completed
+    /// record. `error` is cut to [`MAX_ERROR_CHARS`].
     pub fn finish_download(
         &mut self,
         id: DownloadRecordId,
@@ -167,8 +196,32 @@ impl Store {
             ));
         }
         self.update_one(
-            "UPDATE downloads SET state = ?2, error = ?3, ended_at = ?4 WHERE id = ?1",
-            params![id.0, state as u8, error, ended_at_ms],
+            id,
+            "UPDATE downloads SET state = ?2, error = ?3, ended_at = ?4 WHERE id = ?1 AND state = 0",
+            params![
+                id.0,
+                state as u8,
+                error.map(|e| cut(e, MAX_ERROR_CHARS)),
+                ended_at_ms
+            ],
+            "the download is not in progress",
+        )
+    }
+
+    /// Puts an interrupted download back in progress, clearing its end time and error, so that
+    /// a resumed transfer can be tracked. Bytes received, validators and start time are kept.
+    /// Any other state fails with [`StoreError::InvalidState`] and changes nothing.
+    ///
+    /// `now_ms` is not stored today (the table has no column for a resume time); it is part of
+    /// the signature so that one can be added without changing callers.
+    pub fn resume_download(&mut self, id: DownloadRecordId, now_ms: i64) -> Result<()> {
+        let _ = now_ms;
+        self.update_one(
+            id,
+            "UPDATE downloads SET state = 0, ended_at = NULL, error = NULL
+             WHERE id = ?1 AND state = 4",
+            params![id.0],
+            "only an interrupted download can be resumed",
         )
     }
 
@@ -244,12 +297,28 @@ impl Store {
         Ok(changed as u64)
     }
 
-    /// Runs a single-row update, failing with [`StoreError::NotFound`] if no row matched.
-    fn update_one(&mut self, sql: &'static str, params: impl rusqlite::Params) -> Result<()> {
+    /// Runs a single-row update. If no row matched, fails with [`StoreError::NotFound`] when
+    /// the record does not exist and with [`StoreError::InvalidState`]`(state_error)` when the
+    /// update's state condition excluded it.
+    fn update_one(
+        &mut self,
+        id: DownloadRecordId,
+        sql: &'static str,
+        params: impl rusqlite::Params,
+        state_error: &'static str,
+    ) -> Result<()> {
         let changed = self.conn.prepare_cached(sql)?.execute(params)?;
-        if changed == 0 {
-            return Err(StoreError::NotFound);
+        if changed > 0 {
+            return Ok(());
         }
-        Ok(())
+        let exists: bool = self
+            .conn
+            .prepare_cached("SELECT EXISTS (SELECT 1 FROM downloads WHERE id = ?1)")?
+            .query_row([id.0], |row| row.get(0))?;
+        Err(if exists {
+            StoreError::InvalidState(state_error)
+        } else {
+            StoreError::NotFound
+        })
     }
 }

@@ -40,7 +40,7 @@ impl Drop for TempDir {
 pub struct Fixture {
     pub store: mercury_store::Store,
     pub raw: rusqlite::Connection,
-    _dir: TempDir,
+    pub dir: TempDir,
 }
 
 /// The counters of one `places` row.
@@ -58,11 +58,7 @@ impl Fixture {
         let dir = TempDir::new(name);
         let store = mercury_store::Store::open(&dir.db()).expect("open store");
         let raw = rusqlite::Connection::open(dir.db()).expect("open raw");
-        Self {
-            store,
-            raw,
-            _dir: dir,
-        }
+        Self { store, raw, dir }
     }
 
     pub fn place(&self, url: &str) -> Option<Place> {

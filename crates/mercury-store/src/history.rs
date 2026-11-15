@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::Store;
 use crate::error::Result;
 use crate::frecency;
+use crate::limits::{MAX_TITLE_CHARS, check_url, cut};
 use crate::search::{fts_query, url_key};
 
 /// How the user reached a page. Uses Firefox's numbering (`nsINavHistoryService.idl`).
@@ -103,6 +104,10 @@ const HISTORY_SEARCH_SQL: &str = "
 impl Store {
     /// Records a visit to `url` at `now_ms`, creating the page if needed. A `title` replaces the
     /// stored one; `None` leaves it unchanged.
+    ///
+    /// Titles are cut to [`MAX_TITLE_CHARS`] characters; a URL longer
+    /// than [`MAX_URL_BYTES`](crate::MAX_URL_BYTES) is refused with
+    /// [`StoreError::InvalidArgument`](crate::StoreError::InvalidArgument).
     pub fn record_visit(
         &mut self,
         url: &str,
@@ -129,12 +134,13 @@ impl Store {
         Ok(VisitId(visit_id))
     }
 
-    /// Sets the title of a known page. Returns `false` if the URL is unknown.
+    /// Sets the title of a known page, cut to [`MAX_TITLE_CHARS`]
+    /// characters. Returns `false` if the URL is unknown.
     pub fn set_page_title(&mut self, url: &str, title: &str) -> Result<bool> {
         let changed = self
             .conn
             .prepare_cached("UPDATE places SET title = ?2 WHERE url = ?1")?
-            .execute(params![url, title])?;
+            .execute(params![url, cut(title, MAX_TITLE_CHARS)])?;
         Ok(changed > 0)
     }
 
@@ -252,8 +258,11 @@ fn transition_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<
 }
 
 /// The id of the page for `url`, created if needed. A `title` replaces the stored one; `None`
-/// leaves it unchanged.
+/// leaves it unchanged. Refuses a URL longer than `MAX_URL_BYTES` and cuts the title to
+/// `MAX_TITLE_CHARS`.
 pub(crate) fn upsert_place(conn: &Connection, url: &str, title: Option<&str>) -> Result<i64> {
+    check_url(url)?;
+    let title = title.map(|t| cut(t, MAX_TITLE_CHARS));
     conn.prepare_cached(
         "INSERT INTO places (url, title, url_key) VALUES (?1, ?2, ?3)
          ON CONFLICT (url) DO UPDATE SET title = excluded.title

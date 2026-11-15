@@ -29,6 +29,10 @@ pub enum StoreError {
     /// A bookmark or download with this GUID already exists.
     #[error("the GUID {0:?} is already in use")]
     DuplicateGuid(String),
+    /// The record is not in a state that allows this operation (for example a late progress
+    /// report for a finished download).
+    #[error("invalid state: {0}")]
+    InvalidState(&'static str),
     /// An argument is not valid for this operation.
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),

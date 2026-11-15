@@ -464,3 +464,68 @@ fn clear_history_all_removes_everything_but_bookmarked_places() {
     assert_eq!(f.place(B).unwrap().visit_count, 0);
     assert_eq!(f.store.clear_history(ClearRange::All, NOW + 2).unwrap(), 0);
 }
+
+// ---- words the tokenizer drops ----
+
+#[test]
+fn a_word_of_separator_characters_is_ignored() {
+    let store = sample();
+    // U+0345 is a combining mark (category Mn): a separator for FTS5's unicode61 tokenizer.
+    assert_eq!(
+        store.history(Some("servo \u{345}"), None, 10).unwrap(),
+        store.history(Some("servo"), None, 10).unwrap()
+    );
+    assert_eq!(
+        store
+            .history(Some("\u{345} servo"), None, 10)
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(store.history(Some("\u{345}"), None, 10).unwrap().is_empty());
+}
+
+// ---- bounded text ----
+
+#[test]
+fn long_titles_are_cut_and_long_urls_refused() {
+    use mercury_store::{MAX_TITLE_CHARS, MAX_URL_BYTES, StoreError};
+    let mut f = Fixture::new("bounded");
+    let title = "é".repeat(MAX_TITLE_CHARS + 100);
+    f.store
+        .record_visit(A, Some(&title), VisitTransition::Link, NOW)
+        .unwrap();
+    let stored = f.place(A).unwrap().title.unwrap();
+    assert_eq!(stored.chars().count(), MAX_TITLE_CHARS);
+    assert!(title.starts_with(&stored));
+
+    f.store
+        .set_page_title(A, &"x".repeat(MAX_TITLE_CHARS * 2))
+        .unwrap();
+    assert_eq!(f.place(A).unwrap().title.unwrap().len(), MAX_TITLE_CHARS);
+
+    let long_url = format!("https://example.com/{}", "a".repeat(MAX_URL_BYTES));
+    assert!(matches!(
+        f.store
+            .record_visit(&long_url, None, VisitTransition::Link, NOW),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    let at_limit = format!("https://e.com/{}", "a".repeat(MAX_URL_BYTES - 14));
+    assert_eq!(at_limit.len(), MAX_URL_BYTES);
+    f.store
+        .record_visit(&at_limit, None, VisitTransition::Link, NOW)
+        .unwrap();
+    assert!(matches!(
+        f.store.import_visits(
+            &[mercury_store::VisitImport {
+                url: &long_url,
+                title: None,
+                visited_at_ms: NOW,
+                transition: VisitTransition::Link,
+            }],
+            NOW
+        ),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    assert_eq!(f.count("SELECT count(*) FROM places"), 2);
+}

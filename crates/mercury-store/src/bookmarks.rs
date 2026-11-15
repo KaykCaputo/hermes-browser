@@ -6,6 +6,7 @@ use crate::Store;
 use crate::error::{Result, StoreError};
 use crate::frecency;
 use crate::history::refresh_place;
+use crate::limits::{MAX_TITLE_CHARS, check_url, cut};
 use crate::search::url_key;
 
 pub(crate) const KIND_BOOKMARK: i64 = 1;
@@ -54,9 +55,11 @@ pub struct BookmarkNode {
     pub title: String,
     /// What it is.
     pub kind: BookmarkKind,
-    /// When it was added, in milliseconds since the Unix epoch.
+    /// When it was added, in milliseconds since the Unix epoch. The two roots carry no
+    /// meaningful dates: they are created with the schema, without a clock, at 0.
     pub added_at_ms: i64,
-    /// When it was last renamed, re-pointed or moved, in milliseconds since the Unix epoch.
+    /// When it was last renamed, re-pointed or moved, in milliseconds since the Unix epoch
+    /// (0 for a root that was never renamed).
     pub modified_at_ms: i64,
 }
 
@@ -107,6 +110,10 @@ impl Store {
     }
 
     /// Adds a bookmark. `position: None` appends. `guid` must be unique.
+    ///
+    /// Titles are cut to [`MAX_TITLE_CHARS`] characters, here and wherever a bookmark title is
+    /// stored; a URL longer than [`MAX_URL_BYTES`](crate::MAX_URL_BYTES) is refused with
+    /// [`StoreError::InvalidArgument`].
     pub fn add_bookmark(
         &mut self,
         parent: BookmarkId,
@@ -158,12 +165,12 @@ impl Store {
         self.insert_node(parent, position, KIND_SEPARATOR, None, None, guid, now_ms)
     }
 
-    /// Renames a node.
+    /// Renames a node. The title is cut to [`MAX_TITLE_CHARS`] characters.
     pub fn rename_bookmark(&mut self, id: BookmarkId, title: &str, now_ms: i64) -> Result<()> {
         let changed = self
             .conn
             .prepare_cached("UPDATE bookmarks SET title = ?2, modified_at = ?3 WHERE id = ?1")?
-            .execute(params![id.0, title, now_ms])?;
+            .execute(params![id.0, cut(title, MAX_TITLE_CHARS), now_ms])?;
         if changed == 0 {
             return Err(StoreError::NotFound);
         }
@@ -210,7 +217,7 @@ impl Store {
             .prepare_cached(
                 "WITH RECURSIVE ancestors(id) AS (
                      SELECT ?1
-                     UNION ALL
+                     UNION
                      SELECT b.parent_id FROM bookmarks b JOIN ancestors a ON b.id = a.id
                      WHERE b.parent_id IS NOT NULL
                  )
@@ -252,7 +259,7 @@ impl Store {
             .prepare_cached(
                 "WITH RECURSIVE subtree(id) AS (
                      SELECT ?1
-                     UNION ALL
+                     UNION
                      SELECT b.id FROM bookmarks b JOIN subtree s ON b.parent_id = s.id
                  )
                  SELECT DISTINCT place_id FROM bookmarks
@@ -317,7 +324,13 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
         )?
         .execute(params![
-            guid, kind, parent.0, target, title, place_id, now_ms
+            guid,
+            kind,
+            parent.0,
+            target,
+            title.map(|t| cut(t, MAX_TITLE_CHARS)),
+            place_id,
+            now_ms
         ])?;
         let id = tx.last_insert_rowid();
         if let Some(place_id) = place_id {
@@ -373,6 +386,7 @@ fn close_gap(conn: &Connection, parent: i64, position: i64) -> Result<()> {
 
 /// The id of the page for `url`, creating an unvisited page if needed.
 pub(crate) fn ensure_place(conn: &Connection, url: &str) -> Result<i64> {
+    check_url(url)?;
     conn.prepare_cached(
         "INSERT INTO places (url, url_key) VALUES (?1, ?2) ON CONFLICT (url) DO NOTHING",
     )?

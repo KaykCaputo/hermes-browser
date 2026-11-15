@@ -5,7 +5,7 @@
 //! Frecency: a page's rank for address-bar suggestions, from how often and how recently it was
 //! visited, how it was reached, and whether it is bookmarked.
 //!
-//! Ported from Mozilla application-services, https://github.com/mozilla/application-services,
+//! Ported from Mozilla application-services, <https://github.com/mozilla/application-services>,
 //! commit `5f95eb6bafa36c4a86ff3109dacbf9026029833f`, `components/places/src/frecency.rs`,
 //! MPL-2.0. The settings, the bucket weights, the transition bonuses, the sampling of the most
 //! recent visits and the final formula (including its `f32` arithmetic and rounding) are the
@@ -17,7 +17,10 @@
 //!   visit types Mercury never records (embed, framed link, redirects, download).
 //! - No `place:` query URLs, so the donor's `is_query` case is left out.
 //! - The donor's `foreign_count` (references from bookmarks and other tables) is the number of
-//!   bookmarks pointing at the page; `typed` is `places.typed_count`.
+//!   bookmarks pointing at the page.
+//! - The donor's unvisited-bookmark score adds the unvisited-typed bonus when the page's `typed`
+//!   flag is set. Mercury's `typed_count` is recomputed from the visit rows, so it is 0 whenever
+//!   there are no visits and that branch is left out (see `compute_unvisited_bookmark_frecency`).
 
 use rusqlite::{Connection, params};
 
@@ -108,7 +111,6 @@ struct FrecencyComputation<'db, 's> {
     settings: &'s FrecencySettings,
     page_id: i64,
     now_ms: i64,
-    typed: i64,
     visit_count: i64,
     foreign_count: i64,
 }
@@ -121,18 +123,16 @@ impl<'db, 's> FrecencyComputation<'db, 's> {
         now_ms: i64,
     ) -> Result<Self> {
         let mut stmt = conn.prepare_cached(
-            "SELECT typed_count, visit_count,
-                    (SELECT count(*) FROM bookmarks WHERE place_id = places.id)
+            "SELECT visit_count, (SELECT count(*) FROM bookmarks WHERE place_id = places.id)
              FROM places WHERE id = ?1",
         )?;
-        let (typed, visit_count, foreign_count) =
-            stmt.query_row([page_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let (visit_count, foreign_count) =
+            stmt.query_row([page_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(Self {
             conn,
             settings,
             page_id,
             now_ms,
-            typed,
             visit_count,
             foreign_count,
         })
@@ -189,15 +189,12 @@ impl<'db, 's> FrecencyComputation<'db, 's> {
     }
 
     fn compute_unvisited_bookmark_frecency(&self) -> i32 {
-        // Something bookmarked and typed ranks above something only typed or only bookmarked.
-        let mut bonus = self
+        // The donor adds the unvisited-typed bonus here when the page's `typed` flag is set.
+        // Mercury's `typed_count` is recomputed from the visit rows, so a page without visits
+        // always has 0 and that branch could never run; it is left out.
+        let bonus = self
             .settings
             .get_transition_bonus(Some(VisitTransition::Bookmark), false);
-        if self.typed != 0 {
-            bonus += self
-                .settings
-                .get_transition_bonus(Some(VisitTransition::Typed), false);
-        }
         // Assume the visit is "now", so use the first bucket.
         let score = (self.settings.first_bucket_weight as f32) * (bonus as f32 / 100.0f32);
         score.ceil() as i32

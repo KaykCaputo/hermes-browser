@@ -360,3 +360,109 @@ fn children_of_a_non_folder_or_missing_node() {
         Err(StoreError::NotFound)
     ));
 }
+
+// ---- damaged trees ----
+
+/// Runs `f` on another thread and fails instead of hanging if it does not finish.
+fn finishes<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("did not finish: a cycle made a query run forever")
+}
+
+#[test]
+fn a_parent_cycle_in_a_damaged_file_cannot_hang() {
+    let f = Fixture::new("cycle");
+    let Fixture {
+        mut store,
+        raw,
+        dir: _dir,
+    } = f;
+    let toolbar = store.bookmark_root(BookmarkRoot::Toolbar).unwrap();
+    let a = store
+        .add_bookmark_folder(toolbar, None, "A", "g-a", NOW)
+        .unwrap();
+    let b = store.add_bookmark_folder(a, None, "B", "g-b", NOW).unwrap();
+    let x = store
+        .add_bookmark(toolbar, None, "X", &url("x"), "g-x", NOW)
+        .unwrap();
+    store
+        .add_bookmark(b, None, "Y", &url("y"), "g-y", NOW)
+        .unwrap();
+    // Damage: A becomes a child of its own child B.
+    raw.execute(
+        "UPDATE bookmarks SET parent_id = ?1 WHERE id = ?2",
+        [b.0, a.0],
+    )
+    .unwrap();
+
+    let store = finishes(move || {
+        // Into a folder on the cycle: the ancestor walk must stop.
+        let _ = store.move_bookmark(x, a, None, NOW);
+        // A folder into a member of its own cycle is refused.
+        assert!(matches!(
+            store.move_bookmark(a, b, None, NOW),
+            Err(StoreError::InvalidMove)
+        ));
+        // Removing a folder on the cycle: the subtree walk must stop.
+        store.remove_bookmark(a, NOW).unwrap();
+        store
+    });
+    assert!(matches!(store.bookmark(a), Err(StoreError::NotFound)));
+    assert!(matches!(store.bookmark(b), Err(StoreError::NotFound)));
+}
+
+#[test]
+fn long_bookmark_titles_are_cut_and_long_urls_refused() {
+    use mercury_store::{MAX_TITLE_CHARS, MAX_URL_BYTES};
+    let (mut store, toolbar, _) = setup();
+    let id = store
+        .add_bookmark(
+            toolbar,
+            None,
+            &"t".repeat(MAX_TITLE_CHARS + 1),
+            &url("a"),
+            "g-a",
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(store.bookmark(id).unwrap().title.len(), MAX_TITLE_CHARS);
+    store
+        .rename_bookmark(id, &"ß".repeat(MAX_TITLE_CHARS + 1), NOW)
+        .unwrap();
+    assert_eq!(
+        store.bookmark(id).unwrap().title.chars().count(),
+        MAX_TITLE_CHARS
+    );
+    let folder = store
+        .add_bookmark_folder(toolbar, None, &"f".repeat(MAX_TITLE_CHARS + 1), "g-f", NOW)
+        .unwrap();
+    assert_eq!(store.bookmark(folder).unwrap().title.len(), MAX_TITLE_CHARS);
+
+    let long_url = format!("https://example.com/{}", "a".repeat(MAX_URL_BYTES));
+    assert!(matches!(
+        store.add_bookmark(toolbar, None, "L", &long_url, "g-l", NOW),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        store.set_bookmark_url(id, &long_url, NOW),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    assert!(matches!(
+        store.import_bookmarks(
+            toolbar,
+            &[mercury_store::BookmarkImport::Bookmark {
+                title: "L".into(),
+                url: long_url.clone(),
+                guid: "g-imp".into(),
+                added_at_ms: None,
+            }],
+            NOW
+        ),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    assert_eq!(titles(&store, toolbar).len(), 2);
+}

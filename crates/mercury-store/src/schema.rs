@@ -1,6 +1,6 @@
 //! Connection setup and the `PRAGMA user_version` migration ladder.
 //!
-//! Adapted in part from Zephium, https://github.com/zephium-browser/Zephium, commit
+//! Adapted in part from Zephium, <https://github.com/zephium-browser/Zephium>, commit
 //! `9026a1fffad74d6e201ef97fe8c02c1b01403cd2`, `crates/zephium-store/src/migrations.rs:1944-1966`
 //! (the FTS5 mirror and its insert/delete/update triggers), MPL-2.0.
 

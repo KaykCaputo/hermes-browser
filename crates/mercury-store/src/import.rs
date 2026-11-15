@@ -11,6 +11,7 @@ use crate::bookmarks::{
 use crate::error::{Result, StoreError};
 use crate::frecency;
 use crate::history::{VisitTransition, insert_visit, refresh_place, upsert_place};
+use crate::limits::{MAX_TITLE_CHARS, cut};
 
 /// The deepest bookmark tree [`Store::import_bookmarks`] accepts; the nodes passed directly are
 /// at depth 1.
@@ -175,7 +176,7 @@ impl Store {
                 kind,
                 parent_id,
                 position,
-                title,
+                title.map(|t| cut(t, MAX_TITLE_CHARS)),
                 place_id,
                 added_at.unwrap_or(now_ms),
                 now_ms
