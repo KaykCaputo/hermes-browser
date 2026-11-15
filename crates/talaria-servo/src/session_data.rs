@@ -115,6 +115,11 @@ pub(crate) fn strip_session_cookies_from_saved_jar(config_dir: &Path) {
     let path = config_dir.join(COOKIE_JAR_FILE);
     let contents = match std::fs::read(&path) {
         Ok(contents) => contents,
+        // A new profile has no jar yet; that is not worth a warning.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            log::debug!("{} does not exist yet", path.display());
+            return;
+        }
         Err(error) => {
             log::warn!(
                 "left {} as it is: it could not be read ({error})",
@@ -168,6 +173,14 @@ fn write_privately_and_atomically(path: &Path, value: &Value) -> std::io::Result
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+/// Clean-up before the engine is built: the previous run may have been killed, or ended by the
+/// shutdown watchdog, before it could end its session; its session cookies and credentials
+/// must not come back.
+pub(crate) fn clean_up_before_engine_start(config_dir: &Path) {
+    strip_session_cookies_from_saved_jar(config_dir);
+    remove_saved_credentials(config_dir);
 }
 
 /// Clean-up that must run after the engine has exited and written its files: removes session
@@ -458,6 +471,20 @@ mod tests {
         let directory = jar_directory("cleanup", FIXTURE_JAR);
 
         drop(AfterEngineCleanup::new(directory.clone()));
+        let saved = std::fs::read_to_string(directory.join(COOKIE_JAR_FILE)).expect("the jar");
+        let leftovers = remaining_files(&directory);
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert!(!saved.contains("mercury=1"));
+        assert!(saved.contains("PERSISTVALUE42"));
+        assert_eq!(leftovers, vec!["cookie_jar.json", "hsts_list.json"]);
+    }
+
+    #[test]
+    fn before_the_engine_starts_session_cookies_and_credentials_are_removed() {
+        let directory = jar_directory("before-start", FIXTURE_JAR);
+
+        clean_up_before_engine_start(&directory);
         let saved = std::fs::read_to_string(directory.join(COOKIE_JAR_FILE)).expect("the jar");
         let leftovers = remaining_files(&directory);
         let _ = std::fs::remove_dir_all(&directory);

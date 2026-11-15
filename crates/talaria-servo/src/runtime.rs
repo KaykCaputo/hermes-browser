@@ -20,7 +20,7 @@ use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::screen::ScreenMetrics;
-use crate::session_data::{AfterEngineCleanup, end_session_cookies, remove_saved_credentials};
+use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
 use crate::{ServoWebView, ServoWebViewError};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
@@ -100,9 +100,11 @@ impl ServoRuntime {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
-        // Servo reads saved HTTP credentials when it starts; they belong to an earlier session.
+        // Servo reads its saved files when it starts. Session cookies and HTTP credentials in
+        // them belong to an earlier session that was not ended (killed, or cut short by the
+        // shutdown watchdog); remove them from the files before Servo can load them.
         if let Some(config_dir) = &runtime_options.config_dir {
-            remove_saved_credentials(config_dir);
+            clean_up_before_engine_start(config_dir);
         }
         let options = mercury_options(runtime_options.config_dir.clone());
         let multiprocess_enabled = options.multiprocess;
