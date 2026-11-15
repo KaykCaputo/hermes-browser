@@ -53,7 +53,9 @@ Options:
   --background                     Start without taking focus (for automated runs)
   --disable-gpu-canvas             Draw 2D canvases on the CPU
   --disable-experimental-web-features
-                                   Leave Servo's experimental web-platform features off
+                                   Leave off Servo's experimental web-platform features
+                                   (servoshell's list minus the async clipboard and
+                                   WebGPU, which are always off)
   --profile-dir <directory>        Keep cookies and site data in this directory
                                    (a screenshot run otherwise uses a temporary one)
   --help                           Print this help and exit

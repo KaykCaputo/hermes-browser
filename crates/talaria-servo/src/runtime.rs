@@ -69,7 +69,8 @@ pub struct RuntimeOptions {
     /// Where Servo keeps cookies, HSTS, HTTP authentication and site storage. `None` keeps
     /// nothing across runs.
     pub config_dir: Option<PathBuf>,
-    /// Turn on the web-platform features servoshell enables in its experimental mode.
+    /// Turn on servoshell's experimental web-platform features, except the async clipboard and
+    /// WebGPU (see `EXCLUDED_EXPERIMENTAL_PREFS`).
     pub experimental_web_features: bool,
 }
 
@@ -200,10 +201,23 @@ fn mercury_preferences(runtime_options: &RuntimeOptions) -> Preferences {
         preferences.dom_canvas_backend = "vello".to_owned();
     }
     if runtime_options.experimental_web_features {
-        for name in EXPERIMENTAL_PREFS {
+        for name in EXPERIMENTAL_PREFS
+            .iter()
+            .filter(|name| !EXCLUDED_EXPERIMENTAL_PREFS.contains(name))
+        {
             preferences.set_value(name, PrefValue::Bool(true));
         }
     }
+    // Always off: in Servo 0.8.0 `navigator.clipboard.readText()`/`writeText()` skip the
+    // permission and user-activation checks (`dom/clipboard/clipboard.rs`, the "check clipboard
+    // read permission" step is a TODO), and with no `ClipboardDelegate` installed Servo's default
+    // one reads and writes the system clipboard. Any secure page or iframe could read copied
+    // passwords on load. Re-enable only with a delegate that answers after a user gesture.
+    preferences.dom_async_clipboard_enabled = false;
+    // Always off while Mercury does not build Servo's `webgpu` cargo feature: the preference alone
+    // exposes `GPUCanvasContext` and other WebGPU names over unimplemented stubs, which makes
+    // feature detection report WebGPU that is not there.
+    preferences.dom_webgpu_enabled = false;
     // Always off: in Servo 0.8.0 `getUserMedia` opens the camera and microphone without asking
     // the embedder for permission (`mediadevices.rs`), so WebRTC must stay disabled until
     // Mercury can gate device access itself.
@@ -216,7 +230,8 @@ fn mercury_preferences(runtime_options: &RuntimeOptions) -> Preferences {
 // `4e136d8ef31b7c4748fbfac606ca463f3efd7537`), `ports/servoshell/prefs.rs` lines 29-53
 // (`EXPERIMENTAL_PREFS`). Licensed under the Mozilla Public License 2.0.
 /// Preferences that servoshell turns on with `--enable-experimental-web-platform-features`:
-/// implemented in Servo but off by default.
+/// implemented in Servo but off by default. Mercury enables this list minus
+/// `EXCLUDED_EXPERIMENTAL_PREFS`.
 const EXPERIMENTAL_PREFS: &[&str] = &[
     "dom_async_clipboard_enabled",
     "dom_exec_command_enabled",
@@ -237,6 +252,10 @@ const EXPERIMENTAL_PREFS: &[&str] = &[
     "layout_css_ellipse_corners_enabled",
     "layout_css_font_variations_enabled",
 ];
+
+/// Entries of `EXPERIMENTAL_PREFS` that Mercury leaves off; the reasons are given where they
+/// are pinned in `mercury_preferences`.
+const EXCLUDED_EXPERIMENTAL_PREFS: &[&str] = &["dom_async_clipboard_enabled", "dom_webgpu_enabled"];
 
 /// Servo's user agent already names the Firefox release it matches, but carries a `Servo/x.y`
 /// token where Firefox has `Gecko/20100101`; some sites refuse to serve unrecognised browsers.
@@ -515,12 +534,37 @@ mod tests {
     }
 
     #[test]
-    fn experimental_features_enable_servoshells_list() {
+    fn experimental_features_enable_servoshells_list_except_the_excluded_ones() {
         let preferences = preferences_with_experimental_web_features(true);
 
         assert_eq!(EXPERIMENTAL_PREFS.len(), 18);
-        for name in EXPERIMENTAL_PREFS {
+        assert_eq!(
+            EXCLUDED_EXPERIMENTAL_PREFS,
+            &["dom_async_clipboard_enabled", "dom_webgpu_enabled"]
+        );
+        let enabled = EXPERIMENTAL_PREFS
+            .iter()
+            .filter(|name| !EXCLUDED_EXPERIMENTAL_PREFS.contains(name))
+            .collect::<Vec<_>>();
+        assert_eq!(enabled.len(), 16);
+        for name in enabled {
             assert_eq!(preferences.get_value(name), PrefValue::Bool(true), "{name}");
+        }
+    }
+
+    #[test]
+    fn async_clipboard_stays_disabled() {
+        for enabled in [true, false] {
+            assert!(
+                !preferences_with_experimental_web_features(enabled).dom_async_clipboard_enabled
+            );
+        }
+    }
+
+    #[test]
+    fn webgpu_stays_disabled_while_the_webgpu_feature_is_not_built() {
+        for enabled in [true, false] {
+            assert!(!preferences_with_experimental_web_features(enabled).dom_webgpu_enabled);
         }
     }
 

@@ -40,6 +40,9 @@
   report("typeof RTCPeerConnection", () => typeof RTCPeerConnection);
   report("CSS.supports('container-type: inline-size')",
          () => CSS.supports("container-type: inline-size"));
+  report("'clipboard' in navigator", () => "clipboard" in navigator);
+  report("'gpu' in navigator", () => "gpu" in navigator);
+  report("'GPUCanvasContext' in window", () => "GPUCanvasContext" in window);
   report("WebGL2 context", () => document.createElement("canvas").getContext("webgl2") !== null);
 </script>
 </body>
