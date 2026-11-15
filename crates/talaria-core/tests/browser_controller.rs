@@ -1,6 +1,6 @@
 use talaria_core::{
     AddressResolutionError, BrowserCommand, BrowserController, BrowserEvent, BrowserState,
-    LoadState, PointerButton, PointerButtonAction, TabActivation, TabCommand, TabId,
+    ColorScheme, LoadState, PointerButton, PointerButtonAction, TabActivation, TabCommand, TabId,
 };
 
 fn command(queued: Option<TabCommand>) -> Option<BrowserCommand> {
@@ -741,4 +741,218 @@ fn pointer_commands_for_a_not_ready_tab_are_discarded() {
         Some(BrowserCommand::Reload)
     );
     assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn zoom_in_queues_a_zoom_command_for_the_active_tab() {
+    let mut controller = controller_with_ready_tab();
+
+    controller.zoom_in();
+
+    assert_eq!(controller.active_state().zoom_percent(), 110);
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::SetPageZoom { percent: 110 })
+    );
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn zoom_out_queues_a_zoom_command_for_the_active_tab() {
+    let mut controller = controller_with_ready_tab();
+
+    controller.zoom_out();
+
+    assert_eq!(controller.active_state().zoom_percent(), 90);
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::SetPageZoom { percent: 90 })
+    );
+}
+
+#[test]
+fn reset_zoom_returns_to_100() {
+    let mut controller = controller_with_ready_tab();
+    controller.zoom_in();
+    controller.zoom_in();
+
+    controller.reset_zoom();
+
+    assert_eq!(controller.active_state().zoom_percent(), 100);
+    let commands = std::iter::from_fn(|| command(controller.next_command())).collect::<Vec<_>>();
+    assert_eq!(
+        commands.last(),
+        Some(&BrowserCommand::SetPageZoom { percent: 100 })
+    );
+}
+
+#[test]
+fn zoom_that_does_not_change_queues_nothing() {
+    let mut controller = controller_with_ready_tab();
+
+    controller.reset_zoom();
+
+    assert_eq!(controller.active_state().zoom_percent(), 100);
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn zoom_is_tracked_per_tab() {
+    let mut controller = controller_with_ready_tab();
+    let first_tab_id = controller.active_tab_id();
+    controller.zoom_in();
+    let second_tab_id = controller.open_tab();
+    mark_engine_ready(&mut controller, second_tab_id);
+
+    controller.zoom_out();
+    controller.zoom_out();
+
+    let zooms = controller
+        .tabs()
+        .map(|tab| (tab.id(), tab.state().zoom_percent()))
+        .collect::<Vec<_>>();
+    assert_eq!(zooms, vec![(first_tab_id, 110), (second_tab_id, 80)]);
+    assert!(controller.select_tab(first_tab_id));
+    assert_eq!(controller.active_state().zoom_percent(), 110);
+}
+
+#[test]
+fn zoom_requested_before_readiness_is_held_until_the_tab_is_ready() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    controller.zoom_in();
+
+    assert_eq!(controller.active_state().zoom_percent(), 110);
+    assert_eq!(command(controller.next_command()), None);
+    mark_engine_ready(&mut controller, tab_id);
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::SetPageZoom { percent: 110 })
+    );
+}
+
+#[test]
+fn pinch_zoom_for_a_not_ready_tab_is_discarded() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    controller.queue_command(BrowserCommand::PinchZoom {
+        delta: 1.1,
+        x: 1.0,
+        y: 2.0,
+    });
+    mark_engine_ready(&mut controller, tab_id);
+
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn consecutive_pinch_zooms_multiply_at_the_latest_position() {
+    let mut controller = controller_with_ready_tab();
+
+    controller.queue_command(BrowserCommand::PinchZoom {
+        delta: 2.0,
+        x: 1.0,
+        y: 2.0,
+    });
+    controller.queue_command(BrowserCommand::PinchZoom {
+        delta: 1.5,
+        x: 3.0,
+        y: 4.0,
+    });
+
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::PinchZoom {
+            delta: 3.0,
+            x: 3.0,
+            y: 4.0,
+        })
+    );
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn select_last_tab_activates_the_final_tab() {
+    let mut controller = BrowserController::default();
+    controller.open_tab();
+    let last_tab_id = controller.open_tab();
+    assert!(controller.select_tab_at(0));
+
+    controller.select_last_tab();
+
+    assert_eq!(controller.active_tab_id(), last_tab_id);
+}
+
+#[test]
+fn the_colour_scheme_starts_light() {
+    assert_eq!(
+        BrowserController::default().color_scheme(),
+        ColorScheme::Light
+    );
+}
+
+#[test]
+fn a_colour_scheme_change_is_queued_for_every_tab() {
+    let mut controller = controller_with_ready_tab();
+    let first_tab_id = controller.active_tab_id();
+    let second_tab_id = controller.open_tab();
+    mark_engine_ready(&mut controller, second_tab_id);
+
+    controller.set_color_scheme(ColorScheme::Dark);
+
+    assert_eq!(controller.color_scheme(), ColorScheme::Dark);
+    let queued = std::iter::from_fn(|| controller.next_command()).collect::<Vec<_>>();
+    assert_eq!(
+        queued,
+        vec![
+            TabCommand::new(
+                first_tab_id,
+                BrowserCommand::SetColorScheme(ColorScheme::Dark)
+            ),
+            TabCommand::new(
+                second_tab_id,
+                BrowserCommand::SetColorScheme(ColorScheme::Dark)
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_colour_scheme_change_before_readiness_is_held() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    controller.set_color_scheme(ColorScheme::Dark);
+    assert_eq!(command(controller.next_command()), None);
+
+    mark_engine_ready(&mut controller, tab_id);
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::SetColorScheme(ColorScheme::Dark))
+    );
+}
+
+#[test]
+fn pointer_left_for_a_not_ready_tab_is_discarded() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    controller.queue_command(BrowserCommand::PointerLeft);
+    mark_engine_ready(&mut controller, tab_id);
+
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn pointer_left_for_a_ready_tab_is_queued() {
+    let mut controller = controller_with_ready_tab();
+
+    controller.queue_command(BrowserCommand::PointerLeft);
+
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::PointerLeft)
+    );
 }

@@ -18,6 +18,7 @@ mod callbacks;
 mod cli;
 mod engine;
 mod keyboard;
+mod keyutils;
 #[cfg(target_os = "macos")]
 mod platform_macos;
 mod rendering;

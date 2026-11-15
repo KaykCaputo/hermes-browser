@@ -9,9 +9,10 @@ use euclid::Scale;
 use log::info;
 use rustls::crypto::CryptoProvider;
 use servo::{
-    LoadStatus, Opts, PixelFormat, Preferences, RenderingContext, ServoBuilder, WebViewBuilder,
+    Cursor, LoadStatus, Opts, PixelFormat, Preferences, RenderingContext, ServoBuilder,
+    WebViewBuilder,
 };
-use talaria_core::{BrowserEvent, LoadState, PageIcon, TabEvent, TabId};
+use talaria_core::{BrowserEvent, LoadState, PageIcon, PointerCursor, TabEvent, TabId};
 use url::Url;
 
 use crate::adblocker::ContentBlocker;
@@ -127,7 +128,7 @@ impl ServoRuntime {
         let frame_ready = FrameReadySignal::default();
         let delegate = Rc::new(BrowserDelegate {
             tab_id,
-            browser_event_sender,
+            browser_event_sender: browser_event_sender.clone(),
             frame_ready: frame_ready.clone(),
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
@@ -139,8 +140,11 @@ impl ServoRuntime {
             .delegate(delegate)
             .build();
 
+        for event in new_web_view_feedback(inner.cursor(), inner.status_text()) {
+            let _send_result = browser_event_sender.send(TabEvent::new(tab_id, event));
+        }
         info!("created Servo WebView for tab {}", tab_id.value());
-        Ok(ServoWebView::new(inner, frame_ready, tab_id))
+        Ok(ServoWebView::new(inner, frame_ready, tab_id, scale_factor))
     }
 
     pub fn spin_event_loop(&self) {
@@ -259,20 +263,103 @@ impl servo::WebViewDelegate for BrowserDelegate {
         self.send_browser_event(history_changed_event(entries.len(), current));
     }
 
+    fn notify_cursor_changed(&self, _web_view: servo::WebView, cursor: Cursor) {
+        self.send_browser_event(BrowserEvent::CursorChanged {
+            cursor: pointer_cursor_from_servo(cursor),
+        });
+    }
+
+    fn notify_status_text_changed(&self, _web_view: servo::WebView, status: Option<String>) {
+        self.send_browser_event(BrowserEvent::StatusTextChanged { text: status });
+    }
+
+    fn notify_fullscreen_state_changed(&self, _web_view: servo::WebView, is_fullscreen: bool) {
+        self.send_browser_event(BrowserEvent::FullscreenChanged {
+            fullscreen: is_fullscreen,
+        });
+    }
+
     fn notify_new_frame_ready(&self, _web_view: servo::WebView) {
         self.record_load_milestone(LoadMilestone::FirstFrame);
         self.frame_ready.mark_ready();
     }
 
-    fn notify_crashed(
-        &self,
-        _web_view: servo::WebView,
-        reason: String,
-        _backtrace: Option<String>,
-    ) {
-        self.send_browser_event(BrowserEvent::LoadStateChanged {
+    fn notify_crashed(&self, web_view: servo::WebView, reason: String, _backtrace: Option<String>) {
+        for event in crash_feedback(reason, web_view.cursor(), web_view.status_text()) {
+            self.send_browser_event(event);
+        }
+    }
+}
+
+/// What a freshly built web view's own caches hold. Servo only notifies changes against these
+/// caches (and starts with `Cursor::Pointer`), so the tab's copies must start from the same
+/// values, also when the web view replaces an earlier one.
+fn new_web_view_feedback(cursor: Cursor, status_text: Option<String>) -> [BrowserEvent; 3] {
+    [
+        BrowserEvent::CursorChanged {
+            cursor: pointer_cursor_from_servo(cursor),
+        },
+        BrowserEvent::StatusTextChanged { text: status_text },
+        BrowserEvent::FullscreenChanged { fullscreen: false },
+    ]
+}
+
+/// A crashed page never answers a pointer leave, so the web view's caches keep their pre-crash
+/// values and Servo will only notify changes against those. The tab copies them right after
+/// the failure, so it stays in step when the page is reloaded.
+fn crash_feedback(
+    reason: String,
+    cursor: Cursor,
+    status_text: Option<String>,
+) -> [BrowserEvent; 3] {
+    [
+        BrowserEvent::LoadStateChanged {
             state: LoadState::Failed { message: reason },
-        });
+        },
+        BrowserEvent::CursorChanged {
+            cursor: pointer_cursor_from_servo(cursor),
+        },
+        BrowserEvent::StatusTextChanged { text: status_text },
+    ]
+}
+
+fn pointer_cursor_from_servo(cursor: Cursor) -> PointerCursor {
+    match cursor {
+        Cursor::None => PointerCursor::None,
+        Cursor::Default => PointerCursor::Default,
+        Cursor::Pointer => PointerCursor::Pointer,
+        Cursor::ContextMenu => PointerCursor::ContextMenu,
+        Cursor::Help => PointerCursor::Help,
+        Cursor::Progress => PointerCursor::Progress,
+        Cursor::Wait => PointerCursor::Wait,
+        Cursor::Cell => PointerCursor::Cell,
+        Cursor::Crosshair => PointerCursor::Crosshair,
+        Cursor::Text => PointerCursor::Text,
+        Cursor::VerticalText => PointerCursor::VerticalText,
+        Cursor::Alias => PointerCursor::Alias,
+        Cursor::Copy => PointerCursor::Copy,
+        Cursor::Move => PointerCursor::Move,
+        Cursor::NoDrop => PointerCursor::NoDrop,
+        Cursor::NotAllowed => PointerCursor::NotAllowed,
+        Cursor::Grab => PointerCursor::Grab,
+        Cursor::Grabbing => PointerCursor::Grabbing,
+        Cursor::EResize => PointerCursor::EResize,
+        Cursor::NResize => PointerCursor::NResize,
+        Cursor::NeResize => PointerCursor::NeResize,
+        Cursor::NwResize => PointerCursor::NwResize,
+        Cursor::SResize => PointerCursor::SResize,
+        Cursor::SeResize => PointerCursor::SeResize,
+        Cursor::SwResize => PointerCursor::SwResize,
+        Cursor::WResize => PointerCursor::WResize,
+        Cursor::EwResize => PointerCursor::EwResize,
+        Cursor::NsResize => PointerCursor::NsResize,
+        Cursor::NeswResize => PointerCursor::NeswResize,
+        Cursor::NwseResize => PointerCursor::NwseResize,
+        Cursor::ColResize => PointerCursor::ColResize,
+        Cursor::RowResize => PointerCursor::RowResize,
+        Cursor::AllScroll => PointerCursor::AllScroll,
+        Cursor::ZoomIn => PointerCursor::ZoomIn,
+        Cursor::ZoomOut => PointerCursor::ZoomOut,
     }
 }
 
@@ -470,6 +557,93 @@ mod tests {
                 can_go_back: true,
                 can_go_forward: false,
             }
+        );
+    }
+
+    #[test]
+    fn every_servo_cursor_maps_to_a_pointer_cursor() {
+        let pairs = [
+            (Cursor::None, PointerCursor::None),
+            (Cursor::Default, PointerCursor::Default),
+            (Cursor::Pointer, PointerCursor::Pointer),
+            (Cursor::ContextMenu, PointerCursor::ContextMenu),
+            (Cursor::Help, PointerCursor::Help),
+            (Cursor::Progress, PointerCursor::Progress),
+            (Cursor::Wait, PointerCursor::Wait),
+            (Cursor::Cell, PointerCursor::Cell),
+            (Cursor::Crosshair, PointerCursor::Crosshair),
+            (Cursor::Text, PointerCursor::Text),
+            (Cursor::VerticalText, PointerCursor::VerticalText),
+            (Cursor::Alias, PointerCursor::Alias),
+            (Cursor::Copy, PointerCursor::Copy),
+            (Cursor::Move, PointerCursor::Move),
+            (Cursor::NoDrop, PointerCursor::NoDrop),
+            (Cursor::NotAllowed, PointerCursor::NotAllowed),
+            (Cursor::Grab, PointerCursor::Grab),
+            (Cursor::Grabbing, PointerCursor::Grabbing),
+            (Cursor::EResize, PointerCursor::EResize),
+            (Cursor::NResize, PointerCursor::NResize),
+            (Cursor::NeResize, PointerCursor::NeResize),
+            (Cursor::NwResize, PointerCursor::NwResize),
+            (Cursor::SResize, PointerCursor::SResize),
+            (Cursor::SeResize, PointerCursor::SeResize),
+            (Cursor::SwResize, PointerCursor::SwResize),
+            (Cursor::WResize, PointerCursor::WResize),
+            (Cursor::EwResize, PointerCursor::EwResize),
+            (Cursor::NsResize, PointerCursor::NsResize),
+            (Cursor::NeswResize, PointerCursor::NeswResize),
+            (Cursor::NwseResize, PointerCursor::NwseResize),
+            (Cursor::ColResize, PointerCursor::ColResize),
+            (Cursor::RowResize, PointerCursor::RowResize),
+            (Cursor::AllScroll, PointerCursor::AllScroll),
+            (Cursor::ZoomIn, PointerCursor::ZoomIn),
+            (Cursor::ZoomOut, PointerCursor::ZoomOut),
+        ];
+        assert_eq!(pairs.len(), 35);
+        for (servo_cursor, pointer_cursor) in pairs {
+            assert_eq!(
+                pointer_cursor_from_servo(servo_cursor),
+                pointer_cursor,
+                "{servo_cursor:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_crash_reports_the_failure_then_the_web_views_cached_feedback() {
+        assert_eq!(
+            crash_feedback(
+                "boom".to_owned(),
+                Cursor::Pointer,
+                Some("https://a.test/".to_owned())
+            ),
+            [
+                BrowserEvent::LoadStateChanged {
+                    state: LoadState::Failed {
+                        message: "boom".to_owned(),
+                    },
+                },
+                BrowserEvent::CursorChanged {
+                    cursor: PointerCursor::Pointer,
+                },
+                BrowserEvent::StatusTextChanged {
+                    text: Some("https://a.test/".to_owned()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_new_web_view_reports_the_engines_starting_feedback() {
+        assert_eq!(
+            new_web_view_feedback(Cursor::Pointer, None),
+            [
+                BrowserEvent::CursorChanged {
+                    cursor: PointerCursor::Pointer,
+                },
+                BrowserEvent::StatusTextChanged { text: None },
+                BrowserEvent::FullscreenChanged { fullscreen: false },
+            ]
         );
     }
 

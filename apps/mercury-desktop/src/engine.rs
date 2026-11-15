@@ -5,16 +5,18 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use mercury_ui::MainWindow;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, GraphicsAPI, Image, RenderingState, Timer};
 use talaria_core::{
-    BrowserController, BrowserEvent, LoadState, TabEvent, TabId, WebView as TalariaWebView,
-    dispatch_command,
+    BrowserCommand, BrowserController, BrowserEvent, DEFAULT_ZOOM_PERCENT, LoadState, TabEvent,
+    TabId, WebView as TalariaWebView, dispatch_command,
 };
 use talaria_servo::{
     EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ServoRuntime, ServoWebView, ServoWebViewError,
     ViewportSize,
 };
 
+use crate::keyboard::system_color_scheme;
 use crate::rendering::BrowserRenderingContext;
 use crate::shutdown::{
     ENGINE_SHUTDOWN_TIMEOUT, EngineParts, Watchdog, drop_catching_panic, release_in_order,
@@ -290,6 +292,15 @@ impl EngineState {
 
         self.rendering_context = Some(Rc::new(context));
         self.wgpu_device = Some(device.clone());
+        // The window exists now, so the system appearance can be read. Later changes arrive as
+        // `ThemeChanged` window events.
+        let winit_theme = window
+            .window()
+            .with_winit_window(|winit_window| winit_window.theme())
+            .flatten();
+        if let Some(scheme) = system_color_scheme(winit_theme, window.get_system_color_scheme()) {
+            self.controller.borrow_mut().set_color_scheme(scheme);
+        }
         window.set_content_message(
             "Offscreen rendering initialized. Waiting for Servo WebView.".into(),
         );
@@ -300,10 +311,18 @@ impl EngineState {
     fn pump(&mut self, window: &MainWindow) {
         self.runtime.spin_event_loop();
 
+        let ready_before = {
+            let controller = self.controller.borrow();
+            is_engine_ready(&controller, controller.active_tab_id())
+        };
         let mut state_changed = false;
         for receiver in self.event_receivers.values() {
             state_changed |= apply_pending_browser_events(&self.controller, receiver);
         }
+        let active_became_ready = !ready_before && {
+            let controller = self.controller.borrow();
+            is_engine_ready(&controller, controller.active_tab_id())
+        };
         if state_changed {
             sync_ui(window, &self.controller.borrow());
         }
@@ -360,8 +379,14 @@ impl EngineState {
             );
 
             match create_result {
-                Ok(created_web_view) => {
+                Ok(mut created_web_view) => {
                     created_web_view.hide();
+                    let zoom_percent = tab_zoom_percent(&self.controller.borrow(), tab_id);
+                    if zoom_percent != DEFAULT_ZOOM_PERCENT {
+                        let _zoom_result = created_web_view.set_page_zoom(zoom_percent);
+                    }
+                    let color_scheme = self.controller.borrow().color_scheme();
+                    let _scheme_result = created_web_view.set_color_scheme(color_scheme);
                     self.web_views.insert(tab_id, created_web_view);
                     self.web_view_created = true;
                     self.event_receivers.insert(tab_id, event_receiver);
@@ -374,6 +399,9 @@ impl EngineState {
         }
 
         let active_tab_changed = self.visible_tab_id != Some(active_tab_id);
+        if active_tab_changed && let Some(previous_tab_id) = self.visible_tab_id {
+            queue_leaving_tab(&mut self.controller.borrow_mut(), previous_tab_id);
+        }
         if active_tab_changed {
             if let Some(previous_tab_id) = self.visible_tab_id
                 && let Some(previous_web_view) = self.web_views.get_mut(&previous_tab_id)
@@ -396,6 +424,16 @@ impl EngineState {
                 web_view.set_scale_factor(scale_factor);
             }
             self.current_scale_factor = Some(scale_factor);
+        }
+
+        if let Some(pointer_move) = resting_pointer_move(
+            active_tab_changed,
+            active_became_ready,
+            window.get_web_view_hovered(),
+            window.get_web_view_pointer_x(),
+            window.get_web_view_pointer_y(),
+        ) {
+            self.controller.borrow_mut().queue_command(pointer_move);
         }
 
         if (active_tab_changed || self.current_viewport_size != Some(viewport_size))
@@ -576,6 +614,39 @@ pub(crate) fn apply_pending_browser_events(
     state_changed
 }
 
+/// A page that has just been shown or has just become ready under a resting pointer gets one
+/// pointer move at the pointer's position, so the engine hit-tests (cursor, status text,
+/// hover) without waiting for the user to move.
+pub(crate) fn resting_pointer_move(
+    active_tab_changed: bool,
+    became_ready: bool,
+    pointer_over_web_view: bool,
+    x: f32,
+    y: f32,
+) -> Option<BrowserCommand> {
+    ((active_tab_changed || became_ready) && pointer_over_web_view)
+        .then_some(BrowserCommand::PointerMoved { x, y })
+}
+
+/// The tab being switched away from: its page is told the pointer left (clearing hover state,
+/// cursor and status text), and a fullscreen page leaves fullscreen.
+pub(crate) fn queue_leaving_tab(controller: &mut BrowserController, tab_id: TabId) {
+    controller.queue_command_for(tab_id, BrowserCommand::PointerLeft);
+    let is_fullscreen = controller
+        .tabs()
+        .any(|tab| tab.id() == tab_id && tab.state().is_fullscreen());
+    if is_fullscreen {
+        controller.queue_command_for(tab_id, BrowserCommand::ExitFullscreen);
+    }
+}
+
+fn tab_zoom_percent(controller: &BrowserController, tab_id: TabId) -> u16 {
+    controller
+        .tabs()
+        .find(|tab| tab.id() == tab_id)
+        .map_or(DEFAULT_ZOOM_PERCENT, |tab| tab.state().zoom_percent())
+}
+
 fn is_engine_ready(controller: &BrowserController, tab_id: TabId) -> bool {
     controller
         .tabs()
@@ -607,7 +678,7 @@ mod tests {
     use std::convert::Infallible;
 
     use talaria_core::{
-        BrowserCommand, ImeInput, KeyboardInput, PointerButton, PointerButtonAction,
+        ColorScheme, ImeInput, KeyboardInput, PointerButton, PointerButtonAction, TabCommand,
     };
 
     use super::*;
@@ -663,6 +734,21 @@ mod tests {
         fn ime_input(&mut self, _event: ImeInput) -> Result<(), Self::Error> {
             Ok(())
         }
+        fn set_page_zoom(&mut self, _percent: u16) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn pinch_zoom(&mut self, _delta: f32, _x: f32, _y: f32) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn set_color_scheme(&mut self, _scheme: ColorScheme) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn pointer_left(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     fn mark_engine_ready(controller: &RefCell<BrowserController>, tab_id: TabId) {
@@ -670,6 +756,55 @@ mod tests {
             .borrow_mut()
             .handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
         assert!(handled);
+    }
+
+    #[test]
+    fn switching_away_from_a_fullscreen_tab_leaves_fullscreen() {
+        let mut controller = BrowserController::default();
+        let tab_id = controller.active_tab_id();
+        controller.handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
+        controller.handle_event(tab_id, BrowserEvent::FullscreenChanged { fullscreen: true });
+        controller.open_tab();
+
+        queue_leaving_tab(&mut controller, tab_id);
+
+        let queued = std::iter::from_fn(|| controller.next_command()).collect::<Vec<_>>();
+        assert_eq!(
+            queued,
+            vec![
+                TabCommand::new(tab_id, BrowserCommand::PointerLeft),
+                TabCommand::new(tab_id, BrowserCommand::ExitFullscreen),
+            ]
+        );
+    }
+
+    #[test]
+    fn switching_away_from_a_normal_tab_only_reports_the_pointer_leaving() {
+        let mut controller = BrowserController::default();
+        let tab_id = controller.active_tab_id();
+        controller.handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
+
+        queue_leaving_tab(&mut controller, tab_id);
+
+        assert_eq!(
+            controller.next_command(),
+            Some(TabCommand::new(tab_id, BrowserCommand::PointerLeft))
+        );
+        assert_eq!(controller.next_command(), None);
+    }
+
+    #[test]
+    fn a_resting_pointer_is_replayed_only_for_a_newly_shown_or_ready_page_under_it() {
+        assert_eq!(
+            resting_pointer_move(true, false, true, 12.0, 34.0),
+            Some(BrowserCommand::PointerMoved { x: 12.0, y: 34.0 })
+        );
+        assert_eq!(
+            resting_pointer_move(false, true, true, 1.0, 2.0),
+            Some(BrowserCommand::PointerMoved { x: 1.0, y: 2.0 })
+        );
+        assert_eq!(resting_pointer_move(true, true, false, 1.0, 2.0), None);
+        assert_eq!(resting_pointer_move(false, false, true, 1.0, 2.0), None);
     }
 
     #[test]

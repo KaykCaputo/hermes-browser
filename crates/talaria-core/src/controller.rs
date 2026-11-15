@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use crate::address::{AddressResolutionError, resolve_address};
 use crate::browser::LoadState;
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
-use crate::{Tab, TabActivation, TabCommand, TabId};
+use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, Tab, TabActivation, TabCommand, TabId};
 
 #[derive(Debug)]
 pub struct BrowserController {
@@ -11,6 +11,7 @@ pub struct BrowserController {
     active_tab_id: TabId,
     next_tab_id: u64,
     command_queue: VecDeque<TabCommand>,
+    color_scheme: ColorScheme,
 }
 
 impl BrowserController {
@@ -22,6 +23,7 @@ impl BrowserController {
             active_tab_id: initial_tab_id,
             next_tab_id: 2,
             command_queue: VecDeque::new(),
+            color_scheme: ColorScheme::default(),
         }
     }
 
@@ -149,6 +151,56 @@ impl BrowserController {
         self.active_tab_id = self.tabs[next_index].id();
     }
 
+    pub fn select_last_tab(&mut self) {
+        if let Some(tab) = self.tabs.last() {
+            self.active_tab_id = tab.id();
+        }
+    }
+
+    /// Zooms the active tab in by one step; see `zoom_in`.
+    pub fn zoom_in(&mut self) {
+        self.set_active_zoom(crate::zoom_in(self.active_state().zoom_percent()));
+    }
+
+    /// Zooms the active tab out by one step; see `zoom_out`.
+    pub fn zoom_out(&mut self) {
+        self.set_active_zoom(crate::zoom_out(self.active_state().zoom_percent()));
+    }
+
+    pub fn reset_zoom(&mut self) {
+        self.set_active_zoom(DEFAULT_ZOOM_PERCENT);
+    }
+
+    /// The colour scheme pages should see; the engine gives it to every new web view.
+    pub const fn color_scheme(&self) -> ColorScheme {
+        self.color_scheme
+    }
+
+    /// Records the scheme and queues it for every tab. Tabs that are not engine-ready hold it
+    /// until they are, like other non-pointer commands.
+    pub fn set_color_scheme(&mut self, scheme: ColorScheme) {
+        self.color_scheme = scheme;
+        let tab_ids = self.tabs.iter().map(Tab::id).collect::<Vec<_>>();
+        for tab_id in tab_ids {
+            self.queue_command_for(tab_id, BrowserCommand::SetColorScheme(scheme));
+        }
+    }
+
+    /// Records the zoom and queues it for the engine. A zoom requested before the tab is
+    /// engine-ready is held like other non-pointer commands; the engine also applies the
+    /// recorded zoom whenever it creates the tab's web view.
+    fn set_active_zoom(&mut self, percent: u16) {
+        let tab_id = self.active_tab_id;
+        let tab = self
+            .tab_mut(tab_id)
+            .expect("the controller always owns an active tab");
+        if tab.state().zoom_percent() == percent {
+            return;
+        }
+        tab.state_mut().set_zoom_percent(percent);
+        self.queue_command(BrowserCommand::SetPageZoom { percent });
+    }
+
     pub fn close_tab(&mut self, tab_id: TabId) -> bool {
         if self.tabs.len() == 1 {
             return false;
@@ -229,6 +281,19 @@ impl BrowserController {
                 ) => {
                     *delta_x += latest_delta_x;
                     *delta_y += latest_delta_y;
+                    *x = *latest_x;
+                    *y = *latest_y;
+                    return true;
+                }
+                (
+                    BrowserCommand::PinchZoom { delta, x, y },
+                    BrowserCommand::PinchZoom {
+                        delta: latest_delta,
+                        x: latest_x,
+                        y: latest_y,
+                    },
+                ) => {
+                    *delta *= latest_delta;
                     *x = *latest_x;
                     *y = *latest_y;
                     return true;

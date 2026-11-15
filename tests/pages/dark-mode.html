@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Colour scheme test page</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; color: #000000; }
+  h1 { margin: 0; padding-top: 120px; font: bold 64px sans-serif; text-align: center; }
+  .dark { display: none; }
+  @media (prefers-color-scheme: dark) {
+    html, body { background: #000000; color: #ffffff; }
+    .light { display: none; }
+    .dark { display: block; }
+  }
+</style>
+</head>
+<body>
+  <h1 class="light">light</h1>
+  <h1 class="dark">dark</h1>
+</body>
+</html>

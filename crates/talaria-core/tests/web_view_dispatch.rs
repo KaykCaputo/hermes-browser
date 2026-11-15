@@ -1,5 +1,5 @@
 use talaria_core::{
-    BrowserCommand, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput,
+    BrowserCommand, ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput,
     KeyboardModifiers, PointerButton, PointerButtonAction, WebView, dispatch_command,
 };
 
@@ -28,6 +28,15 @@ enum FakeCall {
     FocusChanged(bool),
     KeyboardInput(KeyboardInput),
     ImeInput(ImeInput),
+    SetPageZoom(u16),
+    SetColorScheme(ColorScheme),
+    ExitFullscreen,
+    PointerLeft,
+    PinchZoom {
+        delta: f32,
+        x: f32,
+        y: f32,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -113,6 +122,26 @@ impl WebView for FakeWebView {
 
     fn ime_input(&mut self, event: ImeInput) -> Result<(), Self::Error> {
         self.record(FakeCall::ImeInput(event))
+    }
+
+    fn set_page_zoom(&mut self, percent: u16) -> Result<(), Self::Error> {
+        self.record(FakeCall::SetPageZoom(percent))
+    }
+
+    fn pinch_zoom(&mut self, delta: f32, x: f32, y: f32) -> Result<(), Self::Error> {
+        self.record(FakeCall::PinchZoom { delta, x, y })
+    }
+
+    fn set_color_scheme(&mut self, scheme: ColorScheme) -> Result<(), Self::Error> {
+        self.record(FakeCall::SetColorScheme(scheme))
+    }
+
+    fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
+        self.record(FakeCall::ExitFullscreen)
+    }
+
+    fn pointer_left(&mut self) -> Result<(), Self::Error> {
+        self.record(FakeCall::PointerLeft)
     }
 }
 
@@ -290,4 +319,74 @@ fn web_view_errors_are_returned_without_conversion() {
 
     assert_eq!(result, Err(FakeError::CommandRejected));
     assert_eq!(web_view.calls, vec![FakeCall::Reload]);
+}
+
+#[test]
+fn set_page_zoom_command_forwards_the_percentage() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(&mut web_view, BrowserCommand::SetPageZoom { percent: 133 });
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(web_view.calls, vec![FakeCall::SetPageZoom(133)]);
+}
+
+#[test]
+fn pinch_zoom_command_forwards_delta_and_centre() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(
+        &mut web_view,
+        BrowserCommand::PinchZoom {
+            delta: 1.25,
+            x: 40.0,
+            y: 60.0,
+        },
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        web_view.calls,
+        vec![FakeCall::PinchZoom {
+            delta: 1.25,
+            x: 40.0,
+            y: 60.0,
+        }]
+    );
+}
+
+#[test]
+fn set_color_scheme_command_forwards_the_scheme() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(
+        &mut web_view,
+        BrowserCommand::SetColorScheme(ColorScheme::Dark),
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        web_view.calls,
+        vec![FakeCall::SetColorScheme(ColorScheme::Dark)]
+    );
+}
+
+#[test]
+fn exit_fullscreen_command_calls_exit_fullscreen() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(&mut web_view, BrowserCommand::ExitFullscreen);
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(web_view.calls, vec![FakeCall::ExitFullscreen]);
+}
+
+#[test]
+fn pointer_left_command_calls_pointer_left() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(&mut web_view, BrowserCommand::PointerLeft);
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(web_view.calls, vec![FakeCall::PointerLeft]);
 }
