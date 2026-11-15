@@ -5,17 +5,19 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use mercury_ui::MainWindow;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, GraphicsAPI, Image, RenderingState, Timer};
 use talaria_core::{
     BrowserController, BrowserEvent, LoadState, TabEvent, TabId, WebView as TalariaWebView,
     dispatch_command,
 };
 use talaria_servo::{
-    EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ServoRuntime, ServoWebView, ServoWebViewError,
-    ViewportSize,
+    EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ScreenMetrics, ServoRuntime, ServoWebView,
+    ServoWebViewError, ViewportSize,
 };
 
 use crate::rendering::BrowserRenderingContext;
+use crate::screen_metrics::screen_metrics;
 use crate::ui_sync::sync_ui;
 
 pub(crate) const MAX_COMMANDS_PER_FRAME: usize = 128;
@@ -50,6 +52,8 @@ struct EngineState {
     visible_tab_id: Option<TabId>,
     current_viewport_size: Option<ViewportSize>,
     current_scale_factor: Option<f32>,
+    /// What pages were last told about the screen and window.
+    screen_metrics: Option<ScreenMetrics>,
 }
 
 enum GraphicsStatus {
@@ -82,6 +86,7 @@ pub(crate) fn connect_servo_runtime(
             visible_tab_id: None,
             current_viewport_size: None,
             current_scale_factor: None,
+            screen_metrics: None,
         }),
         bootstrap_failure_logged: Cell::new(false),
     });
@@ -252,6 +257,7 @@ impl EngineState {
     /// lifetimes, tab visibility, sizing and command dispatch.
     fn pump(&mut self, window: &MainWindow) {
         self.runtime.spin_event_loop();
+        self.update_screen_metrics(window);
 
         let mut state_changed = false;
         for receiver in self.event_receivers.values() {
@@ -369,6 +375,14 @@ impl EngineState {
             Err((tab_id, error)) => {
                 report_web_view_error(window, &self.controller, tab_id, &error);
             }
+        }
+    }
+
+    fn update_screen_metrics(&mut self, window: &MainWindow) {
+        let metrics = window.window().with_winit_window(screen_metrics).flatten();
+        if metrics != self.screen_metrics {
+            self.runtime.set_screen_metrics(metrics);
+            self.screen_metrics = metrics;
         }
     }
 

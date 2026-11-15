@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Web features</title>
+<style>
+  body { font: 28px/1.4 -apple-system, "Helvetica Neue", Arial, sans-serif; margin: 24px; }
+  .line { margin-bottom: 10px; word-break: break-all; }
+  b { font-family: Menlo, monospace; }
+</style>
+</head>
+<body>
+<div id="results"></div>
+<script>
+  "use strict";
+  const results = document.getElementById("results");
+
+  function report(label, compute) {
+    let value;
+    try {
+      value = String(compute());
+    } catch (error) {
+      value = "error: " + error;
+    }
+    const item = document.createElement("div");
+    item.className = "line";
+    const name = document.createElement("b");
+    name.textContent = label + ": ";
+    item.appendChild(name);
+    item.appendChild(document.createTextNode(value));
+    results.appendChild(item);
+  }
+
+  report("navigator.userAgent", () => navigator.userAgent);
+  report("screen", () => screen.width + " \u00d7 " + screen.height);
+  report("screen.avail", () => screen.availWidth + " \u00d7 " + screen.availHeight);
+  report("outer", () => outerWidth + " \u00d7 " + outerHeight + " at " + screenX + ", " + screenY);
+  report("'IntersectionObserver' in window", () => "IntersectionObserver" in window);
+  report("'indexedDB' in window", () => "indexedDB" in window);
+  report("typeof RTCPeerConnection", () => typeof RTCPeerConnection);
+  report("CSS.supports('container-type: inline-size')",
+         () => CSS.supports("container-type: inline-size"));
+  report("WebGL2 context", () => document.createElement("canvas").getContext("webgl2") !== null);
+</script>
+</body>
+</html>

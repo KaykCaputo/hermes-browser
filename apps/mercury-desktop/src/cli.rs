@@ -9,6 +9,7 @@ pub(crate) struct LaunchOptions {
     pub background: bool,
     pub gpu_canvas: bool,
     pub profile_dir: Option<PathBuf>,
+    pub experimental_web_features: bool,
 }
 
 impl Default for LaunchOptions {
@@ -20,6 +21,7 @@ impl Default for LaunchOptions {
             background: false,
             gpu_canvas: true,
             profile_dir: None,
+            experimental_web_features: true,
         }
     }
 }
@@ -50,6 +52,8 @@ Options:
   --window-size <W>x<H>            Set the window's logical size, for example 1280x800
   --background                     Start without taking focus (for automated runs)
   --disable-gpu-canvas             Draw 2D canvases on the CPU
+  --disable-experimental-web-features
+                                   Leave Servo's experimental web-platform features off
   --profile-dir <directory>        Keep cookies and site data in this directory
                                    (a screenshot run otherwise uses a temporary one)
   --help                           Print this help and exit
@@ -74,6 +78,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
     let mut background = false;
     let mut gpu_canvas = true;
     let mut profile_dir = None;
+    let mut experimental_web_features = true;
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -110,6 +115,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
             }
             "--background" => background = true,
             "--disable-gpu-canvas" => gpu_canvas = false,
+            "--disable-experimental-web-features" => experimental_web_features = false,
             "--profile-dir" => {
                 let value = option_value(&mut arguments, "--profile-dir", "<directory>")?;
                 profile_dir = Some(PathBuf::from(value));
@@ -138,6 +144,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
         background,
         gpu_canvas,
         profile_dir,
+        experimental_web_features,
     }))
 }
 
@@ -219,6 +226,7 @@ mod tests {
                 background: false,
                 gpu_canvas: true,
                 profile_dir: None,
+                experimental_web_features: true,
             })
         );
     }
@@ -404,6 +412,32 @@ mod tests {
     #[test]
     fn profile_dir_without_a_value_is_a_usage_error() {
         assert_eq!(exit_code(&parse(&["--profile-dir"])), Some(2));
+    }
+
+    #[test]
+    fn experimental_web_features_are_on_by_default_and_can_be_disabled() {
+        let CliOutcome::Run(default_options) = parse(&["https://a.test"]) else {
+            panic!("a URL alone should run the browser");
+        };
+        assert!(default_options.experimental_web_features);
+
+        assert_eq!(
+            parse(&["--disable-experimental-web-features", "https://a.test"]),
+            CliOutcome::Run(LaunchOptions {
+                urls: vec!["https://a.test".to_owned()],
+                experimental_web_features: false,
+                ..LaunchOptions::default()
+            })
+        );
+    }
+
+    #[test]
+    fn help_describes_disable_experimental_web_features() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains("--disable-experimental-web-features"));
     }
 
     #[test]

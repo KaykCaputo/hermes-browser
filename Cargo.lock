@@ -5342,6 +5342,7 @@ dependencies = [
  "libc",
  "log",
  "mercury-ui",
+ "objc2-app-kit 0.3.2",
  "servo",
  "signal-hook-registry",
  "slint",

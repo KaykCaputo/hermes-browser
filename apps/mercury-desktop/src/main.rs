@@ -22,6 +22,7 @@ mod keyboard;
 mod panic_hook;
 mod profile;
 mod rendering;
+mod screen_metrics;
 mod screenshot;
 mod shortcuts;
 mod ui_sync;
@@ -74,6 +75,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         RuntimeOptions {
             gpu_canvas: options.gpu_canvas,
             config_dir: profile.servo_config_dir(),
+            experimental_web_features: options.experimental_web_features,
         },
     )?;
     sync_ui(&window, &controller.borrow());

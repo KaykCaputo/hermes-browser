@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -10,7 +10,8 @@ use euclid::Scale;
 use log::info;
 use rustls::crypto::CryptoProvider;
 use servo::{
-    LoadStatus, Opts, PixelFormat, Preferences, RenderingContext, ServoBuilder, WebViewBuilder,
+    LoadStatus, Opts, PixelFormat, PrefValue, Preferences, RenderingContext, ServoBuilder,
+    WebViewBuilder,
 };
 use talaria_core::{BrowserEvent, LoadState, PageIcon, TabEvent, TabId};
 use url::Url;
@@ -18,6 +19,7 @@ use url::Url;
 use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
+use crate::screen::ScreenMetrics;
 use crate::{ServoWebView, ServoWebViewError};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
@@ -67,6 +69,8 @@ pub struct RuntimeOptions {
     /// Where Servo keeps cookies, HSTS, HTTP authentication and site storage. `None` keeps
     /// nothing across runs.
     pub config_dir: Option<PathBuf>,
+    /// Turn on the web-platform features servoshell enables in its experimental mode.
+    pub experimental_web_features: bool,
 }
 
 impl Default for RuntimeOptions {
@@ -74,6 +78,7 @@ impl Default for RuntimeOptions {
         Self {
             gpu_canvas: true,
             config_dir: None,
+            experimental_web_features: true,
         }
     }
 }
@@ -82,6 +87,7 @@ pub struct ServoRuntime {
     inner: servo::Servo,
     redraw_waker: EventLoopWaker,
     content_blocker: Rc<ContentBlocker>,
+    screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
 }
 
 impl ServoRuntime {
@@ -119,7 +125,13 @@ impl ServoRuntime {
             inner,
             redraw_waker,
             content_blocker,
+            screen_metrics: Rc::default(),
         }
+    }
+
+    /// What pages see as the screen and window geometry; `None` lets Servo use its defaults.
+    pub fn set_screen_metrics(&self, metrics: Option<ScreenMetrics>) {
+        self.screen_metrics.set(metrics);
     }
 
     pub fn create_web_view(
@@ -138,6 +150,7 @@ impl ServoRuntime {
             frame_ready: frame_ready.clone(),
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
+            screen_metrics: Rc::clone(&self.screen_metrics),
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -186,7 +199,60 @@ fn mercury_preferences(runtime_options: &RuntimeOptions) -> Preferences {
     if runtime_options.gpu_canvas {
         preferences.dom_canvas_backend = "vello".to_owned();
     }
+    if runtime_options.experimental_web_features {
+        for name in EXPERIMENTAL_PREFS {
+            preferences.set_value(name, PrefValue::Bool(true));
+        }
+    }
+    // Always off: in Servo 0.8.0 `getUserMedia` opens the camera and microphone without asking
+    // the embedder for permission (`mediadevices.rs`), so WebRTC must stay disabled until
+    // Mercury can gate device access itself.
+    preferences.dom_webrtc_enabled = false;
+    preferences.user_agent = firefox_compatible_user_agent(&preferences.user_agent);
     preferences
+}
+
+// From Servo's servoshell, https://github.com/servo/servo, tag `v0.8.0` (commit
+// `4e136d8ef31b7c4748fbfac606ca463f3efd7537`), `ports/servoshell/prefs.rs` lines 29-53
+// (`EXPERIMENTAL_PREFS`). Licensed under the Mozilla Public License 2.0.
+/// Preferences that servoshell turns on with `--enable-experimental-web-platform-features`:
+/// implemented in Servo but off by default.
+const EXPERIMENTAL_PREFS: &[&str] = &[
+    "dom_async_clipboard_enabled",
+    "dom_exec_command_enabled",
+    "dom_fontface_enabled",
+    "dom_indexeddb_enabled",
+    "dom_intersection_observer_enabled",
+    "dom_navigator_protocol_handlers_enabled",
+    "dom_notification_enabled",
+    "dom_offscreen_canvas_enabled",
+    "dom_permissions_enabled",
+    "dom_sanitizer_enabled",
+    "dom_storage_manager_api_enabled",
+    "dom_webgl2_enabled",
+    "dom_webgpu_enabled",
+    "layout_css_backdrop_filter_enabled",
+    "layout_css_columns_enabled",
+    "layout_css_container_queries_enabled",
+    "layout_css_ellipse_corners_enabled",
+    "layout_css_font_variations_enabled",
+];
+
+/// Servo's user agent already names the Firefox release it matches, but carries a `Servo/x.y`
+/// token where Firefox has `Gecko/20100101`; some sites refuse to serve unrecognised browsers.
+/// Replaces that token, keeping the rest of Servo's string (platform and Firefox version).
+fn firefox_compatible_user_agent(servo_user_agent: &str) -> String {
+    servo_user_agent
+        .split(' ')
+        .map(|token| {
+            if token.starts_with("Servo/") {
+                "Gecko/20100101"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 struct BrowserDelegate {
@@ -195,6 +261,7 @@ struct BrowserDelegate {
     frame_ready: FrameReadySignal,
     load_metrics: RefCell<PageLoadMetrics>,
     content_blocker: Rc<ContentBlocker>,
+    screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
 }
 
 impl BrowserDelegate {
@@ -222,6 +289,12 @@ impl BrowserDelegate {
 }
 
 impl servo::WebViewDelegate for BrowserDelegate {
+    fn screen_geometry(&self, _web_view: servo::WebView) -> Option<servo::ScreenGeometry> {
+        self.screen_metrics
+            .get()
+            .map(ScreenMetrics::to_servo_geometry)
+    }
+
     fn load_web_resource(&self, web_view: servo::WebView, load: servo::WebResourceLoad) {
         self.content_blocker
             .handle_web_resource_load(Some(&web_view), load);
@@ -432,6 +505,85 @@ mod tests {
             preferences.dom_canvas_backend,
             Preferences::default().dom_canvas_backend
         );
+    }
+
+    fn preferences_with_experimental_web_features(enabled: bool) -> Preferences {
+        mercury_preferences(&RuntimeOptions {
+            experimental_web_features: enabled,
+            ..RuntimeOptions::default()
+        })
+    }
+
+    #[test]
+    fn experimental_features_enable_servoshells_list() {
+        let preferences = preferences_with_experimental_web_features(true);
+
+        assert_eq!(EXPERIMENTAL_PREFS.len(), 18);
+        for name in EXPERIMENTAL_PREFS {
+            assert_eq!(preferences.get_value(name), PrefValue::Bool(true), "{name}");
+        }
+    }
+
+    #[test]
+    fn experimental_features_are_on_by_default() {
+        assert!(RuntimeOptions::default().experimental_web_features);
+    }
+
+    #[test]
+    fn experimental_features_can_be_disabled() {
+        let preferences = preferences_with_experimental_web_features(false);
+        let defaults = Preferences::default();
+
+        for name in EXPERIMENTAL_PREFS {
+            assert_eq!(
+                preferences.get_value(name),
+                defaults.get_value(name),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn webrtc_stays_disabled() {
+        for enabled in [true, false] {
+            assert!(!preferences_with_experimental_web_features(enabled).dom_webrtc_enabled);
+        }
+    }
+
+    #[test]
+    fn user_agent_drops_the_servo_token() {
+        assert_eq!(
+            firefox_compatible_user_agent(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Servo/0.8.0 Firefox/153.0"
+            ),
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:153.0) Gecko/20100101 Firefox/153.0"
+        );
+        assert_eq!(
+            firefox_compatible_user_agent(
+                "Mozilla/5.0 (X11; Linux aarch64; rv:153.0) Servo/0.8.0 Firefox/153.0"
+            ),
+            "Mozilla/5.0 (X11; Linux aarch64; rv:153.0) Gecko/20100101 Firefox/153.0"
+        );
+    }
+
+    #[test]
+    fn user_agent_without_a_servo_token_is_unchanged() {
+        let user_agent = "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0";
+
+        assert_eq!(firefox_compatible_user_agent(user_agent), user_agent);
+    }
+
+    #[test]
+    fn the_user_agent_is_firefox_compatible_in_both_modes() {
+        for enabled in [true, false] {
+            let user_agent = preferences_with_experimental_web_features(enabled).user_agent;
+
+            assert!(!user_agent.contains("Servo/"), "{user_agent}");
+            assert!(
+                user_agent.contains(" Gecko/20100101 Firefox/"),
+                "{user_agent}"
+            );
+        }
     }
 
     #[test]
