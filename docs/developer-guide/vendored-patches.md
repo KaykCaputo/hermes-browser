@@ -1,6 +1,6 @@
 ---
 title: Vendored Patches
-description: Maintain and eventually remove Mercury's focused gaol and Surfman compatibility patches.
+description: Maintain and eventually remove Mercury's focused gaol, Surfman and servo-canvas compatibility patches.
 ---
 
 # Vendored patches
@@ -13,8 +13,9 @@ Mercury vendors code when a pinned Servo dependency needs a small, reviewable co
 | --- | --- | --- |
 | `third_party/gaol` | 0.2.1 | Modern Linux syscall compatibility and a non-zero file-size limit for Servo shared-memory IPC |
 | `third_party/surfman` | 0.14.0 | Avoid process-global `DRI_PRIME=1` selection and its race with media initialization |
+| `third_party/servo-canvas` | 0.8.0 | Make Servo's GPU 2D-canvas backend (`vello` feature) build against wgpu 30 |
 
-Both patches were introduced by [Hermes Browser](https://github.com/KaykCaputo/hermes-browser), the project Mercury is derived from, and Mercury continues to carry them.
+The gaol and Surfman patches were introduced by [Hermes Browser](https://github.com/KaykCaputo/hermes-browser), the project Mercury is derived from, and Mercury continues to carry them. Mercury added the servo-canvas patch.
 
 The root `[patch.crates-io]` section redirects Servo's dependency graph to these directories.
 
@@ -41,6 +42,10 @@ cargo test \
 The separate target directory avoids leaving an untracked build tree inside the vendored crate.
 
 Media uses Servo's upstream GStreamer backend without a local patch. It still needs a manual playback check because unit tests cannot prove that the host's plugins, decoder selection, audio sink, frame transfer, and isolated content process work together.
+
+## The servo-canvas patch
+
+Servo 0.8.0's GPU 2D canvas (`vello` feature, preference `dom_canvas_backend = "vello"`) does not compile as published: in wgpu 30, which vello 0.11 requires, `BufferSlice::get_mapped_range()` returns a `Result`. The vendored copy handles the error in `VelloDrawTarget::map_read` the way that function already handles a failed `map_async`; `third_party/servo-canvas/MERCURY.md` describes the change. The first commit that added the directory holds the crate exactly as published, so `git diff` against it shows the whole patch.
 
 ## Remove a patch
 

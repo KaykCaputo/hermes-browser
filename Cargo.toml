@@ -45,6 +45,7 @@ url = "2.5"
 
 [patch.crates-io]
 gaol = { path = "third_party/gaol" }
+servo-canvas = { path = "third_party/servo-canvas" }
 surfman = { path = "third_party/surfman" }
 
 # Keep the controller easy to debug while optimizing the browser-engine, frame-transfer, and media
