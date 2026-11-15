@@ -7,6 +7,12 @@
 //! never carry a name that lies about what it is.
 
 mod content_disposition;
+mod error;
+mod manager;
 pub mod naming;
+mod transfer;
 
+pub use manager::{
+    DownloadEvent, DownloadId, DownloadManager, DownloadRequest, ResumeFrom, Timeouts,
+};
 pub use naming::{file_name_for, format_bytes, sanitize_file_name, unique_path};

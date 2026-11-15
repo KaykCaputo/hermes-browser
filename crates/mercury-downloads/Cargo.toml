@@ -5,6 +5,21 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+futures-util.workspace = true
+log.workspace = true
 mime_guess.workspace = true
 percent-encoding.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "rt-multi-thread",
+    "sync",
+    "time",
+] }
 url.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net"] }
