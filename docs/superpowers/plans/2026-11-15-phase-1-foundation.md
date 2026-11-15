@@ -33,7 +33,7 @@ Slint 1.18.1 crates in `…/mercury-research/gpu/crates/`.
 - `talaria-servo` is the only crate allowed to name Servo types, except the rendering and keyboard glue in `mercury-desktop` that already does.
 - Dependency pins that must not move: `surfman 0.14`, `gleam 0.15`, `glow 0.17`, `euclid 0.22`, `dpi 0.1`, `url 2.5`, `rustls 0.23`, `content-security-policy 0.9`.
 - This machine is macOS arm64. Linux-only code (`#[cfg(target_os = "linux")]`) cannot be compiled here; it is checked later by CI. Keep Linux-only edits minimal and list every one in your report.
-- GUI checks: never synthesise keyboard or mouse input and never use AppleScript/`cliclick`. Launch the app only through `.superpowers/research/shot.sh` (captures the app's own window) or, once Task 3 exists, `--screenshot`. Close what you launch.
+- GUI checks: never synthesise keyboard or mouse input and never use AppleScript/`cliclick`. Never launch the app in a way that takes focus from the user: use `--screenshot`, or pass `--background` (for example `.superpowers/research/shot.sh <binary> mercury <out.png> <seconds> --background [URL…]`, which captures the app's own window). Close what you launch and confirm with `pgrep -fl mercury-browser`.
 - Do not edit `third_party/`, `crates/talaria-servo/resources/adblock/*.txt` or `docs/screenshots/` unless your task says so.
 - Commit messages follow the repository's style: `type(scope): summary` (for example `feat(core): …`, `fix(desktop): …`, `build: …`, `docs: …`, `refactor(desktop): …`).
 - Follow test-driven development for logic: write the failing test, watch it fail, implement, watch it pass.
@@ -182,7 +182,7 @@ Slint 1.18.1 crates in `…/mercury-research/gpu/crates/`.
 **Required reading:** R3 §1 (all of it; §1.11 is the checklist) and R4 §2.1, §2.2, §4.5, §4.10.
 
 **Files:**
-- Modify: `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`, `apps/mercury-desktop/Cargo.toml`, `apps/mercury-desktop/build.rs`, `apps/mercury-desktop/src/{main.rs,engine.rs,rendering.rs}`, `crates/talaria-servo/Cargo.toml`, `crates/talaria-servo/src/{adblocker.rs,runtime.rs}`
+- Modify: `Cargo.toml`, `Cargo.lock`, `.cargo/config.toml`, `apps/mercury-desktop/Cargo.toml`, `apps/mercury-desktop/build.rs`, `apps/mercury-desktop/src/{main.rs,engine.rs,rendering.rs,screenshot.rs}`, `crates/talaria-servo/Cargo.toml`, `crates/talaria-servo/src/{adblocker.rs,runtime.rs}`, `third_party/gaol/{sandbox.rs,platform/macos/mod.rs,platform/unix/process.rs,MERCURY.md}`
 
 **Interfaces:**
 - Produces: workspace dependencies `servo = { version = "=0.8.0", features = ["vello", "webgl", "subtlecrypto", "brotli-compression-stream"] }`, `slint = { version = "~1.18.1", default-features = false, features = ["backend-winit", "compat-1-2", "renderer-femtovg-wgpu", "std", "unstable-wgpu-30", "unstable-winit-030"] }`, `slint-build = "~1.18.1"`, `adblock = "=0.13.5"`.
@@ -196,6 +196,8 @@ Slint 1.18.1 crates in `…/mercury-research/gpu/crates/`.
 5. Slint API moves (R4 §2.1 table): `slint::wgpu_29` → `slint::wgpu_30`, `require_wgpu_29` → `require_wgpu_30`, `GraphicsAPI::WGPU29` → `GraphicsAPI::WGPU30`. In the Linux-only frame import, `create_texture_from_hal` takes a third argument `wgpu::TextureUses::UNINITIALIZED` (R4 §4.10). That is the only Linux-only code change allowed in this task.
 6. If `webgl`, `subtlecrypto` or `brotli-compression-stream` fails to build on macOS, remove just that feature and report it.
 7. There must be exactly one `wgpu` major in the result: `cargo tree --release -p mercury-desktop -i wgpu` lists a single 30.x.
+8. Remove the three compiler warnings in the vendored `third_party/gaol` crate with the smallest possible edits (`sandbox.rs:79` `try!(…)` → `…?`; `platform/macos/mod.rs:176` `extern {` → `extern "C" {`; `platform/unix/process.rs:79` drop the unnecessary `unsafe` block, keeping its body), and add a line to `third_party/gaol/MERCURY.md` recording that Mercury made these three warning-only edits. With this and requirement 1 (`ash` Linux-only), the four quality commands must print **no warnings at all** from this task onward.
+9. The engine bootstraps graphics by taking one throw-away `Window::take_snapshot()` when no frame has been drawn (see `engine.rs`). This relies on the FemtoVG renderer running the rendering notifier for snapshot renders. It was checked in the Slint 1.18.1 sources; confirm it still works after the upgrade with a screenshot run while the window is fully covered, if the desktop happens to allow it, and say whether you could.
 
 - [ ] **Step 1:** Add the `stopped_is_a_loaded_state` test; it fails to compile until the upgrade (expected).
 - [ ] **Step 2:** Apply manifest changes and the targeted lock update; fix compile errors; quality commands pass. Commit: `build: upgrade to Servo 0.8.0, Slint 1.18.1 and adblock 0.13.5`.
@@ -257,7 +259,8 @@ Slint 1.18.1 crates in `…/mercury-research/gpu/crates/`.
 3. `mercury_options()` takes the config directory: `config_dir` set, `hard_fail: false`, `multiprocess: true`, `sandbox: false`. Update the two existing options tests and add `hard_fail_is_disabled` and `config_dir_is_passed_to_servo`.
 4. If the profile cannot be created, log the error and continue with `config_dir: None`.
 5. Port servoshell's `panic_hook.rs` and `crash_handler.rs` (and what they need from `backtrace.rs`) from the `v0.8.0` checkout, MPL-2.0, with source headers and a notices entry. Install both at the very start of `main`, before `run_content_process_if_requested()`, so content processes get them too. `signal-hook-registry` and `backtrace` are already in `Cargo.lock`; add them as direct dependencies at the locked versions (Unix-only for `signal-hook-registry`).
-6. Orphan prevention: in `talaria-servo/src/content_process.rs`, before `servo::run_content_process(token)`, record `std::os::unix::process::parent_id()` and start a thread that checks once a second and calls `std::process::exit(0)` when the parent id has changed (Unix only; no-op elsewhere). Keep it in its own small function with a doc comment explaining why.
+6. `THIRD-PARTY-NOTICES.md`: its opening paragraph currently says every file containing copied code names its source at the top. That is not true of the code inherited from Hermes Browser. Reword it so the statement applies to code taken from projects other than the upstream base, which the whole codebase derives from.
+7. Orphan prevention: in `talaria-servo/src/content_process.rs`, before `servo::run_content_process(token)`, record `std::os::unix::process::parent_id()` and start a thread that checks once a second and calls `std::process::exit(0)` when the parent id has changed (Unix only; no-op elsewhere). Keep it in its own small function with a doc comment explaining why.
 
 **Tests (write first):**
 - `profile.rs`: `resolves_under_the_data_directory` (`/data` → `/data/<APP_DIR_NAME>/Default`, with the two derived paths); `override_root_wins`; `no_data_directory_and_no_override_is_none`; `create_makes_both_directories` (use a temporary directory from `std::env::temp_dir()` with a unique name; clean up).
@@ -268,7 +271,7 @@ Slint 1.18.1 crates in `…/mercury-research/gpu/crates/`.
 - [ ] **Step 2:** Port the panic hook and crash handler; wire `main.rs`.
 - [ ] **Step 3:** Add the parent watchdog.
 - [ ] **Step 4:** Verify persistence: run `--screenshot /tmp/p1.png --profile-dir /tmp/mercury-profile-test https://example.com`, then `ls /tmp/mercury-profile-test/servo` and report what Servo wrote. Then visit a page that sets a persistent cookie (for example `https://httpbin.org/cookies/set/mercury/1`) with the same profile, exit, and check `cookie_jar.json` contains `mercury`. If the site is unreachable, say so and report the directory listing instead.
-- [ ] **Step 5:** Verify orphan prevention: start `./target/release/mercury-browser --profile-dir /tmp/mercury-profile-test &`, wait 5 s, `kill -9` the main process only, wait 3 s, and show with `pgrep -fl "mercury-browser --content-process"` that no content process remains.
+- [ ] **Step 5:** Verify orphan prevention: start `./target/release/mercury-browser --background --profile-dir /tmp/mercury-profile-test &`, wait 5 s, `kill -9` the main process only, wait 3 s, and show with `pgrep -fl "mercury-browser --content-process"` that no content process remains.
 - [ ] **Step 6:** Quality commands pass. Commit: `feat(desktop): add a profile directory and contain engine crashes`.
 
 ---
@@ -455,7 +458,8 @@ Slint 1.18.1 crates in `…/mercury-research/gpu/crates/`.
   ```rust
   impl BrowserController {
       /// Reserves a tab for a web view the engine is creating itself. The tab is inserted
-      /// directly after `opener`, becomes active, is engine-ready, and has no initial URL.
+      /// directly after `opener`, becomes active, and has no initial URL. Like any other tab it
+      /// becomes engine-ready on its first address or history event.
       /// Returns None if `opener` does not exist.
       pub fn adopt_tab(&mut self, opener: TabId) -> Option<TabId>;
   }
@@ -480,9 +484,53 @@ Slint 1.18.1 crates in `…/mercury-research/gpu/crates/`.
 4. The opener's tab must keep working after the new tab closes.
 5. Test pages: `opener.html` has a link `<a href="opened.html" target="_blank">` and a script that calls `window.open('opened.html')` 300 ms after load; `opened.html` shows the text "opened by a page" on a yellow background.
 
-**Tests (write first):** `adopted_tab_is_inserted_after_its_opener_and_activated`; `adopted_tab_is_engine_ready_and_has_no_initial_url`; `adopting_from_an_unknown_opener_is_refused`; `close_request_closes_the_tab`.
+6. Readiness follows the rules Task 3 established: the adopted tab is not engine-ready until its web view reports, and `take_initial_url` for it returns `None`, so the engine does not create a second web view. If the user navigates it before it is ready, the normal replacement path applies and the tab gets a fresh web view (the link to its opener is lost; that is acceptable). Each web view has its own event channel; give adopted web views one too.
+
+**Tests (write first):** `adopted_tab_is_inserted_after_its_opener_and_activated`; `adopted_tab_has_no_initial_url_and_becomes_ready_on_its_first_event`; `navigating_an_adopted_tab_before_it_is_ready_requests_a_fresh_web_view`; `adopting_from_an_unknown_opener_is_refused`; `close_request_closes_the_tab`.
 
 - [ ] **Step 1:** Core tests → implement → pass.
 - [ ] **Step 2:** Delegate, allocator and adoption queue; `engine.rs` wiring.
 - [ ] **Step 3:** Verify: `--screenshot /tmp/mercury-open.png --screenshot-delay 2500 "file://$PWD/tests/pages/opener.html"`. Because the script opens a tab after load, the capture must show two tabs with the yellow "opened by a page" page active. If Servo blocks the script-initiated `window.open` as a popup (no user activation), report exactly what happened and what the log says; do not disable any Servo protection without asking.
 - [ ] **Step 4:** Quality commands pass. Commit: `feat: open and close tabs requested by pages`.
+
+---
+
+### Task 11: Web-compatibility defaults
+
+**Required reading:** `.superpowers/research/R5-zervo-harvest.md` §7.11 and §8.6; `.superpowers/research/R3-servo-0.8-api.md` §1.4, §2.1 (`screen_geometry`), §4.5 (default user agent). Reference: servoshell at `v0.8.0`, `ports/servoshell/prefs.rs:29-53` (`EXPERIMENTAL_PREFS`), and Zervo at `86cb7126` (`…/mercury-research/zervo/Zervo/src/main.rs:152-156,455-507`, `src/app.rs:510-530`; MPL-2.0).
+
+**Files:**
+- Modify: `crates/talaria-servo/src/{runtime.rs,lib.rs}`, `apps/mercury-desktop/src/{cli.rs,main.rs,engine.rs}`, `THIRD-PARTY-NOTICES.md`
+- Create: `crates/talaria-servo/src/screen.rs`, `tests/pages/features.html`
+
+**Interfaces:**
+- Produces in `talaria-servo`:
+  ```rust
+  pub struct RuntimeOptions { pub config_dir: Option<PathBuf>, pub experimental_web_features: bool /* default true */ }
+  /// Screen and window geometry in device pixels, as the page's `window.screen` and
+  /// `outerWidth`/`screenX` should report them.
+  #[derive(Clone, Copy, Debug, PartialEq)]
+  pub struct ScreenMetrics {
+      pub screen_size: (u32, u32),
+      pub available_origin: (i32, i32),
+      pub available_size: (u32, u32),
+      pub window_origin: (i32, i32),
+      pub window_size: (u32, u32),
+  }
+  impl ServoRuntime { pub fn set_screen_metrics(&self, metrics: Option<ScreenMetrics>); }
+  ```
+- Produces in `cli.rs`: `LaunchOptions.experimental_web_features: bool` (default `true`), cleared by `--disable-experimental-web-features`.
+
+**Requirements:**
+1. When `experimental_web_features` is true, `mercury_preferences()` turns on exactly the preferences in servoshell's `EXPERIMENTAL_PREFS` list at `v0.8.0` (18 names; copy the list with a source comment, MPL-2.0, and a notices entry). When false, Servo's defaults are left alone.
+2. `dom_webrtc_enabled` is always `false`, with a comment giving the reason: in Servo 0.8.0 `getUserMedia` opens the camera and microphone without asking the embedder for permission. A unit test asserts it stays `false` in both modes.
+3. User agent: Servo's default for the platform with the `Servo/<version>` token removed and `Gecko/20100101` in its place, so it reads as the Firefox release Servo already claims (derive it from Servo's own string at run time — do not hard-code a Firefox version). It applies in both modes. Unit-test the transformation on the macOS and Linux default strings.
+4. `screen_geometry`: `BrowserDelegate` answers from the metrics last given to `set_screen_metrics` (`None` → Servo's default). The engine updates the metrics in `pump` from the winit window and its current monitor (size, position, scale factor), and only calls the setter when they change. On macOS the available area excludes the menu bar and Dock (`NSScreen.visibleFrame`); if that needs a dependency not already in `Cargo.lock`, use the full screen and say so.
+5. `tests/pages/features.html`: a self-contained page that writes one line per check into the document, in large text: `navigator.userAgent`; `screen.width × screen.height`; `'IntersectionObserver' in window`; `'indexedDB' in window`; `typeof RTCPeerConnection`; `CSS.supports('container-type: inline-size')`; whether a WebGL2 context can be created.
+
+**Tests (write first):** `experimental_features_enable_servoshells_list`; `experimental_features_can_be_disabled`; `webrtc_stays_disabled`; `user_agent_drops_the_servo_token`; `screen_metrics_convert_to_servo_geometry`; CLI: `--disable-experimental-web-features` parsed, default enabled.
+
+- [ ] **Step 1:** Tests → implement preferences, user agent and CLI flag → pass.
+- [ ] **Step 2:** `ScreenMetrics`, the delegate method and the engine update.
+- [ ] **Step 3:** Verify with `--screenshot` of `features.html`, once normally and once with `--disable-experimental-web-features`; report every line the page shows in each run. Then screenshot `https://en.wikipedia.org/wiki/Mercury_(mythology)` and `https://www.google.com/` and report whether they look like desktop layouts.
+- [ ] **Step 4:** Quality commands pass with no warnings. Commit: `feat(servo): enable web-compatibility defaults`.

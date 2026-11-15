@@ -67,14 +67,15 @@ engine loop; Servo 0.8.0, Slint 1.18.1, adblock 0.13.5; refreshed filter lists; 
 directory, persistent cookies, crash containment; session-state fixes; keyboard mapping,
 shortcuts, zoom; cursor, status text, colour scheme, fullscreen; tabs opened by pages.
 Added from the Zervo research: **web-compatibility defaults** (experimental feature set,
-compatibility user agent, `screen_geometry`), `deny.toml` and the workspace lint table.
+compatibility user agent, `screen_geometry`).
 
 ### Phase 2 — macOS platform
 GPU frame path (IOSurface → Metal). Audio and video with GStreamer 1.28.9, bundled in the app.
 `Mercury Browser.app`: Info.plist, icon (`make-icns.sh`), entitlements, inside-out signing,
 dmg, notarisation flags ready for a Developer ID. Default-browser registration and opening
 links from other apps. Native menu bar, Dock menu, Services. Swipe-to-navigate and pinch.
-CI on macOS arm64 with bundle checks; release artifacts.
+CI on macOS arm64 with bundle checks; dependency policy (`deny.toml`) and the workspace lint
+table; release artifacts.
 
 ### Phase 3 — Browser controls
 JavaScript dialogs and `beforeunload`; HTTP authentication; context menu; `<select>`; file and
