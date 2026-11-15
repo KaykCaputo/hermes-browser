@@ -2,6 +2,7 @@
 // eb719bdd6c7b4a22b640d33ea55c6d440a5a850d, `src/utils/content_disposition_parser.rs`,
 // licensed Apache-2.0 OR MIT (used here under MIT).
 // Copyright (c) 2020-2023 Ngo Iok Ui & Tauri Programme within The Commons Conservancy
+// The MIT licence text and permission notice for this code are in `LICENSES/MIT-verso.txt`.
 //
 // Changes from Verso: a character-level tokenizer replaces splitting on `;`, so quoted values may
 // contain `;`, `=` and backslash escapes; the `charset'language'` prefix of `filename*` is parsed

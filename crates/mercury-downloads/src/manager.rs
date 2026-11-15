@@ -71,9 +71,16 @@ pub struct ResumeFrom {
     pub last_modified: Option<String>,
 }
 
-/// What happens to a download, in order: at most one `Started`, any number of `Progress`, then
-/// exactly one of `Finished`, `Failed` or `Cancelled`. A download that fails before anything is
-/// written (bad URL, HTTP error, refused redirect) has no `Started`.
+/// What happens to a download, in order: `Started` **at most once**, any number of `Progress`,
+/// then exactly one of `Finished`, `Failed` or `Cancelled`.
+///
+/// A download that fails or is cancelled before the server's response has been accepted and the
+/// partial file created (bad URL, HTTP error, refused redirect, invalid resume, cancel while
+/// connecting) produces **only** its terminal event, with no `Started` before it. A panic inside
+/// the transfer, including one raised by `on_event` while delivering `Started` or `Progress`,
+/// ends it with `Failed { resumable: false }` saying it failed internally, after its partial
+/// file is removed. If `on_event` panics while delivering the terminal event, the panic is
+/// logged and nothing more is sent for that download: it is already over and stays over.
 #[derive(Clone, Debug)]
 #[expect(
     clippy::large_enum_variant,
@@ -175,8 +182,14 @@ impl Drop for TaskGuard {
 
 /// Runs downloads on a small runtime of its own (two worker threads).
 ///
-/// Dropping the manager cancels every running download, waits briefly for their partial files
-/// to be removed, and returns.
+/// Each download produces `DownloadEvent`s through the `on_event` callback: `Started` at most
+/// once (never for a download that fails or is cancelled before the response), `Progress`, and
+/// exactly one terminal event.
+///
+/// Dropping the manager cancels every running download, waits up to three seconds for their
+/// partial files to be removed, and returns. Dropping it from **inside** `on_event` means the
+/// task delivering that event is among those waited for, so the drop takes the full three
+/// seconds before it returns; drop it from another thread instead.
 pub struct DownloadManager {
     runtime: Option<tokio::runtime::Runtime>,
     client: reqwest::Client,
@@ -186,7 +199,8 @@ pub struct DownloadManager {
 }
 
 impl DownloadManager {
-    /// `on_event` is called on a runtime thread; it must be cheap and must not block.
+    /// `on_event` is called on a runtime thread; it must be cheap and must not block. It may
+    /// panic without harming the manager (see `DownloadEvent`), but should not.
     pub fn new(on_event: impl Fn(DownloadEvent) + Send + Sync + 'static) -> std::io::Result<Self> {
         Self::with_timeouts(Timeouts::default(), on_event)
     }
