@@ -59,9 +59,13 @@ pub enum ImportError {
     /// The file or profile is not there.
     #[error("{} was not found", .0.display())]
     NotFound(PathBuf),
-    /// Another program holds the file so that it cannot be read now (Windows, while the browser
-    /// runs).
-    #[error("{} is locked by another program", .0.display())]
+    /// The file cannot be read consistently now: another program holds it so that it cannot be
+    /// copied (Windows, while the browser runs), or the browser kept writing to it while it was
+    /// being copied.
+    #[error(
+        "{} is in use: the browser is writing to it; try again, or close the browser first",
+        .0.display()
+    )]
     Locked(PathBuf),
     /// The file is larger than any real one of its kind.
     #[error("{} is larger than {limit} bytes", path.display())]
