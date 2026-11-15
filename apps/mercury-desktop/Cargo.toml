@@ -14,6 +14,7 @@ dpi.workspace = true
 euclid.workspace = true
 gleam.workspace = true
 glow.workspace = true
+image.workspace = true
 log.workspace = true
 mercury-ui = { path = "../../crates/mercury-ui" }
 servo.workspace = true

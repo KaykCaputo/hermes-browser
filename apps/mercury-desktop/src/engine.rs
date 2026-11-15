@@ -253,9 +253,10 @@ impl EngineState {
                 continue;
             }
 
+            let initial_url = self.controller.borrow_mut().take_initial_url(tab_id);
             let create_result = self.runtime.create_web_view(
                 rendering_context.clone(),
-                NEW_TAB_URL,
+                initial_url.as_deref().unwrap_or(NEW_TAB_URL),
                 scale_factor,
                 tab_id,
                 self.browser_event_sender.clone(),
@@ -382,10 +383,20 @@ pub(crate) fn apply_pending_browser_events(
 
     for tab_event in receiver.try_iter() {
         let tab_id = tab_event.tab_id();
+        let was_engine_ready = is_engine_ready(&controller, tab_id);
         state_changed |= controller.handle_event(tab_id, tab_event.into_event());
+        if !was_engine_ready && is_engine_ready(&controller, tab_id) {
+            log::info!("tab {} is ready for commands", tab_id.value());
+        }
     }
 
     state_changed
+}
+
+fn is_engine_ready(controller: &BrowserController, tab_id: TabId) -> bool {
+    controller
+        .tabs()
+        .any(|tab| tab.id() == tab_id && tab.is_engine_ready())
 }
 
 pub(crate) fn dispatch_pending_commands<W: TalariaWebView>(

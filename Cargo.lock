@@ -4871,6 +4871,7 @@ dependencies = [
  "gl_generator",
  "gleam",
  "glow",
+ "image",
  "log",
  "mercury-ui",
  "servo",
