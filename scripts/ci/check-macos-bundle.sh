@@ -5,13 +5,15 @@
 # Check an assembled Mercury Browser.app: the things that are easy to get
 # silently wrong and impossible to notice from a green build.
 #
-#   scripts/ci/check-macos-bundle.sh [--signature adhoc|developer-id] <app>
+#   scripts/ci/check-macos-bundle.sh [--signature adhoc|developer-id]
+#                                    [--require-media] <app>
 #
 #   --signature adhoc          require an ad-hoc signature (what CI builds)
 #   --signature developer-id   require a Developer ID signature with a secure
 #                              timestamp (a signed release)
 #   (no --signature)           accept either and check the entitlements that
 #                              go with the signature found
+#   --require-media            require the GStreamer media libraries (see below)
 #
 # Checks, each printed as PASS or FAIL:
 #   - Info.plist passes `plutil -lint` and names an executable that exists;
@@ -23,6 +25,18 @@
 #   - the signature is the kind asked for, and the entitlements are exactly the
 #     set scripts/macos/bundle.sh uses for it (the ad-hoc set for ad hoc);
 #   - scripts/macos/test-bundle.sh passes.
+#
+# With --require-media, also:
+#   - Contents/MacOS/lib/ holds libgstreamer-1.0.0.dylib and lib<name>.dylib
+#     for every plugin in the lists scripts/macos/collect-gstreamer.sh copies
+#     from, found the same way by scripts/ci/servo-plugin-lists.sh
+#     ($MERCURY_SERVO_PLUGIN_LISTS, or the resolved `servo` crate's
+#     gstreamer_plugin_lists/{common,macos}.rs.in);
+#   - the executable loads @rpath/libgstreamer-1.0.0.dylib and has the rpath
+#     @executable_path/lib/;
+#   - every library any Mach-O in the bundle loads is a system library or an
+#     @rpath/@loader_path/@executable_path name whose file is in
+#     Contents/MacOS/lib/: nothing points back at the machine it was built on.
 #
 # Runs every check even after a failure, then exits 1 if any failed. Reads the
 # bundle; writes nothing except a temporary file it removes. macOS only.
@@ -38,6 +52,7 @@ die() {
 }
 
 WANT_SIGNATURE=""
+REQUIRE_MEDIA=0
 APP=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -45,6 +60,7 @@ while [ "$#" -gt 0 ]; do
             WANT_SIGNATURE="${2:?--signature needs adhoc or developer-id}"
             shift 2
             ;;
+        --require-media) REQUIRE_MEDIA=1; shift ;;
         -h | --help) usage; exit 0 ;;
         -*) die "unknown option: $1 (try --help)" ;;
         *)
@@ -66,6 +82,9 @@ for tool in codesign file lipo otool plutil; do
 done
 
 REPO="$(cd "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+for script in scripts/macos/bundle.sh scripts/macos/test-bundle.sh; do
+    [ -x "$REPO/$script" ] || die "$script is missing from $REPO; this check uses it"
+done
 failures=0
 
 pass() {
@@ -140,12 +159,14 @@ fi
 
 # ── Every Mach-O: architecture and minimum macOS ──────────────────────────
 machos=0
+MACHO_FILES=()
 while IFS= read -r -d '' path; do
     case "$(file -b "$path")" in
         Mach-O*) ;;
         *) continue ;;
     esac
     machos=$((machos + 1))
+    MACHO_FILES+=("$path")
     name="${path#"$APP"/}"
     archs="$(lipo -archs "$path" 2>/dev/null || true)"
     if [ "$archs" = "arm64" ]; then
@@ -191,7 +212,7 @@ if grep -q '^Signature=adhoc' "$TMP"; then
     IDENTITY="-"
 elif grep -q '^Authority=Developer ID Application: ' "$TMP"; then
     SIGNATURE="developer-id"
-    IDENTITY="$(sed -n 's/^Authority=\(Developer ID Application: .*\)$/\1/p' "$TMP" | head -n 1)"
+    IDENTITY="$(sed -n '/^Authority=Developer ID Application: /{s/^Authority=//;p;q;}' "$TMP")"
 else
     SIGNATURE="other"
     IDENTITY=""
@@ -233,6 +254,87 @@ if [ -n "$IDENTITY" ]; then
     fi
 else
     fail "entitlements not checked: the signature is neither ad hoc nor Developer ID"
+fi
+
+# ── Media libraries (--require-media) ─────────────────────────────────────
+# Each list is a Rust array of string literals with `//` comment lines.
+plugin_names() {
+    local list
+    for list in common.rs.in macos.rs.in; do
+        [ -f "$1/$list" ] || return 1
+        grep -v '^[[:space:]]*//' "$1/$list" | grep -o '"[^"]*"' | tr -d '"'
+    done
+}
+
+# The libraries a Mach-O file loads, without its own install name.
+loaded_libraries() {
+    local own
+    own="$(otool -D "$1" | sed -n '2p')"
+    otool -L "$1" | sed -n 's/^[[:space:]]\{1,\}\([^ ]*\) (compatibility.*/\1/p' |
+        awk -v own="$own" '$0 != own' | sort -u
+}
+
+if [ "$REQUIRE_MEDIA" = 1 ]; then
+    LIB_DIR="$APP/Contents/MacOS/lib"
+    if [ -f "$LIB_DIR/libgstreamer-1.0.0.dylib" ]; then
+        pass "Contents/MacOS/lib/libgstreamer-1.0.0.dylib is present"
+    else
+        fail "Contents/MacOS/lib/libgstreamer-1.0.0.dylib is missing: the bundle has no media libraries"
+    fi
+
+    if LISTS="$("$REPO/scripts/ci/servo-plugin-lists.sh")" &&
+        PLUGINS="$(plugin_names "$LISTS")" && [ -n "$PLUGINS" ]; then
+        listed=0
+        missing=""
+        for plugin in $PLUGINS; do
+            listed=$((listed + 1))
+            [ -f "$LIB_DIR/lib$plugin.dylib" ] || missing="$missing lib$plugin.dylib"
+        done
+        if [ -z "$missing" ]; then
+            pass "all $listed plugins in $LISTS/{common,macos}.rs.in are in Contents/MacOS/lib"
+        else
+            fail "plugins missing from Contents/MacOS/lib:$missing"
+        fi
+    else
+        fail "cannot read the plugin lists (set MERCURY_SERVO_PLUGIN_LISTS, or run where cargo metadata finds the servo crate)"
+    fi
+
+    if [ -n "$BIN" ]; then
+        if loaded_libraries "$BIN" >"$TMP" && grep -qx '@rpath/libgstreamer-1.0.0.dylib' "$TMP"; then
+            pass "$EXECUTABLE loads @rpath/libgstreamer-1.0.0.dylib"
+        else
+            fail "$EXECUTABLE does not load @rpath/libgstreamer-1.0.0.dylib"
+        fi
+        otool -l "$BIN" | awk '$1 == "cmd" { cmd = $2 } cmd == "LC_RPATH" && $1 == "path" { print $2 }' >"$TMP"
+        if grep -Eqx '@executable_path/lib/?' "$TMP"; then
+            pass "$EXECUTABLE has the rpath @executable_path/lib/"
+        else
+            fail "$EXECUTABLE lacks the rpath @executable_path/lib/ (has: $(tr '\n' ' ' <"$TMP"))"
+        fi
+    fi
+
+    outside=0
+    for path in ${MACHO_FILES[@]+"${MACHO_FILES[@]}"}; do
+        loaded_libraries "$path" >"$TMP"
+        while IFS= read -r library; do
+            case "$library" in
+                /System/Library/* | /usr/lib/*) ;;
+                @rpath/* | @loader_path/* | @executable_path/*)
+                    if [ ! -f "$LIB_DIR/${library##*/}" ]; then
+                        fail "${path#"$APP"/} loads $library, which is not in Contents/MacOS/lib"
+                        outside=$((outside + 1))
+                    fi
+                    ;;
+                *)
+                    fail "${path#"$APP"/} loads $library from outside the bundle"
+                    outside=$((outside + 1))
+                    ;;
+            esac
+        done <"$TMP"
+    done
+    if [ "$outside" = 0 ]; then
+        pass "every Mach-O file loads only system libraries and libraries in Contents/MacOS/lib"
+    fi
 fi
 
 # ── The bundle script's own checks ────────────────────────────────────────
