@@ -16,7 +16,6 @@
 mod chromium;
 mod firefox;
 mod model;
-pub mod mozlz4;
 mod netscape;
 mod snapshot;
 
