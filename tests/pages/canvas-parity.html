@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury canvas parity test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; font-family: sans-serif; }
+  #grid { margin: 4px; line-height: 0; }
+  #grid canvas { width: 50px; height: 50px; margin: 1px; border: 1px solid #dddddd; }
+  #out { margin: 4px; font: 11px/1.25 monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+  <div id="grid"></div>
+  <div id="out"></div>
+  <script>
+    // Each case draws one thing on its own canvas and reads back a few pixels. One line per
+    // case: "name | kind x,y=r,g,b,a want r,g,b,a | ...". Kinds: "i" flat interior (compare
+    // exactly), "e" anti-aliased edge or interpolated colour (compare within 2 per channel),
+    // "b" ink bounding box of text (compare within 1 pixel). "want" is what the HTML
+    // specification gives where it is well defined, "?" otherwise.
+    // The finished report is also put in the document title on one line between PARITY-BEGIN
+    // and PARITY-END; the window title is logged with RUST_LOG=winit::window=debug.
+    const T = [0, 0, 0, 0];
+    const RED = [255, 0, 0, 255];
+    const GREEN = [0, 128, 0, 255];
+    const BLUE = [0, 0, 255, 255];
+    const YELLOW = [255, 255, 0, 255];
+    const BLACK = [0, 0, 0, 255];
+    const QUADRANTS_PNG = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAYAAACNiR0NAAAAO0lEQVR4nO3TsQ0AIAwDwY8nZ3OzQiTTAPk6OslFymAa1epcgTicBoxTTvA7WODWp9j1yGQNGKecuA3ceZcGoyxEsSUAAAAASUVORK5CYII=";
+
+    const grid = document.getElementById("grid");
+    const lines = [];
+    const pending = [];
+
+    function canvas(width = 100, height = 100, attach = true) {
+      const element = document.createElement("canvas");
+      element.width = width;
+      element.height = height;
+      if (attach) {
+        grid.appendChild(element);
+      }
+      return element;
+    }
+
+    function px(ctx, x, y) {
+      return Array.from(ctx.getImageData(x, y, 1, 1).data);
+    }
+
+    function sample(ctx, kind, x, y, want) {
+      return kind + " " + x + "," + y + "=" + px(ctx, x, y).join(",") + " want "
+        + (want ? want.join(",") : "?");
+    }
+
+    function inkBox(ctx, width, height) {
+      const data = ctx.getImageData(0, 0, width, height).data;
+      let x0 = width, y0 = height, x1 = -1, y1 = -1;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (data[(y * width + x) * 4 + 3] > 64) {
+            x0 = Math.min(x0, x); y0 = Math.min(y0, y);
+            x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+          }
+        }
+      }
+      return "b box=" + (x1 < 0 ? "empty" : [x0, y0, x1, y1].join(",")) + " want ?";
+    }
+
+    function recordLine(slot, name, parts) {
+      lines[slot] = name + " | " + parts.join(" | ");
+    }
+
+    // Runs a case and records an exception instead of stopping the page. Lines keep the order
+    // of the cases, whenever the asynchronous ones finish.
+    function run(name, body) {
+      const slot = lines.length;
+      lines.push(name + " | pending");
+      try {
+        const parts = body();
+        if (parts && typeof parts.then === "function") {
+          pending.push(parts.then((p) => recordLine(slot, name, p),
+            (error) => recordLine(slot, name, ["error " + String(error && error.message || error)])));
+        } else {
+          recordLine(slot, name, parts);
+        }
+      } catch (error) {
+        recordLine(slot, name, ["error " + String(error && error.name || error)]);
+      }
+    }
+
+    function quadrantCanvas() {
+      const source = canvas(20, 20, false);
+      const ctx = source.getContext("2d");
+      ctx.fillStyle = "rgb(255,0,0)"; ctx.fillRect(0, 0, 10, 10);
+      ctx.fillStyle = "rgb(0,128,0)"; ctx.fillRect(10, 0, 10, 10);
+      ctx.fillStyle = "rgb(0,0,255)"; ctx.fillRect(0, 10, 10, 10);
+      ctx.fillStyle = "rgb(255,255,0)"; ctx.fillRect(10, 10, 10, 10);
+      return source;
+    }
+
+    // ---- rectangles and clearRect
+    run("fill-rect", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(10, 10, 80, 80);
+      return [sample(c, "i", 50, 50, RED), sample(c, "i", 5, 5, T)];
+    });
+    run("stroke-rect", () => {
+      const c = canvas().getContext("2d");
+      c.strokeStyle = "rgb(0,0,255)"; c.lineWidth = 10; c.strokeRect(20, 20, 60, 60);
+      return [sample(c, "i", 20, 50, BLUE), sample(c, "i", 50, 50, T), sample(c, "i", 10, 50, T)];
+    });
+    run("clear-rect-middle", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100);
+      c.clearRect(30, 30, 40, 40);
+      c.fillStyle = "rgb(0,0,255)"; c.fillRect(60, 60, 30, 30);
+      return [sample(c, "i", 40, 40, T), sample(c, "i", 10, 10, GREEN), sample(c, "i", 80, 80, BLUE),
+        sample(c, "i", 65, 65, BLUE)];
+    });
+
+    // ---- paths
+    run("path-lines", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)";
+      c.beginPath(); c.moveTo(10, 90); c.lineTo(50, 10); c.lineTo(90, 90); c.fill();
+      return [sample(c, "i", 50, 70, RED), sample(c, "i", 10, 10, T)];
+    });
+    run("path-arc", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(0,0,255)";
+      c.beginPath(); c.arc(50, 50, 40, 0, Math.PI * 2); c.fill();
+      return [sample(c, "i", 50, 50, BLUE), sample(c, "i", 50, 15, BLUE), sample(c, "i", 95, 95, T)];
+    });
+    run("path-arc-partial", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(0,0,255)";
+      c.beginPath(); c.moveTo(50, 50); c.arc(50, 50, 40, 0, Math.PI / 2); c.closePath(); c.fill();
+      return [sample(c, "i", 65, 65, BLUE), sample(c, "i", 35, 65, T), sample(c, "i", 65, 35, T)];
+    });
+    run("path-bezier", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(0,128,0)";
+      c.beginPath(); c.moveTo(10, 90); c.bezierCurveTo(10, 10, 90, 10, 90, 90); c.closePath(); c.fill();
+      return [sample(c, "i", 50, 60, GREEN), sample(c, "i", 50, 20, T)];
+    });
+    run("path-quadratic-closepath-stroke", () => {
+      const c = canvas().getContext("2d");
+      c.strokeStyle = "rgb(255,0,0)"; c.lineWidth = 6;
+      c.beginPath(); c.moveTo(10, 80); c.quadraticCurveTo(50, 0, 90, 80); c.closePath(); c.stroke();
+      return [sample(c, "i", 50, 80, RED), sample(c, "i", 50, 60, T)];
+    });
+    run("fill-rule-evenodd", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)";
+      c.beginPath(); c.rect(10, 10, 80, 80); c.rect(30, 30, 40, 40); c.fill("evenodd");
+      return [sample(c, "i", 50, 50, T), sample(c, "i", 20, 20, RED)];
+    });
+    run("fill-rule-nonzero", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)";
+      c.beginPath(); c.rect(10, 10, 80, 80); c.rect(30, 30, 40, 40); c.fill();
+      return [sample(c, "i", 50, 50, RED), sample(c, "i", 20, 20, RED)];
+    });
+
+    // ---- line styles
+    for (const cap of ["butt", "square", "round"]) {
+      run("line-cap-" + cap, () => {
+        const c = canvas().getContext("2d");
+        c.strokeStyle = "rgb(0,0,255)"; c.lineWidth = 20; c.lineCap = cap;
+        c.beginPath(); c.moveTo(20, 50); c.lineTo(80, 50); c.stroke();
+        return [sample(c, "i", 50, 50, BLUE), sample(c, "i", 13, 50, cap === "butt" ? T : BLUE),
+          sample(c, "i", 11, 41, cap === "square" ? BLUE : T)];
+      });
+    }
+    for (const join of ["miter", "bevel", "round"]) {
+      run("line-join-" + join, () => {
+        const c = canvas().getContext("2d");
+        c.strokeStyle = "rgb(0,0,255)"; c.lineWidth = 16; c.lineJoin = join;
+        c.beginPath(); c.moveTo(20, 80); c.lineTo(50, 20); c.lineTo(80, 80); c.stroke();
+        return [sample(c, "i", 50, 7, join === "miter" ? BLUE : T),
+          sample(c, "i", 50, 14, join === "bevel" ? T : BLUE), sample(c, "i", 50, 22, BLUE)];
+      });
+    }
+    run("line-dash", () => {
+      const c = canvas().getContext("2d");
+      c.strokeStyle = "rgb(255,0,0)"; c.lineWidth = 10; c.setLineDash([10, 10]);
+      c.beginPath(); c.moveTo(0, 50); c.lineTo(100, 50); c.stroke();
+      return [sample(c, "i", 5, 50, RED), sample(c, "i", 15, 50, T), sample(c, "i", 25, 50, RED)];
+    });
+    run("line-dash-offset", () => {
+      const c = canvas().getContext("2d");
+      c.strokeStyle = "rgb(255,0,0)"; c.lineWidth = 10; c.setLineDash([10, 10]); c.lineDashOffset = 10;
+      c.beginPath(); c.moveTo(0, 50); c.lineTo(100, 50); c.stroke();
+      return [sample(c, "i", 5, 50, T), sample(c, "i", 15, 50, RED)];
+    });
+
+    // ---- transforms
+    run("transform-translate", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.translate(50, 50); c.fillRect(0, 0, 20, 20);
+      return [sample(c, "i", 60, 60, RED), sample(c, "i", 40, 40, T)];
+    });
+    run("transform-rotate", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.translate(50, 50); c.rotate(Math.PI / 4); c.fillRect(-30, -5, 60, 10);
+      return [sample(c, "i", 50, 50, RED), sample(c, "i", 62, 62, RED), sample(c, "i", 62, 38, T)];
+    });
+    run("transform-scale", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.scale(2, 3); c.fillRect(10, 10, 10, 10);
+      return [sample(c, "i", 30, 45, RED), sample(c, "i", 15, 15, T), sample(c, "i", 30, 65, T)];
+    });
+    run("transform-settransform", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.translate(10, 10); c.setTransform(1, 0, 0, 1, 70, 70);
+      c.fillRect(0, 0, 10, 10);
+      return [sample(c, "i", 75, 75, RED), sample(c, "i", 15, 15, T)];
+    });
+    run("transform-save-restore", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)";
+      c.save(); c.translate(50, 0); c.save(); c.translate(0, 50); c.fillRect(0, 0, 10, 10);
+      c.restore(); c.fillRect(0, 0, 10, 10); c.restore(); c.fillRect(0, 0, 10, 10);
+      return [sample(c, "i", 55, 55, RED), sample(c, "i", 55, 5, RED), sample(c, "i", 5, 5, RED),
+        sample(c, "i", 5, 55, T)];
+    });
+
+    // ---- clipping
+    run("clip-rect", () => {
+      const c = canvas().getContext("2d");
+      c.beginPath(); c.rect(25, 25, 50, 50); c.clip();
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "i", 50, 50, GREEN), sample(c, "i", 10, 10, T)];
+    });
+    run("clip-path", () => {
+      const c = canvas().getContext("2d");
+      c.beginPath(); c.arc(50, 50, 30, 0, Math.PI * 2); c.clip();
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "i", 50, 50, GREEN), sample(c, "i", 25, 25, T), sample(c, "i", 10, 50, T)];
+    });
+    run("clip-path-closed", () => {
+      const c = canvas().getContext("2d");
+      c.save(); c.beginPath(); c.arc(50, 50, 30, 0, Math.PI * 2); c.clip();
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100); c.restore();
+      return [sample(c, "i", 50, 50, GREEN), sample(c, "i", 25, 25, T), sample(c, "i", 10, 50, T)];
+    });
+    run("clip-evenodd", () => {
+      const c = canvas().getContext("2d");
+      c.beginPath(); c.rect(10, 10, 80, 80); c.rect(30, 30, 40, 40); c.clip("evenodd");
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "i", 20, 20, GREEN), sample(c, "i", 50, 50, T), sample(c, "i", 5, 5, T)];
+    });
+    run("clip-nested", () => {
+      const c = canvas().getContext("2d");
+      c.beginPath(); c.rect(0, 0, 60, 100); c.clip();
+      c.beginPath(); c.rect(40, 0, 60, 100); c.clip();
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "i", 50, 50, GREEN), sample(c, "i", 30, 50, T), sample(c, "i", 70, 50, T)];
+    });
+    run("clip-restored", () => {
+      const c = canvas().getContext("2d");
+      c.save(); c.beginPath(); c.rect(0, 0, 10, 10); c.clip(); c.restore();
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "i", 50, 50, GREEN), sample(c, "i", 5, 5, GREEN)];
+    });
+    run("clip-then-clear", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100);
+      c.save(); c.beginPath(); c.rect(0, 0, 50, 100); c.clip(); c.clearRect(0, 0, 100, 100); c.restore();
+      return [sample(c, "i", 25, 50, T), sample(c, "i", 75, 50, GREEN)];
+    });
+
+    // ---- global alpha and compositing
+    run("global-alpha", () => {
+      const c = canvas().getContext("2d");
+      c.globalAlpha = 0.5; c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "i", 50, 50, [255, 0, 0, 128])];
+    });
+    const compositeWant = {
+      // [blue only, overlap, red only, outside]
+      "source-over": [BLUE, RED, RED, T],
+      "destination-over": [BLUE, BLUE, RED, T],
+      "source-in": [T, RED, T, T],
+      "destination-out": [BLUE, T, T, T],
+      "lighter": [BLUE, [255, 0, 255, 255], RED, T],
+      "multiply": [BLUE, BLACK, RED, T],
+      "copy": [T, RED, RED, T],
+      "xor": [BLUE, T, RED, T],
+    };
+    for (const op of Object.keys(compositeWant)) {
+      run("composite-" + op, () => {
+        const c = canvas().getContext("2d");
+        c.fillStyle = "rgb(0,0,255)"; c.fillRect(10, 10, 50, 50);
+        c.globalCompositeOperation = op;
+        c.fillStyle = "rgb(255,0,0)"; c.fillRect(40, 40, 50, 50);
+        const want = compositeWant[op];
+        return [sample(c, "i", 20, 20, want[0]), sample(c, "i", 50, 50, want[1]),
+          sample(c, "i", 80, 80, want[2]), sample(c, "i", 5, 95, want[3])];
+      });
+    }
+
+    // ---- gradients
+    run("gradient-linear", () => {
+      const c = canvas().getContext("2d");
+      const g = c.createLinearGradient(0, 0, 100, 0);
+      g.addColorStop(0, "rgb(255,0,0)"); g.addColorStop(1, "rgb(0,0,255)");
+      c.fillStyle = g; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "e", 0, 50, [254, 0, 1, 255]), sample(c, "e", 50, 50, [126, 0, 129, 255]),
+        sample(c, "e", 99, 50, [1, 0, 254, 255])];
+    });
+    run("gradient-radial", () => {
+      const c = canvas().getContext("2d");
+      const g = c.createRadialGradient(50, 50, 0, 50, 50, 50);
+      g.addColorStop(0, "rgb(255,255,255)"); g.addColorStop(1, "rgb(0,0,0)");
+      c.fillStyle = g; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "e", 50, 50, [251, 251, 251, 255]), sample(c, "e", 50, 25, [130, 130, 130, 255]),
+        sample(c, "e", 2, 2, BLACK)];
+    });
+    run("gradient-conic", () => {
+      const c = canvas().getContext("2d");
+      if (!c.createConicGradient) {
+        return ["unsupported"];
+      }
+      const g = c.createConicGradient(0, 50, 50);
+      g.addColorStop(0, "rgb(255,0,0)"); g.addColorStop(1, "rgb(0,0,255)");
+      c.fillStyle = g; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "e", 90, 52, [252, 0, 3, 255]), sample(c, "e", 10, 50, [128, 0, 127, 255]),
+        sample(c, "e", 50, 90, [192, 0, 63, 255])];
+    });
+
+    // ---- patterns
+    const tile = canvas(10, 10, false);
+    {
+      const t = tile.getContext("2d");
+      t.fillStyle = "rgb(0,128,0)"; t.fillRect(0, 0, 10, 10);
+      t.fillStyle = "rgb(255,0,0)"; t.fillRect(0, 0, 5, 5);
+    }
+    const patternWant = {
+      "repeat": [RED, GREEN, RED, RED, RED],
+      "repeat-x": [RED, GREEN, RED, T, T],
+      "repeat-y": [RED, GREEN, T, RED, T],
+      "no-repeat": [RED, GREEN, T, T, T],
+    };
+    for (const mode of Object.keys(patternWant)) {
+      run("pattern-" + mode, () => {
+        const c = canvas().getContext("2d");
+        c.fillStyle = c.createPattern(tile, mode); c.fillRect(0, 0, 100, 100);
+        const want = patternWant[mode];
+        return [sample(c, "i", 2, 2, want[0]), sample(c, "i", 7, 7, want[1]), sample(c, "i", 52, 2, want[2]),
+          sample(c, "i", 2, 52, want[3]), sample(c, "i", 52, 52, want[4])];
+      });
+    }
+
+    // ---- shadows
+    run("shadow-offset", () => {
+      const c = canvas().getContext("2d");
+      c.shadowColor = "rgb(0,0,0)"; c.shadowOffsetX = 20; c.shadowOffsetY = 20;
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(10, 10, 40, 40);
+      return [sample(c, "i", 30, 30, RED), sample(c, "i", 60, 60, BLACK), sample(c, "i", 40, 60, BLACK),
+        sample(c, "i", 85, 85, T)];
+    });
+    run("shadow-blur", () => {
+      const c = canvas().getContext("2d");
+      c.shadowColor = "rgb(0,0,0)"; c.shadowOffsetX = 30; c.shadowOffsetY = 30; c.shadowBlur = 8;
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(10, 10, 40, 40);
+      return [sample(c, "i", 20, 20, RED), sample(c, "e", 60, 60, BLACK), sample(c, "e", 80, 60, null),
+        sample(c, "e", 95, 95, T)];
+    });
+
+    // ---- text
+    for (const align of ["left", "center", "right"]) {
+      run("text-align-" + align, () => {
+        const c = canvas().getContext("2d");
+        c.font = "bold 40px sans-serif"; c.textAlign = align; c.textBaseline = "alphabetic";
+        c.fillStyle = "rgb(0,0,0)"; c.fillText("Hi", 50, 60);
+        return [inkBox(c, 100, 100)];
+      });
+    }
+    for (const baseline of ["top", "middle", "bottom", "hanging"]) {
+      run("text-baseline-" + baseline, () => {
+        const c = canvas().getContext("2d");
+        c.font = "bold 40px sans-serif"; c.textAlign = "left"; c.textBaseline = baseline;
+        c.fillStyle = "rgb(0,0,0)"; c.fillText("Hi", 10, 50);
+        return [inkBox(c, 100, 100)];
+      });
+    }
+    run("text-stroke", () => {
+      const c = canvas().getContext("2d");
+      c.font = "bold 40px sans-serif"; c.lineWidth = 2; c.strokeStyle = "rgb(0,0,255)";
+      c.strokeText("Hi", 10, 60);
+      return [inkBox(c, 100, 100)];
+    });
+    run("text-measure", () => {
+      const c = canvas().getContext("2d");
+      c.font = "bold 40px sans-serif";
+      return ["m width=" + c.measureText("Hi").width.toFixed(2) + " want ?"];
+    });
+
+    // ---- drawImage
+    const quadrants = quadrantCanvas();
+    run("drawimage-canvas", () => {
+      const c = canvas().getContext("2d");
+      c.drawImage(quadrants, 10, 10);
+      return [sample(c, "i", 15, 15, RED), sample(c, "i", 25, 15, GREEN), sample(c, "i", 15, 25, BLUE),
+        sample(c, "i", 25, 25, YELLOW), sample(c, "i", 35, 35, T)];
+    });
+    run("drawimage-canvas-scaled", () => {
+      const c = canvas().getContext("2d");
+      c.drawImage(quadrants, 0, 0, 80, 80);
+      return [sample(c, "i", 20, 20, RED), sample(c, "i", 60, 20, GREEN), sample(c, "i", 20, 60, BLUE),
+        sample(c, "i", 60, 60, YELLOW), sample(c, "i", 90, 90, T)];
+    });
+    run("drawimage-canvas-subrect", () => {
+      const c = canvas().getContext("2d");
+      c.drawImage(quadrants, 10, 0, 10, 10, 0, 0, 50, 50);
+      return [sample(c, "i", 25, 25, GREEN), sample(c, "i", 75, 75, T)];
+    });
+    run("drawimage-img-dataurl", () => new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = canvas().getContext("2d");
+        c.drawImage(img, 10, 10);
+        c.drawImage(img, 50, 50, 40, 40);
+        resolve([sample(c, "i", 15, 15, RED), sample(c, "i", 25, 15, GREEN), sample(c, "i", 15, 25, BLUE),
+          sample(c, "i", 25, 25, YELLOW), sample(c, "i", 60, 60, RED), sample(c, "i", 80, 80, YELLOW)]);
+      };
+      img.onerror = () => reject(new Error("img load failed"));
+      img.src = QUADRANTS_PNG;
+    }));
+
+    // ---- image data
+    run("putimagedata-whole", () => {
+      const c = canvas().getContext("2d");
+      const d = c.createImageData(100, 100);
+      for (let i = 0; i < d.data.length; i += 4) { d.data.set([10, 20, 30, 255], i); }
+      c.putImageData(d, 0, 0);
+      return [sample(c, "i", 50, 50, [10, 20, 30, 255]), sample(c, "i", 0, 0, [10, 20, 30, 255])];
+    });
+    run("putimagedata-dirty", () => {
+      const c = canvas().getContext("2d");
+      const d = c.createImageData(100, 100);
+      for (let i = 0; i < d.data.length; i += 4) { d.data.set([10, 20, 30, 255], i); }
+      c.putImageData(d, 0, 0, 25, 25, 50, 50);
+      return [sample(c, "i", 50, 50, [10, 20, 30, 255]), sample(c, "i", 10, 10, T), sample(c, "i", 80, 80, T)];
+    });
+    run("putimagedata-over-drawing", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 100, 100);
+      const d = c.createImageData(20, 20);
+      c.putImageData(d, 40, 40);
+      return [sample(c, "i", 50, 50, T), sample(c, "i", 10, 10, RED)];
+    });
+    run("putimagedata-alpha", () => {
+      const c = canvas().getContext("2d");
+      const d = c.createImageData(10, 10);
+      for (let i = 0; i < d.data.length; i += 4) { d.data.set([200, 100, 50, 128], i); }
+      c.putImageData(d, 0, 0);
+      return [sample(c, "e", 5, 5, [200, 100, 50, 128])];
+    });
+    run("getimagedata-roundtrip", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(18,52,86)"; c.fillRect(0, 0, 20, 20);
+      const d = c.getImageData(0, 0, 20, 20);
+      c.putImageData(d, 60, 60);
+      return [sample(c, "i", 70, 70, [18, 52, 86, 255]), sample(c, "i", 40, 40, T)];
+    });
+    run("createimagedata", () => {
+      const c = canvas().getContext("2d");
+      const d = c.createImageData(10, 7);
+      return ["d size=" + d.width + "x" + d.height + " length=" + d.data.length + " first="
+        + Array.from(d.data.slice(0, 4)).join(",") + " want 10x7 length=280 first=0,0,0,0"];
+    });
+
+    // ---- drawing over time
+    run("incremental", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 40, 40);
+      const first = sample(c, "i", 20, 20, RED);
+      c.fillStyle = "rgb(0,0,255)"; c.fillRect(60, 60, 40, 40);
+      const second = sample(c, "i", 20, 20, RED);
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(60, 0, 40, 40);
+      return [first, second, sample(c, "i", 80, 80, BLUE), sample(c, "i", 80, 20, GREEN)];
+    });
+    run("incremental-overlap", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 60, 60);
+      px(c, 0, 0);
+      c.fillStyle = "rgba(0,0,255,0.5)"; c.fillRect(40, 40, 60, 60);
+      return [sample(c, "i", 20, 20, RED), sample(c, "e", 50, 50, [128, 0, 127, 255]),
+        sample(c, "e", 80, 80, [0, 0, 255, 128])];
+    });
+    run("resize-resets", () => {
+      const element = canvas();
+      const c = element.getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 100, 100);
+      px(c, 0, 0);
+      element.width = 100;
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(60, 60, 30, 30);
+      return [sample(c, "i", 20, 20, T), sample(c, "i", 75, 75, GREEN)];
+    });
+    run("resize-state-reset", () => {
+      const element = canvas();
+      const c = element.getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.translate(50, 50);
+      element.width = 100;
+      c.fillRect(0, 0, 10, 10);
+      return [sample(c, "i", 5, 5, BLACK), sample(c, "i", 55, 55, T)];
+    });
+    run("animation-frames", () => new Promise((resolve) => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 40, 40);
+      requestAnimationFrame(() => {
+        c.fillStyle = "rgb(0,0,255)"; c.fillRect(60, 60, 40, 40);
+        requestAnimationFrame(() => {
+          resolve([sample(c, "i", 20, 20, RED), sample(c, "i", 80, 80, BLUE)]);
+        });
+      });
+    }));
+
+    // ---- serialisation
+    run("todataurl", () => new Promise((resolve, reject) => {
+      const element = canvas();
+      const c = element.getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 50, 100);
+      c.fillStyle = "rgba(0,0,255,0.5)"; c.fillRect(50, 0, 50, 100);
+      const url = element.toDataURL();
+      const img = new Image();
+      img.onload = () => {
+        const check = canvas(100, 100, false).getContext("2d");
+        check.drawImage(img, 0, 0);
+        resolve(["d prefix=" + url.slice(0, 22) + " want data:image/png;base64,",
+          sample(check, "i", 25, 50, RED), sample(check, "e", 75, 50, [0, 0, 255, 128])]);
+      };
+      img.onerror = () => reject(new Error("decode failed"));
+      img.src = url;
+    }));
+    run("toblob", () => new Promise((resolve, reject) => {
+      const element = canvas();
+      const c = element.getContext("2d");
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100);
+      element.toBlob((blob) => {
+        if (!blob) { reject(new Error("null blob")); return; }
+        const kind = "d type=" + blob.type + " want image/png";
+        const img = new Image();
+        img.onload = () => {
+          const check = canvas(100, 100, false).getContext("2d");
+          check.drawImage(img, 0, 0);
+          resolve([kind, sample(check, "i", 50, 50, GREEN)]);
+        };
+        img.onerror = () => resolve([kind, "d size=" + blob.size + " decode=failed want decode=ok"]);
+        img.src = URL.createObjectURL(blob);
+      });
+    }));
+    run("offscreencanvas", () => {
+      if (typeof OffscreenCanvas === "undefined") {
+        return ["unsupported"];
+      }
+      const off = new OffscreenCanvas(50, 50);
+      const o = off.getContext("2d");
+      o.fillStyle = "rgb(0,0,255)"; o.fillRect(0, 0, 50, 50);
+      const c = canvas().getContext("2d");
+      c.drawImage(off, 25, 25);
+      return [sample(o, "i", 25, 25, BLUE), sample(c, "i", 50, 50, BLUE), sample(c, "i", 10, 10, T)];
+    });
+
+    // ---- sizes
+    run("zero-sized", () => {
+      const element = canvas(0, 0);
+      const c = element.getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 10, 10);
+      return [sample(c, "i", 0, 0, T), "d dataurl=" + element.toDataURL() + " want data:,"];
+    });
+    run("large-4096", () => {
+      const element = canvas(4096, 4096);
+      const c = element.getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(4000, 4000, 96, 96);
+      c.fillStyle = "rgb(0,0,255)"; c.fillRect(0, 0, 10, 10);
+      return [sample(c, "i", 4050, 4050, RED), sample(c, "i", 5, 5, BLUE), sample(c, "i", 2000, 2000, T)];
+    });
+
+    function finish() {
+      const out = document.getElementById("out");
+      out.textContent = lines.join("\n");
+      document.title = "PARITY-BEGIN " + lines.join(" ;; ") + " PARITY-END";
+    }
+    // The load event waits for the data: images; the asynchronous cases finish shortly after.
+    Promise.all(pending).then(() => setTimeout(finish, 200));
+  </script>
+</body>
+</html>
