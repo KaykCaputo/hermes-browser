@@ -1,6 +1,6 @@
 ---
 title: Media Playback
-description: Understand Linux GStreamer playback, codec requirements, and current video limitations in Mercury Browser.
+description: Understand GStreamer playback on Linux and macOS, codec requirements, and current video limitations in Mercury Browser.
 ---
 
 # Media playback
@@ -27,6 +27,29 @@ To inspect a particular decoder, use `gst-inspect-1.0`. For example:
 gst-inspect-1.0 avdec_h264
 gst-inspect-1.0 vp9dec
 ```
+
+## macOS
+
+On macOS, Mercury ships GStreamer's own libraries in a `lib` folder next to the
+`mercury-browser` executable. Nothing needs to be installed, and Mercury does not use any
+GStreamer that may already be on your Mac.
+
+What has been checked on Apple Silicon (development build, GStreamer 1.28.9):
+
+| Format | Status |
+|---|---|
+| MP4 with H.264 video and AAC audio | Plays. Video is decoded in hardware (VideoToolbox). |
+| WebM with VP9 video and Opus audio | Plays. VP9 is decoded in hardware (VideoToolbox) where the Mac supports it. |
+| MP3, WAV | Play. |
+| Ogg (Opus or Vorbis) | **Known problem:** Ogg Opus files may stop about a second after they start, and Ogg Vorbis files may not report a duration. |
+| Web Audio | Works, including `decodeAudioData` for MP3 and WAV. |
+
+Sites that ask `canPlayType('video/webm; codecs="vp9, opus"')` or `audio/ogg; codecs="opus"` are
+told "no": Servo's list of GStreamer plugins does not include the Opus parser that this check looks
+for. WebM files with Opus audio still play when a page uses them directly.
+
+The first start after installing or updating Mercury can take about ten seconds before media
+is ready, while macOS checks the bundled libraries. Later starts are fast.
 
 ## YouTube and streaming sites
 
