@@ -171,6 +171,7 @@ pub fn read_chromium_bookmarks(profile: &Path) -> Result<Vec<ImportedNode>, Impo
     Ok(without_empty_roots(keep_importable(
         nodes,
         &profile.display().to_string(),
+        0,
     )))
 }
 
@@ -298,6 +299,12 @@ fn chrome_time_to_unix_ms(micros: i64) -> Option<i64> {
 /// Visits of the profile at `profile`, newest first, at most `limit` and
 /// [`MAX_IMPORTED_VISITS`](crate::MAX_IMPORTED_VISITS). The `History` database is copied and the
 /// copy read, so a running browser's lock does not matter.
+///
+/// What happens to rows that do not read cleanly: a visit whose time is missing, or is not
+/// after 1970 once converted, is left out and counted at `debug`; a row whose address, title or
+/// time cannot be read as such (a blob, text that is not UTF-8, text where a time belongs), or
+/// that has no address, is left out and counted at `warn`. Only a failure to read the table
+/// itself fails the import.
 pub fn read_chromium_history(
     profile: &Path,
     limit: usize,

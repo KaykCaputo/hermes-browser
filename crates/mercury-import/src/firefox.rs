@@ -9,6 +9,7 @@
 //! together in `places.sqlite`, with times in microseconds since the Unix epoch. LibreWolf,
 //! Waterfox, Floorp and Zen are built on Firefox and keep the same files in a tree of their own.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
@@ -17,6 +18,7 @@ use crate::model::{
     keep_importable, push_unique, without_empty_roots,
 };
 use crate::snapshot;
+use rusqlite::types::ValueRef;
 
 /// Each browser's profile tree (the directory holding `profiles.ini`) relative to the
 /// directories the caller passes: the macOS application-support directory, Windows
@@ -190,6 +192,15 @@ const TYPE_SEPARATOR: i64 = 3;
 /// "Other Bookmarks" and mobile roots, each only when it holds something. Tags are not
 /// bookmarks and are left out. `places.sqlite` is copied and the copy read, so a running
 /// Firefox's lock does not matter.
+///
+/// What happens to rows that do not read cleanly:
+/// - a title that is a blob or not valid UTF-8 is decoded lossily (U+FFFD for what cannot be
+///   decoded), and the folder or bookmark is kept with everything under it;
+/// - a bookmark whose address is a blob or not valid UTF-8 is left out and counted with the
+///   refused addresses (logged at `debug`), as is a bookmark whose place no longer exists;
+/// - a row whose id, parent, type or date is not a number, or whose GUID is not text, fails the
+///   import with [`ImportError::Database`]: Firefox never writes such rows, and the tree cannot
+///   be built without them.
 pub fn read_firefox_bookmarks(profile: &Path) -> Result<Vec<ImportedNode>, ImportError> {
     let path = profile.join("places.sqlite");
     let snapshot = snapshot::open(&path)?;
@@ -225,8 +236,8 @@ pub fn read_firefox_bookmarks(profile: &Path) -> Result<Vec<ImportedNode>, Impor
                 id,
                 Row {
                     kind: row.get::<_, Option<i64>>(2)?.unwrap_or_default(),
-                    title: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    url: row.get(4)?,
+                    title: lossy_text(row.get_ref(3)?),
+                    url: address(row.get_ref(4)?),
                     added_at_ms: row
                         .get::<_, Option<i64>>(6)?
                         .filter(|micros| *micros > 0)
@@ -264,13 +275,46 @@ pub fn read_firefox_bookmarks(profile: &Path) -> Result<Vec<ImportedNode>, Impor
     Ok(without_empty_roots(keep_importable(
         nodes,
         &path.display().to_string(),
+        tree.unreadable_addresses.get(),
     )))
+}
+
+/// A title as text, whatever SQLite holds: a blob or text that is not UTF-8 is decoded lossily
+/// (with U+FFFD for what cannot be decoded), and no title is an empty one.
+fn lossy_text(value: ValueRef<'_>) -> String {
+    match value {
+        ValueRef::Null => String::new(),
+        ValueRef::Integer(number) => number.to_string(),
+        ValueRef::Real(number) => number.to_string(),
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+    }
+}
+
+/// A bookmark's address as stored. Lossy decoding could change it, so one that is not text in
+/// UTF-8 cannot be read.
+fn address(value: ValueRef<'_>) -> Address {
+    match value {
+        ValueRef::Null => Address::None,
+        ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
+            Ok(text) => Address::Text(text.to_owned()),
+            Err(_) => Address::Unreadable,
+        },
+        _ => Address::Unreadable,
+    }
+}
+
+enum Address {
+    None,
+    Text(String),
+    Unreadable,
 }
 
 struct Row {
     kind: i64,
     title: String,
-    url: Option<String>,
+    url: Address,
     added_at_ms: Option<i64>,
 }
 
@@ -279,6 +323,8 @@ struct Tree {
     rows: HashMap<i64, Row>,
     /// Children of each folder, in position order.
     children: HashMap<i64, Vec<i64>>,
+    /// Bookmarks in the tree whose address could not be read, and were left out.
+    unreadable_addresses: Cell<usize>,
 }
 
 impl Tree {
@@ -292,11 +338,20 @@ impl Tree {
     /// The node for a bookmark or separator row; folders are handled by the callers.
     fn leaf(&self, row: &Row) -> Option<ImportedNode> {
         match row.kind {
-            TYPE_BOOKMARK => Some(ImportedNode::Bookmark {
-                title: row.title.clone(),
-                url: row.url.clone()?,
-                added_at_ms: row.added_at_ms,
-            }),
+            TYPE_BOOKMARK => match &row.url {
+                Address::Text(url) => Some(ImportedNode::Bookmark {
+                    title: row.title.clone(),
+                    url: url.clone(),
+                    added_at_ms: row.added_at_ms,
+                }),
+                Address::Unreadable => {
+                    self.unreadable_addresses
+                        .set(self.unreadable_addresses.get() + 1);
+                    None
+                }
+                // A bookmark whose place is gone points nowhere.
+                Address::None => None,
+            },
             TYPE_SEPARATOR => Some(ImportedNode::Separator),
             _ => None,
         }
@@ -357,6 +412,12 @@ impl Tree {
 /// Visits of the profile at `profile`, newest first, at most `limit` and
 /// [`MAX_IMPORTED_VISITS`](crate::MAX_IMPORTED_VISITS). `places.sqlite` is copied and the copy
 /// read, so a running Firefox's lock does not matter.
+///
+/// What happens to rows that do not read cleanly: a visit whose time is missing, or is not
+/// after 1970 once converted, is left out and counted at `debug`; a row whose address, title or
+/// time cannot be read as such (a blob, text that is not UTF-8, text where a time belongs), or
+/// that has no address, is left out and counted at `warn`. Only a failure to read the table
+/// itself fails the import.
 pub fn read_firefox_history(
     profile: &Path,
     limit: usize,

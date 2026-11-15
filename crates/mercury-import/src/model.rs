@@ -132,9 +132,14 @@ pub(crate) fn importable_url(url: &str) -> Option<String> {
 }
 
 /// Removes bookmarks whose address may not be imported, at every depth, normalises the
-/// addresses of the rest, and logs how many were removed.
-pub(crate) fn keep_importable(nodes: Vec<ImportedNode>, source: &str) -> Vec<ImportedNode> {
-    let mut dropped = 0;
+/// addresses of the rest, and logs how many were removed, together with `already_dropped`
+/// bookmarks the reader left out because their address could not be read.
+pub(crate) fn keep_importable(
+    nodes: Vec<ImportedNode>,
+    source: &str,
+    already_dropped: usize,
+) -> Vec<ImportedNode> {
+    let mut dropped = already_dropped;
     let kept = filter_nodes(nodes, &mut dropped);
     if dropped > 0 {
         log::debug!(
@@ -194,7 +199,11 @@ fn filter_nodes(nodes: Vec<ImportedNode>, dropped: &mut usize) -> Vec<ImportedNo
 pub(crate) struct VisitCollector {
     visits: Vec<ImportedVisit>,
     cap: usize,
-    dropped: usize,
+    /// Visits to addresses that may not be imported.
+    refused: usize,
+    /// Visits without a usable time.
+    timeless: usize,
+    /// Rows whose values could not be read.
     unreadable: usize,
 }
 
@@ -203,7 +212,8 @@ impl VisitCollector {
         VisitCollector {
             visits: Vec::new(),
             cap: limit.min(MAX_IMPORTED_VISITS),
-            dropped: 0,
+            refused: 0,
+            timeless: 0,
             unreadable: 0,
         }
     }
@@ -213,9 +223,13 @@ impl VisitCollector {
     }
 
     /// Adds the visit in `row`, whose columns are the address, the title and the stored time;
-    /// returns whether there is room for more. A row whose values cannot be read (a blob, or
-    /// text that is not UTF-8), or whose time is missing, zero or negative, is skipped and
-    /// counted.
+    /// returns whether there is room for more.
+    ///
+    /// A row whose address, title or time cannot be read as such (a blob, text that is not
+    /// UTF-8, text where a time belongs), or that has no address, is skipped and counted as
+    /// unreadable. A visit whose time is missing or is not after 1970 once converted is skipped
+    /// and counted as having no usable time. A visit to an address that may not be imported is
+    /// skipped and counted as refused.
     pub(crate) fn push_row(&mut self, row: &Row<'_>, to_unix_ms: fn(i64) -> Option<i64>) -> bool {
         if self.is_full() {
             return false;
@@ -227,12 +241,12 @@ impl VisitCollector {
                 row.get::<_, Option<i64>>(2)?,
             ))
         };
-        let visit = read().ok().and_then(|(url, title, time)| {
-            let visited_at_ms = time.filter(|time| *time > 0).and_then(to_unix_ms)?;
-            Some((url?, title, visited_at_ms))
-        });
-        let Some((url, title, visited_at_ms)) = visit else {
+        let Ok((Some(url), title, time)) = read() else {
             self.unreadable += 1;
+            return true;
+        };
+        let Some(visited_at_ms) = time.and_then(to_unix_ms).filter(|ms| *ms > 0) else {
+            self.timeless += 1;
             return true;
         };
         match importable_url(&url) {
@@ -241,16 +255,24 @@ impl VisitCollector {
                 title: title.filter(|title| !title.is_empty()),
                 visited_at_ms,
             }),
-            None => self.dropped += 1,
+            None => self.refused += 1,
         }
         !self.is_full()
     }
 
+    /// The visits, after logging what was left out: ordinary omissions at `debug`, rows that
+    /// could not be read at `warn`.
     pub(crate) fn finish(self, source: &str) -> Vec<ImportedVisit> {
-        if self.dropped > 0 {
+        if self.refused > 0 {
             log::debug!(
                 "{source}: left out {} visits to addresses that cannot be imported",
-                self.dropped
+                self.refused
+            );
+        }
+        if self.timeless > 0 {
+            log::debug!(
+                "{source}: left out {} visits without a usable time",
+                self.timeless
             );
         }
         if self.unreadable > 0 {

@@ -24,8 +24,8 @@ use crate::model::{ImportError, ImportedNode, MAX_TREE_DEPTH, keep_importable};
 ///
 /// Folders marked `PERSONAL_TOOLBAR_FOLDER="true"` become toolbar folders; `ADD_DATE` (seconds)
 /// becomes milliseconds; bookmarks without `HREF` or with an address that cannot be imported are
-/// left out, and the addresses kept are normalised. Text that has neither the Netscape doctype nor a list is refused as
-/// [`ImportError::Malformed`].
+/// left out, and the addresses kept are normalised. Text that has neither the Netscape doctype
+/// nor a list is refused as [`ImportError::Malformed`].
 pub fn parse_netscape_bookmarks(html: &str) -> Result<Vec<ImportedNode>, ImportError> {
     let events = tokenize(html);
     let looks_like_bookmarks = events.iter().any(|event| match event {
@@ -42,7 +42,7 @@ pub fn parse_netscape_bookmarks(html: &str) -> Result<Vec<ImportedNode>, ImportE
     for event in events {
         builder.event(event);
     }
-    Ok(keep_importable(builder.finish(), "bookmarks.html"))
+    Ok(keep_importable(builder.finish(), "bookmarks.html", 0))
 }
 
 /// What the parser needs of the tokenizer's output.
@@ -328,6 +328,11 @@ impl Builder {
 /// trip. Folders nested deeper than the parser keeps (48 levels) are opened into the deepest
 /// one kept, as the parser would; their own titles are not written. The same tree always gives
 /// the same text.
+///
+/// `parse_netscape_bookmarks(&write_netscape_bookmarks(tree)) == tree` holds exactly for trees
+/// whose URLs are already normalised (as every URL this crate reads is), whose dates are whole
+/// seconds, whose titles have no surrounding whitespace or control characters other than line
+/// breaks and tabs, and which nest at most 48 folders deep.
 pub fn write_netscape_bookmarks(nodes: &[ImportedNode]) -> String {
     let mut out = String::from(
         "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n\

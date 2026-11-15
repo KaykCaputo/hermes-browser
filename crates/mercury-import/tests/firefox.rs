@@ -680,3 +680,44 @@ fn an_unreadable_history_row_is_skipped_not_fatal() {
         ]
     );
 }
+
+#[test]
+fn undecodable_titles_are_kept_lossily_and_unreadable_addresses_skipped() {
+    let profile = tempfile::tempdir().unwrap();
+    let conn = places(profile.path());
+    conn.execute_batch(ROOTS).unwrap();
+    conn.execute_batch(
+        "INSERT INTO moz_places (id, url, title) VALUES
+             (1, 'https://inside.example/', 'Inside'),
+             (2, 'https://blob-title.example/', NULL),
+             (3, X'68747470733a2f2f78ff', 'Unreadable address'),
+             (4, 'https://kept.example/', NULL);
+         INSERT INTO moz_bookmarks (id, type, fk, parent, position, title, guid) VALUES
+             (10, 2, NULL, 3, 0, CAST(X'466f6c646572ff' AS TEXT), 'folder______'),
+             (11, 1, 1, 10, 0, 'Inside', 'inside______'),
+             (12, 1, 2, 3, 1, X'426c6f62ff', 'blobtitle___'),
+             (13, 1, 3, 3, 2, 'Unreadable address', 'unreadable__'),
+             (14, 1, 4, 3, 3, 'Kept', 'kept________');",
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        read_firefox_bookmarks(profile.path()).unwrap(),
+        vec![folder(
+            "Bookmarks Toolbar",
+            true,
+            ROOT_ADDED,
+            vec![
+                folder(
+                    "Folder\u{FFFD}",
+                    false,
+                    None,
+                    vec![bookmark("Inside", "https://inside.example/", None)]
+                ),
+                bookmark("Blob\u{FFFD}", "https://blob-title.example/", None),
+                bookmark("Kept", "https://kept.example/", None),
+            ]
+        )]
+    );
+}

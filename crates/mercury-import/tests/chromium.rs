@@ -591,7 +591,8 @@ fn visits_without_a_time_are_skipped() {
     let conn = history_db(&profile.path().join("History"));
     add_url(&conn, 1, "https://a.example/", Some("A"));
     add_visit(&conn, 1, 1_700_000_000_000);
-    for raw in [0_i64, -5] {
+    // Zero, negative, and positive but before 1970 (a second after Chromium's 1601 epoch).
+    for raw in [0_i64, -5, 1_000_000] {
         conn.execute("INSERT INTO visits(url, visit_time) VALUES (1, ?1)", [raw])
             .unwrap();
     }
