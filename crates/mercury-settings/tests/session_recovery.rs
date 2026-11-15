@@ -377,6 +377,24 @@ fn a_damaged_current_file_offers_the_previous_copy_and_keeps_it() {
 }
 
 #[test]
+fn a_session_only_in_the_previous_file_is_found() {
+    let profile = Profile::new();
+    profile.save(&forty(), true);
+    let _ = profile.start();
+    assert_eq!(profile.previous(), expect(&forty(), true));
+    // A crash after session.json was moved aside and before anything replaced it.
+    fs::remove_file(profile.path("session.json")).expect("remove");
+
+    let run_3 = profile.start();
+
+    assert_eq!(run_3.last, crashed(forty()));
+    assert_eq!(run_3.recovery, vec![forty()]);
+    assert_eq!(profile.recovery(), Some(listed(&[forty()])));
+    assert_eq!(profile.previous(), expect(&forty(), true), "left as it was");
+    assert_eq!(profile.current(), None);
+}
+
+#[test]
 fn resolving_with_nothing_pending_is_fine() {
     let profile = Profile::new();
     profile.store.resolve_recovery().expect("nothing to do");

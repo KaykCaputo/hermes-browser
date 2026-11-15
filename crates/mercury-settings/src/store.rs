@@ -477,7 +477,7 @@ impl SessionStore {
     ///
     /// 1. The recovery file is read. A damaged one is moved aside and counts as an empty list;
     ///    one from a newer version is left alone and never replaced.
-    /// 2. `session.json` is read as `last`. If it is damaged (moved aside),
+    /// 2. `session.json` is read as `last`. If it is damaged (moved aside) or missing,
     ///    `session.previous.json` is offered in its place, marked as not having quit in order.
     ///    If it is from a newer version, it is left alone and `last` is `None`.
     /// 3. If `last` did not quit in order, it is added to the recovery list (see
@@ -631,8 +631,10 @@ impl SessionStore {
     fn read_last(&self) -> Result<(Option<PreviousSession>, bool), SettingsError> {
         Ok(match self.read(&self.path)? {
             Read::Current(previous) => (Some(previous), true),
-            Read::Missing | Read::Newer => (None, false),
-            Read::Damaged => match self.read(&self.previous_path)? {
+            Read::Newer => (None, false),
+            // A damaged file was moved aside; a missing one may have been moved aside by a
+            // start that crashed before writing anything else. Either way the copy is offered.
+            Read::Missing | Read::Damaged => match self.read(&self.previous_path)? {
                 Read::Current(previous) => {
                     log::warn!("offering the copy of the session made at the last start");
                     (
