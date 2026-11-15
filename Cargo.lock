@@ -5332,6 +5332,10 @@ dependencies = [
 name = "mercury-passwords"
 version = "0.2.0"
 dependencies = [
+ "core-foundation 0.10.1",
+ "log",
+ "security-framework",
+ "tempfile",
  "thiserror 2.0.21",
  "url",
  "zeroize",

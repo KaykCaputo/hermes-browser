@@ -18,6 +18,7 @@ license = "MPL-2.0"
 adblock = "=0.13.5"
 ash = "0.38"
 content-security-policy = "0.9"
+core-foundation = "0.10"
 dpi = "0.1"
 euclid = "0.22"
 gleam = "0.15"
@@ -25,6 +26,7 @@ glow = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }
 log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
+security-framework = "3.7"
 # The `vello` (GPU canvas) feature is on through the vendored fix in `third_party/servo-canvas`:
 # servo-canvas 0.8.0's vello backend does not compile against wgpu 30 as published
 # (`vello_backend.rs:756`, `get_mapped_range` returns a `Result`). See its MERCURY.md.
@@ -48,6 +50,7 @@ slint = { version = "~1.17.1", default-features = false, features = [
 ] }
 slint-build = "~1.17.1"
 surfman = "0.14"
+tempfile = "3.27"
 thiserror = "2"
 url = "2.5"
 zeroize = "1.9"

@@ -70,3 +70,7 @@ macro_rules! contract_suite {
 use mercury_passwords::{MemoryBackend, SecretBackend};
 
 contract_suite!(memory, ((), MemoryBackend::new()));
+
+// Every Keychain test runs on a temporary keychain file that the guard deletes.
+#[cfg(target_os = "macos")]
+contract_suite!(keychain, common::keychain::temp_keychain());
