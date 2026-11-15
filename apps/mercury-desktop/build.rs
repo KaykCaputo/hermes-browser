@@ -1,3 +1,6 @@
+// The macOS rpath below is adapted from Servo (https://github.com/servo/servo, tag v0.8.0,
+// ports/servoshell/build.rs), MPL-2.0.
+
 use std::env;
 use std::fs::File;
 use std::path::Path;
@@ -10,6 +13,12 @@ fn main() {
     // Only the Linux Vulkan frame import uses these bindings. Check the target, not the host.
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
         generate_gl_bindings();
+    }
+
+    // On macOS the GStreamer libraries are shipped in a `lib` directory beside the
+    // executable; this rpath lets the dynamic linker find them.
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/lib/");
     }
 }
 
