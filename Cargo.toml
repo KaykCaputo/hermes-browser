@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "apps/mercury-desktop",
+    "crates/mercury-passwords",
     "crates/mercury-ui",
     "crates/talaria-core",
     "crates/talaria-servo",
@@ -49,6 +50,7 @@ slint-build = "~1.17.1"
 surfman = "0.14"
 thiserror = "2"
 url = "2.5"
+zeroize = "1.9"
 
 [patch.crates-io]
 gaol = { path = "third_party/gaol" }
