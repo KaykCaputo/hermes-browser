@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury media test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; font-family: sans-serif; }
+  #videos video, #videos canvas { display: inline-block; vertical-align: top; margin: 6px; border: 1px solid #cccccc; }
+  #results { margin: 0 10px; font: bold 15px/1.25 monospace; }
+  .pass { color: #006400; }
+  .fail { color: #b00000; }
+  .note { color: #555555; }
+</style>
+</head>
+<body>
+  <!-- Every element is muted with volume 0: decoding and the audio pipeline run, nothing is heard. -->
+  <div id="videos">
+    <video id="mp4" muted playsinline width="320" height="240"></video>
+    <video id="webm" muted playsinline width="320" height="240"></video>
+    <canvas id="canvas" width="320" height="240"></canvas>
+  </div>
+  <audio id="ogg" muted></audio>
+  <audio id="mp3" muted></audio>
+  <audio id="wav" muted></audio>
+  <div id="results"></div>
+  <script>
+    "use strict";
+    const results = document.getElementById("results");
+    const canvas = document.getElementById("canvas");
+    const context = canvas.getContext("2d");
+    const started = performance.now();
+    const TIMEOUT_MS = 20000;
+
+    function line(text, ok) {
+      const element = document.createElement("div");
+      element.className = ok === null ? "note" : ok ? "pass" : "fail";
+      const at = "[" + ((performance.now() - started) / 1000).toFixed(1) + "s] ";
+      element.textContent = at + (ok === null ? text : text + " " + (ok ? "PASS" : "FAIL"));
+      results.appendChild(element);
+      console.log(element.textContent);
+    }
+
+    function check(label, ok, detail) {
+      line(label + (detail ? " (" + detail + ")" : ""), ok);
+    }
+
+    // Resolves with the event, or rejects after the timeout so a failure shows as FAIL.
+    function waitFor(target, events, timeout) {
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("timeout waiting for " + events.join("/"))), timeout);
+        for (const name of events) {
+          target.addEventListener(name, (event) => { clearTimeout(timer); resolve(event); }, { once: true });
+        }
+        target.addEventListener("error", () => {
+          clearTimeout(timer);
+          const error = target.error;
+          reject(new Error("media error " + (error ? error.code + " " + (error.message || "") : "")));
+        }, { once: true });
+      });
+    }
+
+    function waitUntil(predicate, timeout) {
+      return new Promise((resolve, reject) => {
+        const begin = performance.now();
+        (function poll() {
+          if (predicate()) { resolve(); return; }
+          if (performance.now() - begin > timeout) { reject(new Error("timeout")); return; }
+          setTimeout(poll, 50);
+        })();
+      });
+    }
+
+    const early = {};
+    const types = {
+      "video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\"": "mp4 h264+aac",
+      "video/webm; codecs=\"vp9, opus\"": "webm vp9+opus",
+      "audio/ogg; codecs=\"opus\"": "ogg opus",
+      "audio/mpeg": "mp3",
+      "audio/wav": "wav",
+      "video/mp4": "mp4 container",
+      "video/webm": "webm container",
+      "audio/ogg": "ogg container",
+    };
+    if (location.protocol === "file:") {
+      line("note: loaded from file://, where media and XHR are cross-origin; the canvas and "
+        + "decodeAudioData checks need the page served over http (see tests/media/README.md)", null);
+    }
+    for (const type of Object.keys(types)) {
+      early[type] = document.createElement("video").canPlayType(type);
+    }
+
+    function silence(element) {
+      element.muted = true;
+      element.volume = 0;
+    }
+
+    // Classifies the colour band at the top of each test clip: red for 0-2 s, blue for 2-4 s.
+    function bandColour(video) {
+      context.drawImage(video, 0, 0, 320, 240);
+      const [r, g, b] = context.getImageData(160, 40, 1, 1).data;
+      const name = r > 150 && g < 90 && b < 90 ? "red" : b > 150 && r < 90 && g < 90 ? "blue" : "other";
+      return { name, rgb: r + "," + g + "," + b };
+    }
+
+    async function videoChecks(id, url, duration) {
+      const video = document.getElementById(id);
+      silence(video);
+      try {
+        video.src = url;
+        await waitFor(video, ["loadedmetadata"], TIMEOUT_MS);
+        const atMetadata = video.duration;
+        if (!isFinite(atMetadata)) {
+          await waitFor(video, ["durationchange"], 5000).catch(() => {});
+        }
+        check(id + " loadedmetadata duration=" + video.duration.toFixed(3)
+          + (atMetadata === video.duration ? "" : " (at loadedmetadata " + atMetadata + ")")
+          + " size=" + video.videoWidth + "x" + video.videoHeight,
+          Math.abs(video.duration - duration) < 0.15 && video.videoWidth === 320 && video.videoHeight === 240);
+      } catch (error) {
+        check(id + " loadedmetadata", false, error.message);
+        return;
+      }
+      try {
+        silence(video);
+        await video.play();
+        await waitUntil(() => video.currentTime >= 0.5, TIMEOUT_MS);
+        const first = bandColour(video);
+        const firstTime = video.currentTime;
+        await waitUntil(() => video.currentTime >= 1.1, TIMEOUT_MS);
+        check(id + " currentTime advances past 1 s (" + video.currentTime.toFixed(2) + ")", true);
+        await waitUntil(() => video.currentTime >= 2.5 || video.ended, TIMEOUT_MS);
+        const second = bandColour(video);
+        const secondTime = video.currentTime;
+        check(id + " frame colour " + first.name + "@" + firstTime.toFixed(2) + "s [" + first.rgb + "] then "
+          + second.name + "@" + secondTime.toFixed(2) + "s [" + second.rgb + "] want red then blue",
+          first.name === "red" && second.name === "blue");
+      } catch (error) {
+        check(id + " playback (currentTime " + video.currentTime.toFixed(2) + ")", false, error.message);
+      }
+      // Keep a frame on screen for the screenshot.
+      video.loop = true;
+      silence(video);
+      video.play().catch(() => {});
+    }
+
+    async function audioChecks(id, url, duration) {
+      const audio = document.getElementById(id);
+      silence(audio);
+      try {
+        audio.src = url;
+        await waitFor(audio, ["loadedmetadata"], TIMEOUT_MS);
+        const atMetadata = audio.duration;
+        silence(audio);
+        const ended = waitFor(audio, ["ended"], TIMEOUT_MS);
+        const playStarted = performance.now();
+        await audio.play();
+        // Playing to the end must take about as long as the clip: a jump straight to the end
+        // (for example a position reported while the demuxer probes the duration) is a failure.
+        try {
+          await ended;
+          const wall = (performance.now() - playStarted) / 1000;
+          check(id + " plays to ended in " + wall.toFixed(2) + " s (clip " + duration.toFixed(1) + " s)",
+            wall > 0.7 * duration && wall < 2 * duration + 1);
+        } catch (error) {
+          check(id + " plays (currentTime " + audio.currentTime.toFixed(2) + ")", false, error.message);
+        }
+        // Some demuxers (Ogg from a streamed source) only learn the duration once data flows;
+        // a later durationchange is fine.
+        check(id + " duration=" + audio.duration.toFixed(3)
+          + (atMetadata === audio.duration ? "" : " (at loadedmetadata " + atMetadata + ")"),
+          Math.abs(audio.duration - duration) < 0.15);
+      } catch (error) {
+        check(id + " audio (currentTime " + audio.currentTime.toFixed(2) + ")", false, error.message);
+      }
+    }
+
+    function analyse(samples, sampleRate) {
+      // Upward crossings with hysteresis, timed from the first to the last one, so encoder
+      // padding and low-level noise at either end do not count.
+      let peak = 0;
+      for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
+      const threshold = peak / 4;
+      let armed = false;
+      let crossings = 0;
+      let first = -1;
+      let last = -1;
+      for (let i = 0; i < samples.length; i++) {
+        if (samples[i] < -threshold) armed = true;
+        if (armed && samples[i] > threshold) {
+          armed = false;
+          if (first < 0) first = i; else crossings++;
+          last = i;
+        }
+      }
+      const frequency = crossings > 0 ? crossings / ((last - first) / sampleRate) : 0;
+      return { peak, frequency };
+    }
+
+    async function offlineCheck() {
+      try {
+        const sampleRate = 44100;
+        const offline = new OfflineAudioContext(1, 4410, sampleRate);
+        const oscillator = offline.createOscillator();
+        oscillator.type = "sine";
+        oscillator.frequency.value = 441; // 100-sample period: first maximum at sample 25
+        oscillator.connect(offline.destination);
+        oscillator.start(0);
+        const rendered = await Promise.race([
+          offline.startRendering(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), TIMEOUT_MS)),
+        ]);
+        const data = rendered.getChannelData(0);
+        let peakIndex = 0;
+        for (let i = 0; i < 100; i++) if (data[i] > data[peakIndex]) peakIndex = i;
+        const { peak, frequency } = analyse(data, sampleRate);
+        check("OfflineAudioContext sine peak=" + peak.toFixed(3) + " at sample " + peakIndex
+          + " freq=" + frequency.toFixed(1) + "Hz want 1.000 at 25, 441Hz",
+          peak > 0.98 && peak < 1.02 && Math.abs(peakIndex - 25) <= 1 && Math.abs(frequency - 441) < 15);
+      } catch (error) {
+        check("OfflineAudioContext", false, error.message);
+      }
+    }
+
+    function load(url) {
+      return new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("GET", url);
+        request.responseType = "arraybuffer";
+        request.onload = () => resolve(request.response);
+        request.onerror = () => reject(new Error("could not load " + url));
+        request.send();
+      });
+    }
+
+    async function decodeCheck(url, duration, frequency) {
+      try {
+        const offline = new OfflineAudioContext(1, 44100, 44100);
+        const bytes = await load(url);
+        const buffer = await Promise.race([
+          new Promise((resolve, reject) => offline.decodeAudioData(bytes, resolve, reject)),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), TIMEOUT_MS)),
+        ]);
+        const result = analyse(buffer.getChannelData(0), buffer.sampleRate);
+        check("decodeAudioData " + url.split("/").pop() + " duration=" + buffer.duration.toFixed(3)
+          + " freq=" + result.frequency.toFixed(1) + "Hz peak=" + result.peak.toFixed(3),
+          Math.abs(buffer.duration - duration) < 0.1 && Math.abs(result.frequency - frequency) < 10
+          && result.peak > 0.05);
+      } catch (error) {
+        check("decodeAudioData " + url.split("/").pop(), false, error && error.message ? error.message : String(error));
+      }
+    }
+
+    async function run() {
+      await Promise.all([
+        videoChecks("mp4", "../media/clip-h264-aac.mp4", 4.0),
+        videoChecks("webm", "../media/clip-vp9-opus.webm", 4.008),
+        audioChecks("ogg", "../media/tone-opus.ogg", 3.0),
+        audioChecks("mp3", "../media/tone.mp3", 3.0),
+        audioChecks("wav", "../media/tone.wav", 2.0),
+        offlineCheck(),
+      ]);
+      await decodeCheck("../media/tone.wav", 2.0, 441);
+      await decodeCheck("../media/tone.mp3", 3.0, 440);
+      // Asked again here, after the backend has certainly finished loading its plugins.
+      for (const type of Object.keys(types)) {
+        const answer = document.createElement("audio").canPlayType(type);
+        check("canPlayType " + types[type] + " = '" + answer + "' (at load: '" + early[type] + "')",
+          answer === "probably" || answer === "maybe");
+      }
+      line("DONE in " + ((performance.now() - started) / 1000).toFixed(1) + " s", null);
+    }
+    run();
+  </script>
+</body>
+</html>
