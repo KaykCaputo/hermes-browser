@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury many-canvases test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; font-family: sans-serif; }
+  #results { margin: 10px; font: bold 28px/1.35 monospace; }
+  #grid { margin: 0 10px; line-height: 0; }
+  canvas { margin: 1px; }
+  .pass { color: #006400; }
+  .fail { color: #b00000; }
+</style>
+</head>
+<body>
+  <div id="results"></div>
+  <div id="grid"></div>
+  <script>
+    // Creates N canvases of 200x100 (N = ?n=…, default 50), draws a distinct colour and the
+    // canvas number on each, then reads one pixel back from each. Times use performance.now().
+    const count = Number(new URLSearchParams(location.search).get("n")) || 50;
+    const results = document.getElementById("results");
+    const grid = document.getElementById("grid");
+    const displayWidth = count > 50 ? 48 : 96;
+
+    function line(text, ok) {
+      const div = document.createElement("div");
+      if (ok !== undefined) {
+        div.className = ok ? "pass" : "fail";
+      }
+      div.textContent = text;
+      results.appendChild(div);
+    }
+
+    function colour(index) {
+      return [(index * 37 + 40) % 256, (index * 91 + 10) % 256, (index * 53 + 90) % 256];
+    }
+
+    const contexts = [];
+    let worst = 0;
+    let worstIndex = -1;
+    const start = performance.now();
+    for (let index = 0; index < count; index++) {
+      const canvasStart = performance.now();
+      const canvas = document.createElement("canvas");
+      canvas.width = 200;
+      canvas.height = 100;
+      canvas.style.width = displayWidth + "px";
+      canvas.style.height = displayWidth / 2 + "px";
+      const context = canvas.getContext("2d");
+      if (context) {
+        context.fillStyle = "rgb(" + colour(index).join(",") + ")";
+        context.fillRect(0, 0, 200, 100);
+        context.fillStyle = "#ffffff";
+        context.font = "bold 48px sans-serif";
+        context.fillText(String(index), 60, 70);
+      }
+      grid.appendChild(canvas);
+      contexts.push(context);
+      const elapsed = performance.now() - canvasStart;
+      if (elapsed > worst) {
+        worst = elapsed;
+        worstIndex = index;
+      }
+    }
+    const created = performance.now() - start;
+
+    let firstReadBack = null;
+    let correct = 0;
+    const readStart = performance.now();
+    contexts.forEach((context, index) => {
+      if (!context) {
+        return;
+      }
+      const data = context.getImageData(10, 10, 1, 1).data;
+      if (firstReadBack === null) {
+        firstReadBack = performance.now() - readStart;
+      }
+      const want = colour(index).concat([255]);
+      if (want.every((value, channel) => Math.abs(data[channel] - value) <= 1)) {
+        correct++;
+      }
+    });
+    const allReadBacks = performance.now() - readStart;
+    const contextsMade = contexts.filter((context) => context).length;
+
+    line("canvases " + count + ", contexts " + contextsMade, contextsMade === count);
+    line("create+draw all: " + created.toFixed(1) + " ms");
+    line("first read-back: " + (firstReadBack === null ? "none" : firstReadBack.toFixed(1) + " ms"));
+    line("worst canvas: " + worst.toFixed(1) + " ms (#" + worstIndex + ")");
+    line("all read-backs: " + allReadBacks.toFixed(1) + " ms");
+    line("read-backs correct " + correct + "/" + count + " " + (correct === count ? "PASS" : "FAIL"),
+      correct === count);
+  </script>
+</body>
+</html>
