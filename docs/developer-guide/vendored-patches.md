@@ -52,8 +52,13 @@ The vendored copy also makes the GPU backend robust:
 - **CPU fallback.** When a canvas cannot get a GPU adapter or device, or vello's renderer cannot be created, that canvas is drawn by the CPU backend (the one `--disable-gpu-canvas` selects). One warning, `GPU 2D canvas unavailable (<reason>); drawing 2D canvases on the CPU`, is logged per process, and later canvases go straight to the CPU backend without trying the GPU again.
 - **Failed renders** are logged once (`VELLO RENDER ERROR …`) instead of panicking Servo's Canvas thread, which would leave the session without any 2D canvas.
 - **Failed read-backs** unmap the buffer, so the next read-back on that canvas can succeed.
-- **Shared GPU resources.** All GPU canvases share one wgpu device and one vello renderer (whose buffers take about 175 MB); a canvas larger than 4096 pixels on a side gets a renderer of its own, and one larger than 8192 is drawn on the CPU. If the shared device is lost, canvases created afterwards are drawn on the CPU.
-- **Correctness fixes** found with `tests/pages/canvas-parity.html`: earlier drawing is kept when a canvas is drawn again, non-rectangular clips and `evenodd` clips are applied.
+- **Shared GPU resources.** All GPU canvases share one wgpu device and one vello renderer (whose buffers take about 175 MB); a canvas larger than 4096 pixels on a side gets a renderer of its own, and one created or resized larger than 8192 is drawn on the CPU. If the shared device is lost, canvases created afterwards are drawn on the CPU (this path has only been exercised by simulation).
+- **Correctness fixes** found with `tests/pages/canvas-parity.html`: earlier drawing is kept when a canvas is drawn again, non-rectangular clips and `evenodd` clips are applied, and shapes drawn with a shadow appear (without the shadow, which neither backend implements; in both backends).
+
+**Costs of the GPU canvas** (measured on an M-series Mac under load, Task 4d):
+
+- The shared renderer holds about 175 MB of GPU memory from the first GPU canvas until the process exits. Fifty 200×100 canvases: about 0.45 GB process footprint against 0.26 GB on the CPU; two hundred: about 0.55 GB against 0.35 GB.
+- Every read-back (`getImageData`, `toDataURL`, `drawImage` from a canvas) renders the scene and copies the whole canvas back from the GPU. A page that reads an 800×600 canvas back every animation frame ran at 50–57 frames per second on the GPU (median `getImageData` 6.7 ms) against 47–55 on the CPU (4.5 ms); a 1000×1000 canvas drawn and read back step by step took about 3–4 ms per step against 1.2–1.8 ms.
 
 `third_party/servo-canvas/MERCURY.md` lists each change, why it is needed and when it can be dropped. The first commit that added the directory holds the crate exactly as published, so `git diff 60ee59f -- third_party/servo-canvas` shows the whole patch.
 

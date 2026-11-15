@@ -56,7 +56,7 @@ static RENDER_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
 static GPU_DEVICE_LOST: AtomicBool = AtomicBool::new(false);
 
 /// Mercury: the GPU device, queue and vello renderer shared by all canvases on
-/// the Canvas thread. vello's renderer keeps about 170 MB of GPU buffers, so
+/// the Canvas thread. vello's renderer keeps about 175 MB of GPU buffers, so
 /// one per canvas exhausts memory on pages with many canvases.
 type SharedGpu = (Device, Queue, Rc<RefCell<vello::Renderer>>);
 
@@ -882,6 +882,7 @@ impl VelloDrawTarget {
                 self.rendered_buffer.unmap();
                 return f(None);
             }
+            // Mercury: wgpu 30 returns a `Result` here.
             match buf_slice.get_mapped_range() {
                 Ok(data) => f(Some(&data)),
                 Err(error) => {
