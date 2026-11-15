@@ -181,6 +181,24 @@ to the other backend would need `Canvas::recreate` to swap the variant.
 
 Drop it when Servo checks the size itself.
 
+## 10. Draw shapes that have a shadow, without the shadow (`canvas_data.rs`, `draws_shadow`)
+
+`CanvasData::fill_rect`, `stroke_rect` and `draw_image` (upstream
+`canvas_data.rs:109`, `:188`, `:230`) send a shape with a visible shadow
+through `draw_with_shadow` (`:377`), which draws the shape only into a
+temporary target and passes that to `draw_surface_with_shadow` — a stub that
+only logs `no support for drawing shadows` in both backends
+(`vello_backend.rs:375`, `vello_cpu_backend.rs:294`). So the shape itself was
+never drawn: a button, card or chart bar with a shadow vanished. Paths and
+text ignore shadows and were drawn. Now `draws_shadow` returns false, so the
+three calls take their normal path and the shape is drawn without its
+shadow; one warning per process says shadows are not supported. Parity cases
+`shadow-offset`, `shadow-blur`, `shadow-stroke-rect`, `shadow-drawimage`
+(shape present, shadow absent as a known gap), `shadow-transparent-color`
+and `shadow-zero-offset-blur` (no shadow due, exact).
+
+Drop it when a backend implements `draw_surface_with_shadow`.
+
 ## Known limitations (accepted)
 
 - A device lost while a read-back waits on the GPU panics inside

@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use euclid::default::{Point2D, Rect, Size2D, Transform2D};
 use malloc_size_of::MallocSizeOfOps;
 use paint_api::CrossProcessPaintApi;
@@ -12,6 +14,18 @@ use servo_canvas_traits::canvas::*;
 use webrender_api::ImageKey;
 
 use crate::backend::GenericDrawTarget;
+
+/// Mercury: neither backend implements `draw_surface_with_shadow`, and the
+/// shadow path below draws the shape only into the shadow's temporary target,
+/// so `fillRect`, `strokeRect` and `drawImage` with a shadow drew nothing at
+/// all. Always take the normal path: the shape is drawn, without its shadow.
+fn draws_shadow(shadow_options: &ShadowOptions) -> bool {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if shadow_options.need_to_draw_shadow() && !LOGGED.swap(true, Ordering::Relaxed) {
+        log::warn!("canvas shadows are not supported; drawing shapes without them");
+    }
+    false
+}
 
 // Asserts on WR texture cache update for zero sized image with raw data.
 // https://github.com/servo/webrender/blob/main/webrender/src/texture_cache.rs#L1475
@@ -120,7 +134,7 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
             );
         };
 
-        if shadow_options.need_to_draw_shadow() {
+        if draws_shadow(&shadow_options) {
             let rect = Rect::new(
                 Point2D::new(dest_rect.origin.x as f32, dest_rect.origin.y as f32),
                 Size2D::new(dest_rect.size.width as f32, dest_rect.size.height as f32),
@@ -199,7 +213,7 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
             return; // Paint nothing if gradient size is zero.
         }
 
-        if shadow_options.need_to_draw_shadow() {
+        if draws_shadow(&shadow_options) {
             self.draw_with_shadow(
                 rect,
                 shadow_options,
@@ -241,7 +255,7 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
             return; // Paint nothing if gradient size is zero.
         }
 
-        if shadow_options.need_to_draw_shadow() {
+        if draws_shadow(&shadow_options) {
             self.draw_with_shadow(
                 rect,
                 shadow_options,
