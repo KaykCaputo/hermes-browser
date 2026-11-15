@@ -61,8 +61,18 @@ check "the default list names files like libgstcoreelements.dylib" "yes" \
 check "ogg is excluded by default" "0|libgstogg.dylib" "$(run bash "$PLUGINS" --excluded)"
 
 # The remaining cases read a copy of Servo's lists, so they do not run cargo.
-manifest_dir="$(cargo metadata --format-version 1 --locked --offline --filter-platform aarch64-apple-darwin 2>/dev/null |
-    jq -r '.packages[] | select(.name == "servo") | .manifest_path' | xargs dirname)"
+# The resolved servo crate, read with jq or, where jq is missing (macOS before 15), python3.
+metadata="$(cargo metadata --format-version 1 --locked --offline --filter-platform aarch64-apple-darwin 2>/dev/null)" ||
+    { printf 'FAIL cargo metadata failed; run this from a checkout whose dependencies are fetched (make fetch)\n'; exit 1; }
+if command -v jq >/dev/null 2>&1; then
+    manifest="$(jq -r '.packages[] | select(.name == "servo") | .manifest_path' <<<"$metadata")"
+elif command -v python3 >/dev/null 2>&1; then
+    manifest="$(python3 -c 'import json,sys; print("".join(p["manifest_path"] for p in json.load(sys.stdin)["packages"] if p["name"]=="servo"))' <<<"$metadata")"
+else
+    printf 'FAIL this test needs jq or python3 to read cargo metadata\n'
+    exit 1
+fi
+manifest_dir="$(dirname -- "$manifest")"
 mkdir -p "$TMP/lists"
 cp "$manifest_dir/gstreamer_plugin_lists/common.rs.in" "$manifest_dir/gstreamer_plugin_lists/macos.rs.in" "$TMP/lists/"
 export MERCURY_SERVO_PLUGIN_LISTS="$TMP/lists"
@@ -81,6 +91,13 @@ check "missing lists are an error with nothing on stdout" "1|" \
 check "--excluded with missing lists prints nothing either" "1|" \
     "$(MERCURY_SERVO_PLUGIN_LISTS="$TMP/no-such-dir" run bash "$PLUGINS" --excluded)"
 check "an unknown option is a usage error" "2|" "$(run bash "$PLUGINS" --bogus)"
+mkdir -p "$TMP/unreadable-lists"
+cp "$TMP/lists/common.rs.in" "$TMP/lists/macos.rs.in" "$TMP/unreadable-lists/"
+chmod 000 "$TMP/unreadable-lists/common.rs.in"
+check "an unreadable list is an error, not an empty list" "1|" \
+    "$(MERCURY_SERVO_PLUGIN_LISTS="$TMP/unreadable-lists" run bash "$PLUGINS")"
+check "and is named" "yes" "$(stderr_has "cannot read $TMP/unreadable-lists/common.rs.in")"
+chmod 600 "$TMP/unreadable-lists/common.rs.in"
 
 # ── gstreamer.sh ──────────────────────────────────────────────────────────
 check "env fails without an unpacked cache, printing nothing" "1|" \
@@ -132,10 +149,21 @@ else
     collect() { run bash scripts/macos/collect-gstreamer.sh "$@"; }
     files_in() { find "$1" -type f | wc -l | tr -d ' '; }
 
-    # A prefix and a destination whose paths contain a space and a `*`.
+    # A prefix whose files are symlinks to the real one, with one file replaced.
+    fake_prefix() {
+        local dir="$1" entry
+        rm -rf "$dir"
+        mkdir -p "$dir/lib/gstreamer-1.0" "$dir/lib/pkgconfig" "$dir/share"
+        cp "$PREFIX/lib/pkgconfig/gstreamer-1.0.pc" "$dir/lib/pkgconfig/"
+        cp "$PREFIX/share/versions.txt" "$dir/share/"
+        for entry in "$PREFIX"/lib/*.dylib; do ln -s "$entry" "$dir/lib/"; done
+        for entry in "$PREFIX"/lib/gstreamer-1.0/*.dylib; do ln -s "$entry" "$dir/lib/gstreamer-1.0/"; done
+    }
+    # A prefix made of real directories (with linked files) and a destination, both under a
+    # path with a space and a `*`, so that the dependency walk itself sees those characters.
     odd="$TMP/odd *dir"
     mkdir -p "$odd/out dir"
-    ln -s "$PREFIX" "$odd/pre fix*"
+    fake_prefix "$odd/pre fix*"
     cp "$EXE" "$odd/out dir/mercury-browser"
     lib="$odd/out dir/lib"
     result="$(collect "$odd/pre fix*" "$lib")"
@@ -161,6 +189,27 @@ else
     check "a stale excluded plugin is removed by the rebuild" "0|no" \
         "${result%%|*}|$([ -e "$lib/libgstogg.dylib" ] && echo yes || echo no)"
 
+    mkdir -p "$odd/out dir/lib.partial"
+    : >"$odd/out dir/lib.partial/not-mine"
+    printf 'x' >>"$lib/libgstvolume.dylib"
+    result="$(collect "$odd/pre fix*" "$lib")"
+    check "an existing lib.partial is never used or deleted as staging" "0|yes" \
+        "${result%%|*}|$([ -e "$odd/out dir/lib.partial/not-mine" ] && echo yes || echo no)"
+    check "and no staging directory is left behind" "0" \
+        "$(find "$odd/out dir" -maxdepth 1 -name 'lib.partial.*' | wc -l | tr -d ' ')"
+
+    # One collected directory shared through a symbolic link.
+    mkdir -p "$TMP/linked"
+    cp "$EXE" "$TMP/linked/mercury-browser"
+    ln -s "$lib" "$TMP/linked/lib"
+    result="$(collect "$PREFIX" "$TMP/linked/lib")"
+    check "a symlinked destination that is up to date is used as it is" "0|yes|yes" \
+        "${result%%|*}|$([ -L "$TMP/linked/lib" ] && echo yes || echo no)|$(stderr_has "is up to date")"
+    printf 'x' >>"$lib/libgstvolume.dylib"
+    result="$(collect "$PREFIX" "$TMP/linked/lib")"
+    check "a damaged shared directory is rebuilt in place and the link kept" "0|yes|same" \
+        "${result%%|*}|$([ -L "$TMP/linked/lib" ] && echo yes || echo no)|$(if cmp -s "$lib/libgstvolume.dylib" "$TMP/volume-arm64.dylib"; then echo same; else echo different; fi)"
+
     mkdir -p "$TMP/foreign/lib"
     : >"$TMP/foreign/lib/keep-me"
     cp "$EXE" "$TMP/foreign/mercury-browser"
@@ -178,16 +227,6 @@ else
     result="$(collect "$PREFIX" "$app/lib")"
     check "a bundle destination is never collected twice" "1|yes" "${result%%|*}|$(stderr_has "already exists")"
 
-    # A prefix whose files are symlinks to the real one, with one file replaced.
-    fake_prefix() {
-        local dir="$1" entry
-        rm -rf "$dir"
-        mkdir -p "$dir/lib/gstreamer-1.0" "$dir/lib/pkgconfig" "$dir/share"
-        cp "$PREFIX/lib/pkgconfig/gstreamer-1.0.pc" "$dir/lib/pkgconfig/"
-        cp "$PREFIX/share/versions.txt" "$dir/share/"
-        for entry in "$PREFIX"/lib/*.dylib; do ln -s "$entry" "$dir/lib/"; done
-        for entry in "$PREFIX"/lib/gstreamer-1.0/*.dylib; do ln -s "$entry" "$dir/lib/gstreamer-1.0/"; done
-    }
     mkdir -p "$TMP/fake-out"
     cp "$EXE" "$TMP/fake-out/mercury-browser"
 
@@ -208,15 +247,29 @@ else
     result="$(collect "$TMP/missing" "$TMP/fake-out/lib")"
     check "a missing plugin stops the collector" "1|yes" "${result%%|*}|$(stderr_has "plugin gstvolume is missing")"
     check "no partial result is left behind" "no|no" \
-        "$([ -e "$TMP/fake-out/lib" ] && echo yes || echo no)|$([ -e "$TMP/fake-out/lib.partial" ] && echo yes || echo no)"
+        "$([ -e "$TMP/fake-out/lib" ] && echo yes || echo no)|$(if [ -n "$(find "$TMP/fake-out" -maxdepth 1 -name 'lib.partial*')" ]; then echo yes; else echo no; fi)"
 
     notices_before="$(shasum -a 256 THIRD-PARTY-NOTICES.md)"
     mkdir -p "$TMP/with-ogg"
     cp "$EXE" "$TMP/with-ogg/mercury-browser"
     result="$(MERCURY_GSTREAMER_EXCLUDE_PLUGINS='' collect "$PREFIX" "$TMP/with-ogg/lib")"
-    check "a collection the notices do not list stops the collector" "1|yes" \
-        "${result%%|*}|$(stderr_has "THIRD-PARTY-NOTICES.md does not list what was collected")"
-    check "and leaves THIRD-PARTY-NOTICES.md alone" "$notices_before" "$(shasum -a 256 THIRD-PARTY-NOTICES.md)"
+    check "in the build tree, a collection the notices do not list is only reported" "0|yes" \
+        "${result%%|*}|$(stderr_has "warning: THIRD-PARTY-NOTICES.md does not list what was collected")"
+    app_ogg="$TMP/WithOgg.app/Contents/MacOS"
+    mkdir -p "$app_ogg"
+    cp "$EXE" "$app_ogg/mercury-browser"
+    result="$(MERCURY_GSTREAMER_EXCLUDE_PLUGINS='' collect "$PREFIX" "$app_ogg/lib")"
+    check "into a bundle it is refused" "1|yes|no" \
+        "${result%%|*}|$(stderr_has "does not list the libraries of this bundle")|$([ -e "$app_ogg/lib" ] && echo yes || echo no)"
+    check "and THIRD-PARTY-NOTICES.md is left alone" "$notices_before" "$(shasum -a 256 THIRD-PARTY-NOTICES.md)"
+
+    fake_prefix "$TMP/no-version"
+    grep -v '^glib ' "$PREFIX/share/versions.txt" >"$TMP/no-version/share/versions.txt"
+    result="$(run bash scripts/macos/gstreamer-notices.sh --check "$TMP/no-version" "$lib")"
+    check "a project without a recorded version stops the notices generator" "1|yes" \
+        "${result%%|*}|$(stderr_has "no version for glib")"
+    result="$(run bash scripts/macos/gstreamer-notices.sh --write "$TMP/no-version" "$lib")"
+    check "and --write then changes nothing" "1|$notices_before" "${result%%|*}|$(shasum -a 256 THIRD-PARTY-NOTICES.md)"
 fi
 
 if [ "$failures" -gt 0 ]; then

@@ -88,7 +88,10 @@ fi
 ALL=()
 for list in common.rs.in macos.rs.in; do
     [ -f "$PLUGIN_LISTS/$list" ] || die "missing $PLUGIN_LISTS/$list"
-    text="$(grep -v '^[[:space:]]*//' "$PLUGIN_LISTS/$list")" || true
+    # grep exits 1 when no line is left (a list of comments only), 2 when it cannot read.
+    status=0
+    text="$(grep -v '^[[:space:]]*//' "$PLUGIN_LISTS/$list")" || status=$?
+    [ "$status" -le 1 ] || die "cannot read $PLUGIN_LISTS/$list"
     while IFS= read -r line; do
         while [[ "$line" =~ \"([^\"]*)\" ]]; do
             ALL+=("${BASH_REMATCH[1]}")
@@ -106,7 +109,7 @@ else
     EXCLUDED_TEXT="$DEFAULT_EXCLUDED"
 fi
 EXCLUDED=()
-read -r -a EXCLUDED <<<"$EXCLUDED_TEXT" || true
+read -r -a EXCLUDED <<<"$EXCLUDED_TEXT"
 
 listed() {
     local wanted="$1" plugin

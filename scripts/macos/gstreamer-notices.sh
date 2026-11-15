@@ -111,11 +111,13 @@ licence_of() {
     esac
 }
 
+# Sets VERSION for project $1. Called in this shell, never in a command substitution, so
+# that `die` ends the script.
+VERSION=""
 version_of() {
-    local version
-    version="$(awk -v name="$1" '$1 == name { print $2 }' "$VERSIONS_FILE")"
-    [ -n "$version" ] || die "no version for $1 in $VERSIONS_FILE"
-    printf '%s\n' "$version"
+    VERSION="$(awk -v name="$1" '$1 == name { print $2 }' "$VERSIONS_FILE")" \
+        || die "cannot read $VERSIONS_FILE"
+    [ -n "$VERSION" ] || die "no version for $1 in $VERSIONS_FILE"
 }
 
 # "project<TAB>file" for every collected file, sorted.
@@ -135,21 +137,18 @@ if [ "$MODE" = --projects ]; then
     exit 0
 fi
 
-generate() {
-    local project version licence files
-    printf '%s\n' "$BEGIN"
-    printf '| Project (cerbero recipe) | Version | Licence | Bundled files |\n'
-    printf '|---|---|---|---|\n'
-    while IFS= read -r project; do
-        version="$(version_of "$project")"
-        licence="$(licence_of "$project")" || die "no licence recorded for $project in $0"
-        files="$(awk -F '\t' -v p="$project" '$1 == p { printf "%s`%s`", (n++ ? ", " : ""), $2 }' <<<"$pairs")"
-        printf '| %s | %s | %s | %s |\n' "$project" "$version" "$licence" "$files"
-    done <<<"$projects"
-    printf '%s\n' "$END"
-}
-
-table="$(generate)"
+# The table, built in this shell so that a missing version or licence stops the script.
+table="$BEGIN"$'\n'"| Project (cerbero recipe) | Version | Licence | Bundled files |"$'\n'"|---|---|---|---|"$'\n'
+while IFS= read -r project; do
+    version_of "$project"
+    licence="$(licence_of "$project")" || die "no licence recorded for $project in $0"
+    files="$(awk -F '\t' -v p="$project" '$1 == p { printf "%s`%s`", (n++ ? ", " : ""), $2 }' <<<"$pairs")" \
+        || die "awk failed"
+    [ -n "$VERSION" ] || die "empty version for $project"
+    [ -n "$files" ] || die "no files for $project"
+    table+="| $project | $VERSION | $licence | $files |"$'\n'
+done <<<"$projects"
+table+="$END"
 current="$(awk -v b="$BEGIN" -v e="$END" '$0 == b { on = 1 } on { print } $0 == e { on = 0 }' "$NOTICES")"
 
 case "$MODE" in

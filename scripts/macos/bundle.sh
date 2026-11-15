@@ -7,8 +7,9 @@
 #
 # Assemble, sign and optionally package Mercury Browser.app.
 #
-#   scripts/macos/bundle.sh [--binary <path>] [--out <dir>] [--identity <id>]
-#                           [--gstreamer-prefix <dir>] [--dmg]
+#   scripts/macos/bundle.sh --gstreamer-prefix <dir> [--binary <path>] [--out <dir>]
+#                           [--identity <id>] [--dmg]
+#   (or MERCURY_GSTREAMER_PREFIX instead of --gstreamer-prefix; one of them is required)
 #   scripts/macos/bundle.sh [--identity <id>] --print-entitlements
 #
 #   --binary <path>            the arm64 executable to bundle

@@ -95,7 +95,8 @@ expand_into() {
     /usr/sbin/pkgutil --expand-full "$pkg" "$expanded"
     for component in "$expanded"/*.pkg; do
         [ -d "${component}/Payload" ] || continue
-        location="$(sed -n 's/.*install-location="\([^"]*\)".*/\1/p' "${component}/PackageInfo" | head -n 1)"
+        # The first install-location only; sed reads the file itself, so stopping early (q) cuts no pipe.
+        location="$(sed -n '/install-location="/{s/.*install-location="\([^"]*\)".*/\1/p;q;}' "${component}/PackageInfo")"
         case "$location" in
             "${SYSTEM_FRAMEWORK}" | "${SYSTEM_FRAMEWORK}/")
                 /usr/bin/ditto "${component}/Payload" "$staging" ;;
@@ -117,7 +118,7 @@ cmd_unpack() {
     fi
     local pkg
     for pkg in "$GSTREAMER_RUNTIME_PKG" "$GSTREAMER_DEVEL_PKG"; do
-        [ -f "${cache_dir}/${pkg}" ] || die "${cache_dir}/${pkg} is missing; run fetch first"
+        [ -f "${cache_dir}/${pkg}" ] || die "${cache_dir}/${pkg} is missing; run: make gstreamer-macos (or $0 fetch)"
     done
     [ "$(sha256_of "${cache_dir}/${GSTREAMER_RUNTIME_PKG}")" = "$GSTREAMER_RUNTIME_SHA256" ] \
         || die "${GSTREAMER_RUNTIME_PKG} fails its checksum; run fetch again"
@@ -141,7 +142,7 @@ cmd_unpack() {
 
 cmd_env() {
     require_macos
-    [ -f "$unpacked_marker" ] || die "no unpacked GStreamer in ${prefix}; run fetch and unpack first"
+    [ -f "$unpacked_marker" ] || die "no unpacked GStreamer in ${prefix}; run: make gstreamer-macos (or $0 fetch, then $0 unpack)"
     # PKG_CONFIG_LIBDIR replaces pkg-config's default search path, so only this
     # prefix's .pc files are seen (not Homebrew's, not /Library/Frameworks).
     printf 'export MERCURY_GSTREAMER_PREFIX=%q\n' "$prefix"
@@ -155,7 +156,7 @@ cmd_env() {
 
 cmd_check() {
     require_macos
-    [ -f "$unpacked_marker" ] || die "no unpacked GStreamer in ${prefix}; run fetch and unpack first"
+    [ -f "$unpacked_marker" ] || die "no unpacked GStreamer in ${prefix}; run: make gstreamer-macos (or $0 fetch, then $0 unpack)"
     if [ -d "$SYSTEM_FRAMEWORK" ]; then
         say "note: ${SYSTEM_FRAMEWORK} is installed; it is ignored in favour of ${prefix}"
     fi

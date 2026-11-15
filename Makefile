@@ -117,9 +117,21 @@ doctor:
 	@rustc --version
 	@"$(CARGO)" --version
 	@"$(RUSTUP)" show active-toolchain
-	@if [ "$$(uname -s)" = Darwin ]; then scripts/macos/gstreamer.sh check; fi
+	@if [ "$$(uname -s)" = Darwin ]; then \
+		scripts/macos/gstreamer.sh check || { \
+			printf '%s\n' 'error: GStreamer for macOS is not set up; run: make gstreamer-macos' >&2; \
+			exit 1; \
+		}; \
+	fi
 
-setup: doctor
+# On macOS GStreamer is fetched first: doctor checks it, and nothing builds without it.
+ifeq ($(shell uname -s),Darwin)
+SETUP_FIRST = gstreamer-macos
+else
+SETUP_FIRST =
+endif
+
+setup: $(SETUP_FIRST) doctor
 	"$(RUSTUP)" component add rustfmt clippy
 	"$(CARGO)" fetch --locked
 

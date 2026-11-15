@@ -58,13 +58,21 @@ fn record_gstreamer_version() {
     let output = std::process::Command::new(pkg_config)
         .args(["--modversion", "gstreamer-1.0"])
         .output();
-    if let Ok(output) = output
-        && output.status.success()
-    {
-        let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !version.is_empty() {
-            println!("cargo:rustc-env=MERCURY_GSTREAMER_VERSION={version}");
+    let version = match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
         }
+        _ => String::new(),
+    };
+    if version.is_empty() {
+        // The media registry would then be named "unknown"; a build that links GStreamer
+        // normally finds it through the same pkg-config, so this points at a broken setup.
+        println!(
+            "cargo:warning=could not read the GStreamer version with pkg-config; \
+             run the build with the environment of scripts/macos/gstreamer.sh env"
+        );
+    } else {
+        println!("cargo:rustc-env=MERCURY_GSTREAMER_VERSION={version}");
     }
 }
 

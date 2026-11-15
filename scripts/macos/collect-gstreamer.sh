@@ -193,28 +193,36 @@ marker_inputs() {
     if [ "${#EXECUTABLE_DEPS[@]}" -gt 0 ]; then printf 'dependency %s\n' "${EXECUTABLE_DEPS[@]}"; fi
 }
 
-# The number of files and a digest of their names and contents (marker excluded).
+# Sets SUMMARY to the number of files and a digest of their names and contents (marker
+# excluded). Runs in this shell, not a command substitution, so that `set -e` and `die`
+# apply to every step.
+SUMMARY=""
 contents_summary() {
-    local directory="$1" names count digest name
-    names="$(cd -- "$directory" && find . -type f ! -name '.gstreamer-*' | LC_ALL=C sort)" \
-        || die "cannot list $directory"
-    count=0
-    digest="$(
-        while IFS= read -r name; do
-            [ -n "$name" ] || continue
-            shasum -a 256 -- "$directory/$name" | sed "s|  .*|  $name|"
-        done <<<"$names" | shasum -a 256 | cut -d ' ' -f 1
-    )"
-    [ -n "$names" ] && count="$(wc -l <<<"$names" | tr -d ' ')"
-    printf 'files %s\ndigest %s\n' "$count" "$digest"
+    local directory="$1" names name hash listing="" count=0 digest
+    names="$(cd -- "$directory" && find . -type f ! -name '.gstreamer-*')" || die "cannot list $directory"
+    names="$(LC_ALL=C sort <<<"$names")"
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        hash="$(shasum -a 256 -- "$directory/$name")" || die "cannot read $directory/$name"
+        listing+="${hash%% *}  $name"$'\n'
+        count=$((count + 1))
+    done <<<"$names"
+    digest="$(shasum -a 256 <<<"$listing")" || die "shasum failed"
+    SUMMARY="files $count"$'\n'"digest ${digest%% *}"
 }
 
+# The table of bundled libraries in THIRD-PARTY-NOTICES.md must list what ships: a bundle
+# whose libraries differ from it is refused. In the build tree (a developer trying an
+# exclusion, say) a difference is only reported.
 check_notices() {
+    local generator="$REPOSITORY/scripts/macos/gstreamer-notices.sh"
     if [ "${MERCURY_GSTREAMER_UPDATE_NOTICES:-0}" = 1 ]; then
-        bash "$REPOSITORY/scripts/macos/gstreamer-notices.sh" --write "$PREFIX" "$1"
-    else
-        bash "$REPOSITORY/scripts/macos/gstreamer-notices.sh" --check "$PREFIX" "$1" \
-            || die "THIRD-PARTY-NOTICES.md does not list what was collected; rerun with MERCURY_GSTREAMER_UPDATE_NOTICES=1 to regenerate the table, and commit it"
+        bash "$generator" --write "$PREFIX" "$1" || die "could not rewrite the table in THIRD-PARTY-NOTICES.md"
+    elif ! bash "$generator" --check "$PREFIX" "$1"; then
+        if [ "$BUNDLE_MODE" = 1 ]; then
+            die "THIRD-PARTY-NOTICES.md does not list the libraries of this bundle; rerun with MERCURY_GSTREAMER_UPDATE_NOTICES=1 to regenerate the table, and commit it"
+        fi
+        say "warning: THIRD-PARTY-NOTICES.md does not list what was collected into $DESTINATION; a bundle with these libraries would be refused until the table is regenerated (MERCURY_GSTREAMER_UPDATE_NOTICES=1)"
     fi
 }
 
@@ -227,26 +235,39 @@ if [ "$BUNDLE_MODE" = 1 ]; then
     if [ -e "$DESTINATION" ] || [ -L "$DESTINATION" ]; then
         die "$DESTINATION already exists; an application bundle's lib directory is collected once, into a fresh bundle"
     fi
-elif [ -e "$DESTINATION" ] || [ -L "$DESTINATION" ]; then
-    [ -d "$DESTINATION" ] || die "$DESTINATION exists and is not a directory"
-    markers="$(find "$DESTINATION/" -maxdepth 1 -name '.gstreamer-*' -type f)"
-    [ -n "$markers" ] \
-        || die "$DESTINATION exists but was not made by this script (no .gstreamer-* marker); refusing to replace it"
-    if [ -f "$DESTINATION/$MARKER" ]; then
-        recorded="$(cat "$DESTINATION/$MARKER")"
-        if [ "$recorded" = "$INPUTS"$'\n'"$(contents_summary "$DESTINATION")" ]; then
-            require_no_excluded "$DESTINATION"
-            check_notices "$DESTINATION"
-            say "ok: $DESTINATION is up to date"
-            exit 0
-        fi
+else
+    # A symbolic link (one collected directory shared by several worktrees) is followed:
+    # the directory it points to is checked and, if needed, rebuilt in place, and the link
+    # stays. Every worktree that shares it then uses the rebuilt directory.
+    if [ -L "$DESTINATION" ]; then
+        [ -d "$DESTINATION" ] || die "$DESTINATION is a symbolic link to something that is not a directory"
+        LINK="$DESTINATION"
+        DESTINATION="$(cd -- "$DESTINATION" && pwd -P)" || die "cannot resolve $LINK"
+        say "$LINK links to $DESTINATION; collecting there"
     fi
-    say "$DESTINATION is out of date or damaged; rebuilding it"
+    if [ -e "$DESTINATION" ]; then
+        [ -d "$DESTINATION" ] || die "$DESTINATION exists and is not a directory"
+        markers="$(find "$DESTINATION/" -maxdepth 1 -name '.gstreamer-*' -type f)"
+        [ -n "$markers" ] \
+            || die "$DESTINATION exists but was not made by this script (no .gstreamer-* marker); refusing to replace it"
+        if [ -f "$DESTINATION/$MARKER" ]; then
+            recorded="$(cat "$DESTINATION/$MARKER")"
+            contents_summary "$DESTINATION"
+            if [ "$recorded" = "$INPUTS"$'\n'"$SUMMARY" ]; then
+                require_no_excluded "$DESTINATION"
+                check_notices "$DESTINATION"
+                say "ok: $DESTINATION is up to date"
+                exit 0
+            fi
+        fi
+        say "$DESTINATION is out of date or damaged; rebuilding it"
+    fi
 fi
 
-STAGING="$DESTINATION.partial"
-rm -rf -- "$STAGING"
-mkdir -p -- "$STAGING"
+# A fresh, uniquely named staging directory beside the destination: nothing that already
+# exists is ever deleted as "staging".
+mkdir -p -- "$(dirname -- "$DESTINATION")"
+STAGING="$(mktemp -d "$DESTINATION.partial.XXXXXX")" || die "cannot create a staging directory beside $DESTINATION"
 trap 'rm -rf -- "$STAGING"' EXIT
 
 # ── Dependency walk ───────────────────────────────────────────────────────
@@ -286,11 +307,10 @@ done
 require_no_excluded "$STAGING"
 check_notices "$STAGING"
 if [ "$BUNDLE_MODE" = 0 ]; then
-    {
-        printf '%s\n' "$INPUTS"
-        contents_summary "$STAGING"
-    } >"$STAGING/$MARKER"
+    contents_summary "$STAGING"
+    printf '%s\n%s\n' "$INPUTS" "$SUMMARY" >"$STAGING/$MARKER"
 fi
+chmod 755 "$STAGING"
 rm -rf -- "$DESTINATION"
 mv -- "$STAGING" "$DESTINATION"
 trap - EXIT
