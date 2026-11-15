@@ -365,6 +365,22 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
         self.update_image_rendering(None);
     }
 
+    /// Mercury: like `recreate`, but the new draw target may fail to start; if
+    /// it does, nothing changes and the size it was asked for is returned.
+    #[cfg(feature = "vello")]
+    pub(crate) fn try_recreate(
+        &mut self,
+        size: Option<Size2D<u64>>,
+        new_draw_target: impl FnOnce(&DrawTarget, Size2D<u64>) -> Option<DrawTarget>,
+    ) -> Result<(), Size2D<u64>> {
+        let size = size
+            .unwrap_or_else(|| self.draw_target.get_size().to_u64())
+            .max(MIN_WR_IMAGE_SIZE);
+        self.draw_target = new_draw_target(&self.draw_target, size).ok_or(size)?;
+        self.update_image_rendering(None);
+        Ok(())
+    }
+
     /// Mercury: like `recreate`, but moves the canvas to another backend,
     /// keeping its WebRender image key.
     #[cfg(feature = "vello")]

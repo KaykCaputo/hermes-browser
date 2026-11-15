@@ -217,65 +217,94 @@ impl VelloDrawTarget {
     }
 
     /// Mercury: returns `None` when the GPU canvas cannot start, so that the
-    /// caller draws this canvas on the CPU. The reason is logged once and the
-    /// GPU is not tried again in this process.
+    /// caller draws this canvas on the CPU. If the device or the shared
+    /// renderer cannot be created (or the device was lost), the reason is
+    /// logged once and the GPU is not tried again in this process; if only
+    /// this canvas's own renderer cannot be created, only this canvas moves.
     pub(crate) fn try_new(size: Size2D<u32>) -> Option<Self> {
-        if GPU_CANVAS_UNAVAILABLE.load(Ordering::Relaxed) {
+        if GPU_CANVAS_UNAVAILABLE.load(Ordering::Relaxed) || !Self::usable_for(size.cast()) {
             return None;
         }
-        if !Self::fits_texture(size.cast()) {
-            log::debug!("{size:?} canvas exceeds the GPU texture limit; drawing it on the CPU");
-            return None;
-        }
-        if GPU_DEVICE_LOST.load(Ordering::Relaxed) {
-            // Canvases already on the lost device stay blank; new ones use the CPU.
-            SHARED_GPU.set(None);
-            GPU_CANVAS_UNAVAILABLE.store(true, Ordering::Relaxed);
-            log::warn!("GPU 2D canvas unavailable (GPU device lost); drawing 2D canvases on the CPU");
-            return None;
-        }
-        Self::start(size)
-            .map_err(|reason| {
-                GPU_CANVAS_UNAVAILABLE.store(true, Ordering::Relaxed);
-                log::warn!("GPU 2D canvas unavailable ({reason}); drawing 2D canvases on the CPU");
-            })
-            .ok()
-    }
-
-    /// Mercury: vello requests wgpu's default limits, so a canvas larger than
-    /// the default texture size cannot get a texture and must use the CPU.
-    pub(crate) fn fits_texture(size: Size2D<u64>) -> bool {
-        let max = vello::wgpu::Limits::default().max_texture_dimension_2d as u64;
-        size.width <= max && size.height <= max
-    }
-
-    fn start(size: Size2D<u32>) -> Result<Self, String> {
         let (device, queue, renderer) = match SHARED_GPU.with_borrow(Clone::clone) {
             Some(shared) => shared,
-            None => {
-                let shared = Self::create_device_and_renderer()?;
-                SHARED_GPU.set(Some(shared.clone()));
-                shared
+            None => match Self::create_device_and_renderer() {
+                Ok(shared) => {
+                    SHARED_GPU.set(Some(shared.clone()));
+                    shared
+                },
+                Err(reason) => {
+                    GPU_CANVAS_UNAVAILABLE.store(true, Ordering::Relaxed);
+                    log::warn!("GPU 2D canvas unavailable ({reason}); drawing 2D canvases on the CPU");
+                    return None;
+                },
             },
         };
-        let renderer = Self::renderer_for(&device, &renderer, size)?;
-        Ok(Self::new_with_renderer(device, queue, renderer, size))
+        Self::with_renderer_for(device, queue, &renderer, None, size)
+    }
+
+    /// Mercury: a GPU canvas resized to `size`, or `None` if it must move to
+    /// the CPU backend.
+    pub(crate) fn try_similar(&self, size: Size2D<u64>) -> Option<Self> {
+        if !Self::usable_for(size) {
+            return None;
+        }
+        let shared = SHARED_GPU.with_borrow(|shared| shared.as_ref().map(|(_, _, r)| r.clone()));
+        let shared = shared.unwrap_or_else(|| self.renderer.clone());
+        // A canvas that already has a renderer of its own keeps it.
+        let own = (!Rc::ptr_eq(&self.renderer, &shared)).then_some(&self.renderer);
+        Self::with_renderer_for(self.device.clone(), self.queue.clone(), &shared, own, size.cast())
+    }
+
+    /// Mercury: whether a canvas of this size can be drawn on the GPU at all.
+    /// vello requests wgpu's default limits, so a canvas larger than the
+    /// default texture size cannot get a texture; vello 0.11 renders only 256
+    /// bins of 256x256 pixels correctly (it warns "Trying to paint too large
+    /// image", linebender/vello#680); after a device loss nothing can.
+    fn usable_for(size: Size2D<u64>) -> bool {
+        let max = vello::wgpu::Limits::default().max_texture_dimension_2d as u64;
+        let bins = size.width.div_ceil(256) * size.height.div_ceil(256);
+        if size.width > max || size.height > max || bins > 256 {
+            log::debug!("{size:?} canvas exceeds the GPU canvas limits; drawing it on the CPU");
+            return false;
+        }
+        if GPU_DEVICE_LOST.load(Ordering::Relaxed) {
+            // Canvases already on the lost device stay blank; new and resized ones use the CPU.
+            SHARED_GPU.set(None);
+            if !GPU_CANVAS_UNAVAILABLE.swap(true, Ordering::Relaxed) {
+                log::warn!("GPU 2D canvas unavailable (GPU device lost); drawing 2D canvases on the CPU");
+            }
+            return false;
+        }
+        true
     }
 
     /// Mercury: each canvas's previous frame lives in its renderer's image
-    /// atlas (at most 8192x8192). Two canvases over half that size cannot
-    /// share one atlas, so such a canvas gets a renderer of its own.
-    fn renderer_for(
-        device: &Device,
-        renderer: &Rc<RefCell<vello::Renderer>>,
+    /// atlas (at most 8192x8192), next to the images drawn into it. A canvas
+    /// larger than 2048x2048 in area (a sixteenth of the atlas) gets a renderer
+    /// of its own so that it cannot crowd other canvases out of a shared atlas
+    /// (see MERCURY.md for the measurements behind this rule).
+    fn with_renderer_for(
+        device: Device,
+        queue: Queue,
+        shared: &Rc<RefCell<vello::Renderer>>,
+        own: Option<&Rc<RefCell<vello::Renderer>>>,
         size: Size2D<u32>,
-    ) -> Result<Rc<RefCell<vello::Renderer>>, String> {
-        let is_shared = SHARED_GPU
-            .with_borrow(|shared| shared.as_ref().is_some_and(|(_, _, r)| Rc::ptr_eq(r, renderer)));
-        if is_shared && (size.width > 4096 || size.height > 4096) {
-            return Ok(Rc::new(RefCell::new(Self::create_renderer(device)?)));
-        }
-        Ok(renderer.clone())
+    ) -> Option<Self> {
+        let fits_shared = size.width as u64 * size.height as u64 <= 2048 * 2048;
+        let renderer = if fits_shared {
+            shared.clone()
+        } else if let Some(own) = own {
+            own.clone()
+        } else {
+            match Self::create_renderer(&device) {
+                Ok(renderer) => Rc::new(RefCell::new(renderer)),
+                Err(reason) => {
+                    log::warn!("GPU renderer for a {size:?} canvas failed ({reason}); drawing it on the CPU");
+                    return None;
+                },
+            }
+        };
+        Some(Self::new_with_renderer(device, queue, renderer, size))
     }
 
     fn create_device_and_renderer() -> Result<SharedGpu, String> {
@@ -419,16 +448,10 @@ impl GenericDrawTarget for VelloDrawTarget {
     }
 
     fn create_similar_draw_target(&self, size: &Size2D<i32>) -> Self {
-        // Mercury: a canvas resized beyond half the atlas gets its own renderer.
-        let renderer = Self::renderer_for(&self.device, &self.renderer, size.cast())
-            .unwrap_or_else(|error| {
-                log::warn!("VELLO RENDERER ERROR {error}");
-                self.renderer.clone()
-            });
         Self::new_with_renderer(
             self.device.clone(),
             self.queue.clone(),
-            renderer,
+            self.renderer.clone(),
             size.cast(),
         )
     }
