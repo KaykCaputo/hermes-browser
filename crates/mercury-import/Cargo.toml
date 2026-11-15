@@ -1,0 +1,12 @@
+[package]
+name = "mercury-import"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+html5ever = "0.40.1"
+log.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+url.workspace = true
