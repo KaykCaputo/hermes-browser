@@ -366,6 +366,51 @@
       return [sample(c, "i", 20, 20, RED), sample(c, "e", 60, 60, BLACK), sample(c, "e", 80, 60, null),
         sample(c, "e", 95, 95, T)];
     });
+    // Shadows are not drawn by either backend (a known gap): the shape must still be there, and
+    // the shadow samples report the gap against the specification's value.
+    function shadowed(c) {
+      c.shadowColor = "rgb(0,0,0)"; c.shadowOffsetX = 20; c.shadowOffsetY = 20;
+    }
+    run("shadow-stroke-rect", () => {
+      const c = canvas().getContext("2d");
+      shadowed(c); c.strokeStyle = "rgb(0,0,255)"; c.lineWidth = 10; c.strokeRect(15, 15, 40, 40);
+      return [sample(c, "i", 15, 35, BLUE), sample(c, "i", 35, 35, T), sample(c, "i", 35, 55, BLUE),
+        sample(c, "i", 75, 55, BLACK)];
+    });
+    run("shadow-fill-path", () => {
+      const c = canvas().getContext("2d");
+      shadowed(c); c.fillStyle = "rgb(255,0,0)";
+      c.beginPath(); c.arc(35, 35, 25, 0, Math.PI * 2); c.fill();
+      return [sample(c, "i", 35, 35, RED), sample(c, "i", 75, 75, BLACK), sample(c, "i", 95, 5, T)];
+    });
+    run("shadow-stroke-path", () => {
+      const c = canvas().getContext("2d");
+      shadowed(c); c.strokeStyle = "rgb(0,0,255)"; c.lineWidth = 10;
+      c.beginPath(); c.moveTo(10, 30); c.lineTo(60, 30); c.stroke();
+      return [sample(c, "i", 35, 30, BLUE), sample(c, "i", 55, 50, BLACK)];
+    });
+    run("shadow-text", () => {
+      const c = canvas().getContext("2d");
+      shadowed(c); c.font = "bold 40px sans-serif"; c.fillStyle = "rgb(0,0,0)"; c.fillText("Hi", 5, 45);
+      return [inkBox(c, 100, 100)];
+    });
+    run("shadow-drawimage", () => {
+      const c = canvas().getContext("2d");
+      shadowed(c); c.drawImage(quadrantCanvas(), 10, 10);
+      return [sample(c, "i", 15, 15, RED), sample(c, "i", 25, 25, YELLOW), sample(c, "i", 40, 40, BLACK)];
+    });
+    run("shadow-transparent-color", () => {
+      const c = canvas().getContext("2d");
+      c.shadowColor = "rgba(0,0,0,0)"; c.shadowOffsetX = 20; c.shadowOffsetY = 20; c.shadowBlur = 4;
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(10, 10, 40, 40);
+      return [sample(c, "i", 30, 30, RED), sample(c, "i", 60, 60, T)];
+    });
+    run("shadow-zero-offset-blur", () => {
+      const c = canvas().getContext("2d");
+      c.shadowColor = "rgb(0,0,0)"; c.shadowOffsetX = 0; c.shadowOffsetY = 0; c.shadowBlur = 0;
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(10, 10, 40, 40);
+      return [sample(c, "i", 30, 30, RED), sample(c, "i", 55, 55, T)];
+    });
 
     // ---- text
     for (const align of ["left", "center", "right"]) {
@@ -619,6 +664,118 @@
       return [sample(a, "i", 50, 50, RED), sample(a, "i", 250, 50, GREEN), sample(b, "i", 50, 50, BLUE),
         sample(b, "i", 250, 50, YELLOW)];
     });
+
+    run("resize-past-limit-and-back", () => {
+      const element = canvas(100, 50);
+      const c = element.getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 50, 50);
+      const small = sample(c, "i", 25, 25, RED);
+      element.width = 10000;
+      c.fillStyle = "rgb(0,0,255)"; c.fillRect(9900, 0, 100, 50);
+      const wide = [sample(c, "i", 25, 25, T), sample(c, "i", 9950, 25, BLUE)];
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 50, 50);
+      const wideAgain = sample(c, "i", 25, 25, GREEN);
+      element.width = 100;
+      c.fillStyle = "rgb(255,255,0)"; c.fillRect(50, 0, 50, 50);
+      return [small].concat(wide, [wideAgain, sample(c, "i", 25, 25, T), sample(c, "i", 75, 25, YELLOW)]);
+    });
+
+    // ---- hit testing, measurement and other state
+    run("is-point-in-path", () => {
+      const c = canvas().getContext("2d");
+      c.beginPath(); c.rect(10, 10, 80, 80); c.rect(30, 30, 40, 40);
+      return ["d nonzero=" + c.isPointInPath(50, 50) + "," + c.isPointInPath(20, 20) + "," + c.isPointInPath(95, 95)
+        + " want true,true,false",
+        "d evenodd=" + c.isPointInPath(50, 50, "evenodd") + "," + c.isPointInPath(20, 20, "evenodd")
+        + " want false,true"];
+    });
+    run("is-point-in-stroke", () => {
+      const c = canvas().getContext("2d");
+      c.lineWidth = 10; c.beginPath(); c.moveTo(10, 50); c.lineTo(90, 50);
+      return ["d stroke=" + c.isPointInStroke(50, 53) + "," + c.isPointInStroke(50, 60) + "," + c.isPointInStroke(5, 50)
+        + " want true,false,false"];
+    });
+    run("measure-text-widths", () => {
+      const c = canvas(10, 10, false).getContext("2d");
+      const widths = [];
+      for (const font of ["12px serif", "bold 30px sans-serif", "20px monospace"]) {
+        c.font = font;
+        for (const text of ["Hello, world", "iiii", "WWWW", "\u0645\u0631\u062d\u0628\u0627"]) {
+          widths.push(c.measureText(text).width.toFixed(2));
+        }
+      }
+      return ["d widths=" + widths.join(",") + " want ?"];
+    });
+    run("line-dash-offset-frames", () => new Promise((resolve) => {
+      const c = canvas().getContext("2d");
+      c.strokeStyle = "rgb(255,0,0)"; c.lineWidth = 10; c.setLineDash([10, 10]);
+      c.beginPath(); c.moveTo(0, 25); c.lineTo(100, 25); c.stroke();
+      requestAnimationFrame(() => {
+        c.lineDashOffset = 10;
+        c.beginPath(); c.moveTo(0, 75); c.lineTo(100, 75); c.stroke();
+        requestAnimationFrame(() => resolve([sample(c, "i", 5, 25, RED), sample(c, "i", 15, 25, T),
+          sample(c, "i", 5, 75, T), sample(c, "i", 15, 75, RED)]));
+      });
+    }));
+    run("image-smoothing-off", () => {
+      const source = canvas(2, 2, false);
+      const s2 = source.getContext("2d");
+      s2.fillStyle = "rgb(255,0,0)"; s2.fillRect(0, 0, 1, 1); s2.fillRect(1, 1, 1, 1);
+      s2.fillStyle = "rgb(0,0,255)"; s2.fillRect(1, 0, 1, 1); s2.fillRect(0, 1, 1, 1);
+      const c = canvas().getContext("2d");
+      c.imageSmoothingEnabled = false;
+      c.drawImage(source, 0, 0, 80, 80);
+      return [sample(c, "i", 39, 10, RED), sample(c, "i", 40, 10, BLUE), sample(c, "i", 39, 41, BLUE),
+        sample(c, "i", 41, 41, RED)];
+    });
+    run("filter", () => {
+      const c = canvas().getContext("2d");
+      if (!("filter" in c)) {
+        return ["unsupported"];
+      }
+      c.filter = "invert(1)";
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(10, 10, 80, 80);
+      return ["d filter=" + c.filter + " want invert(1)", sample(c, "i", 50, 50, [0, 255, 255, 255])];
+    });
+    const imageWant = {
+      // [blue only, overlap, red only]
+      "source-atop": [BLUE, RED, T],
+      "destination-in": [T, BLUE, T],
+      "multiply": [BLUE, BLACK, RED],
+      "copy": [T, RED, RED],
+    };
+    for (const op of Object.keys(imageWant)) {
+      run("composite-image-" + op, () => {
+        const red = canvas(50, 50, false);
+        const r = red.getContext("2d"); r.fillStyle = "rgb(255,0,0)"; r.fillRect(0, 0, 50, 50);
+        const c = canvas().getContext("2d");
+        c.fillStyle = "rgb(0,0,255)"; c.fillRect(10, 10, 50, 50);
+        c.globalCompositeOperation = op;
+        c.drawImage(red, 40, 40);
+        const want = imageWant[op];
+        return [sample(c, "i", 20, 20, want[0]), sample(c, "i", 50, 50, want[1]), sample(c, "i", 80, 80, want[2])];
+      });
+    }
+    run("text-maxwidth", () => {
+      const c = canvas().getContext("2d");
+      c.font = "bold 30px sans-serif"; c.fillStyle = "rgb(0,0,0)"; c.fillText("Hello world", 10, 50, 40);
+      return [inkBox(c, 100, 100)];
+    });
+    run("text-rtl", () => {
+      const c = canvas().getContext("2d");
+      c.direction = "rtl"; c.textAlign = "start";
+      c.font = "bold 30px sans-serif"; c.fillStyle = "rgb(0,0,0)"; c.fillText("abc", 90, 50);
+      return ["d direction=" + c.direction + " want rtl", inkBox(c, 100, 100)];
+    });
+    run("background-canvas", () => new Promise((resolve) => {
+      const element = canvas(100, 100, false);
+      const c = element.getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 40, 40);
+      setTimeout(() => {
+        c.fillStyle = "rgb(0,0,255)"; c.fillRect(60, 60, 40, 40);
+        resolve([sample(c, "i", 20, 20, RED), sample(c, "i", 80, 80, BLUE)]);
+      }, 1000);
+    }));
 
     function finish() {
       const out = document.getElementById("out");
