@@ -1,5 +1,7 @@
 mod support;
 
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -307,7 +309,7 @@ fn the_user_agent_referrer_and_cookie_are_sent() {
     let dir = TempDir::new("headers");
     let (manager, events) = manager();
     let mut request = request(server.url("/file.bin"), &dir.path);
-    request.referrer = Some(Url::parse("http://127.0.0.1/page#section").unwrap());
+    request.referrer = Some(server.url("/page?q=1#section"));
     request.cookie_header = Some("session=abc; theme=dark".to_owned());
     let id = manager.start(request);
     events_until_done(&events, id);
@@ -316,7 +318,9 @@ fn the_user_agent_referrer_and_cookie_are_sent() {
     assert_eq!(requests.len(), 1);
     let first = &requests[0];
     assert_eq!(first.header("user-agent"), Some("MercuryTest/1.0"));
-    assert_eq!(first.header("referer"), Some("http://127.0.0.1/page"));
+    // Same origin: the full URL, without the fragment.
+    let page = format!("http://127.0.0.1:{}/page?q=1", server.addr.port());
+    assert_eq!(first.header("referer"), Some(page.as_str()));
     assert_eq!(first.header("cookie"), Some("session=abc; theme=dark"));
 }
 
@@ -366,6 +370,41 @@ fn the_cookie_is_not_forwarded_when_a_redirect_changes_host() {
     );
     assert_eq!(requests[1].header("cookie"), None, "{:#?}", requests[1]);
     assert_eq!(requests[1].header("user-agent"), Some("MercuryTest/1.0"));
+}
+
+#[test]
+fn a_cross_origin_request_gets_only_the_referrer_origin() {
+    let server = TestServer::start();
+    let dir = TempDir::new("referrer-cross");
+    let (manager, events) = manager();
+    let mut request = request(server.url("/file.bin"), &dir.path);
+    request.referrer = Some(Url::parse("http://user:pw@example.test:8080/page?q=1#x").unwrap());
+    let id = manager.start(request);
+    events_until_done(&events, id);
+    assert_eq!(
+        server.requests()[0].header("referer"),
+        Some("http://example.test:8080/")
+    );
+}
+
+#[test]
+fn the_referrer_is_trimmed_to_its_origin_when_a_redirect_changes_origin() {
+    let server = TestServer::start();
+    let dir = TempDir::new("referrer-redirect");
+    let (manager, events) = manager();
+    let mut request = request(server.url("/redirect-other-host"), &dir.path);
+    request.referrer = Some(server.url("/page?q=1"));
+    let id = manager.start(request);
+    let done = events_until_done(&events, id);
+    finished_path(terminal(&done));
+
+    let port = server.addr.port();
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let full = format!("http://127.0.0.1:{port}/page?q=1");
+    let origin = format!("http://127.0.0.1:{port}/");
+    assert_eq!(requests[0].header("referer"), Some(full.as_str()));
+    assert_eq!(requests[1].header("referer"), Some(origin.as_str()));
 }
 
 #[test]
@@ -654,6 +693,154 @@ fn a_cut_download_can_be_resumed_from_its_own_events() {
     );
 }
 
+fn resume_request(
+    server: &TestServer,
+    path: &str,
+    dir: &Path,
+    len: usize,
+) -> mercury_downloads::DownloadRequest {
+    let (partial, target) = write_partial(dir, "file.bin", len);
+    let mut request = request(server.url(path), dir);
+    request.resume = Some(resume_from(partial, target, Some(ETAG), None));
+    request
+}
+
+#[test]
+fn a_range_not_satisfiable_restarts_from_zero_once() {
+    for partial_len in [FILE_LEN, FILE_LEN + 100] {
+        let server = TestServer::start();
+        let dir = TempDir::new("resume-416");
+        let partial = dir.path.join("file.bin.part");
+        std::fs::write(&partial, vec![b'x'; partial_len]).unwrap();
+        let (manager, events) = manager();
+        let mut request = request(server.url("/file.bin"), &dir.path);
+        request.resume = Some(resume_from(
+            partial,
+            dir.path.join("file.bin"),
+            Some(ETAG),
+            None,
+        ));
+        let id = manager.start(request);
+        let done = events_until_done(&events, id);
+        assert_eq!(finished_path(terminal(&done)), dir.path.join("file.bin"));
+        assert_eq!(
+            std::fs::read(dir.path.join("file.bin")).unwrap(),
+            pattern(FILE_LEN)
+        );
+        let requests = server.requests();
+        assert_eq!(requests.len(), 2, "{requests:#?}");
+        assert_eq!(
+            requests[0].header("range"),
+            Some(format!("bytes={partial_len}-").as_str())
+        );
+        assert_eq!(requests[1].header("range"), None);
+        assert_eq!(requests[1].header("if-range"), None);
+    }
+}
+
+#[test]
+fn a_partial_response_that_does_not_continue_the_file_fails() {
+    let server = TestServer::start();
+    let dir = TempDir::new("resume-mismatch");
+    let (manager, events) = manager();
+    let id = manager.start(resume_request(&server, "/bad-range", &dir.path, 1000));
+    let done = events_until_done(&events, id);
+    let (error, resumable) = failed(terminal(&done));
+    assert!(error.contains("does not continue"), "{error}");
+    assert!(!resumable);
+    assert!(TempDir::list(&dir.path).is_empty());
+}
+
+#[test]
+fn an_unrequested_partial_response_fails_and_leaves_nothing() {
+    let server = TestServer::start();
+    let dir = TempDir::new("unexpected-206");
+    let events = download(server.url("/always-206"), &dir.path);
+    assert_well_formed(&events, false);
+    let (error, resumable) = failed(terminal(&events));
+    assert!(error.contains("without being asked"), "{error}");
+    assert!(!resumable);
+    assert!(TempDir::list(&dir.path).is_empty());
+}
+
+#[test]
+fn a_resume_answered_with_not_found_removes_the_partial_file() {
+    let server = TestServer::start();
+    let dir = TempDir::new("resume-404");
+    let (manager, events) = manager();
+    let id = manager.start(resume_request(&server, "/missing", &dir.path, 1000));
+    let (error, resumable) = failed(terminal(&events_until_done(&events, id)));
+    assert!(error.contains("404"), "{error}");
+    assert!(!resumable);
+    assert!(TempDir::list(&dir.path).is_empty());
+}
+
+#[test]
+fn a_resume_answered_with_service_unavailable_keeps_the_partial_file() {
+    let server = TestServer::start();
+    let dir = TempDir::new("resume-503");
+    let (manager, events) = manager();
+    let id = manager.start(resume_request(&server, "/unavailable", &dir.path, 1000));
+    let (error, resumable) = failed(terminal(&events_until_done(&events, id)));
+    assert!(error.contains("503"), "{error}");
+    assert!(resumable);
+    assert_eq!(TempDir::list(&dir.path), ["file.bin.part"]);
+    assert_eq!(
+        std::fs::read(dir.path.join("file.bin.part")).unwrap(),
+        &pattern(FILE_LEN)[..1000]
+    );
+}
+
+#[test]
+fn a_partial_response_shorter_than_the_file_is_a_resumable_failure() {
+    // The server honours the range with only 1000 more bytes: the body itself is complete, so
+    // only the length check against `Content-Range` notices the file is not.
+    let server = TestServer::start();
+    let dir = TempDir::new("short-range");
+    let (manager, events) = manager();
+    let id = manager.start(resume_request(&server, "/short-range", &dir.path, 2000));
+    let done = events_until_done(&events, id);
+    let (error, resumable) = failed(terminal(&done));
+    assert!(error.contains("3000 of 65536"), "{error}");
+    assert!(resumable);
+    assert_eq!(
+        std::fs::read(dir.path.join("file.bin.part")).unwrap(),
+        &pattern(FILE_LEN)[..3000]
+    );
+}
+
+#[cfg(unix)]
+fn make_fifo(path: &Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_at_the_partial_path_fails_fast() {
+    let server = TestServer::start();
+    let dir = TempDir::new("resume-fifo");
+    let partial = dir.path.join("file.bin.part");
+    make_fifo(&partial);
+    let (manager, events) = manager();
+    let mut request = request(server.url("/file.bin"), &dir.path);
+    request.resume = Some(resume_from(
+        partial.clone(),
+        dir.path.join("file.bin"),
+        Some(ETAG),
+        None,
+    ));
+    let began = Instant::now();
+    let id = manager.start(request);
+    let done = events_until_done(&events, id);
+    failed(terminal(&done));
+    assert!(began.elapsed() < Duration::from_secs(2));
+    assert!(partial.symlink_metadata().unwrap().file_type().is_fifo());
+}
+
 #[test]
 fn a_resume_outside_the_destination_folder_is_refused() {
     let server = TestServer::start();
@@ -744,6 +931,47 @@ fn cancel_stops_promptly_removes_the_partial_file_and_never_finishes() {
     manager.cancel(id);
     manager.cancel(DownloadId(9_999));
     assert!(events.recv_timeout(Duration::from_millis(500)).is_err());
+}
+
+#[test]
+fn cancel_before_started_emits_only_cancelled_and_leaves_nothing() {
+    let server = TestServer::start();
+    let parent = TempDir::new("cancel-early");
+    let dir = parent.path.join("downloads");
+    let (manager, events) = manager();
+    let id = manager.start(request(server.url("/slow-headers"), &dir));
+    std::thread::sleep(Duration::from_millis(200));
+    let asked = Instant::now();
+    manager.cancel(id);
+    let done = events_until_done(&events, id);
+    assert!(asked.elapsed() < Duration::from_secs(1));
+    assert_eq!(done.len(), 1, "{done:#?}");
+    assert!(matches!(done[0], DownloadEvent::Cancelled { .. }));
+    assert!(TempDir::list(&dir).is_empty());
+}
+
+#[test]
+fn cancel_racing_the_start_never_leaves_a_partial_file() {
+    let server = TestServer::start();
+    let dir = TempDir::new("cancel-race");
+    let (manager, events) = manager();
+    for round in 0..60_u64 {
+        let id = manager.start(request(server.url("/file.bin"), &dir.path));
+        // Land the cancel at different points of the request, the claim and the body.
+        let spin = Instant::now();
+        while spin.elapsed() < Duration::from_micros(round * 50) {
+            std::hint::spin_loop();
+        }
+        manager.cancel(id);
+        let done = events_until_done(&events, id);
+        let terminals = done.iter().filter(|event| is_terminal(event)).count();
+        assert_eq!(terminals, 1);
+    }
+    let leftovers: Vec<String> = TempDir::list(&dir.path)
+        .into_iter()
+        .filter(|name| name.ends_with(".part"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
 }
 
 #[test]

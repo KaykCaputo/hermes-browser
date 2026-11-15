@@ -186,6 +186,51 @@ async fn respond(stream: &mut TcpStream, port: u16, request: &Recorded) -> std::
         }
         "/redirect-file-scheme" => redirect(stream, "file:///etc/passwd").await,
         "/redirect-loop" => redirect(stream, "/redirect-loop").await,
+        "/slow-headers" => {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            ranged(stream, request, &file, Some(ETAG), None).await
+        }
+        "/bad-range" => {
+            // Answers a range request with the whole file, labelled as a range from 0.
+            let headers = [("ETag", ETAG), ("Accept-Ranges", "bytes")];
+            if request.header("range").is_some() {
+                let content_range = format!("bytes 0-{}/{}", file.len() - 1, file.len());
+                let mut headers = headers.to_vec();
+                headers.push(("Content-Range", &content_range));
+                send(stream, "206 Partial Content", &headers, &file).await
+            } else {
+                send(stream, "200 OK", &headers, &file).await
+            }
+        }
+        "/always-206" => {
+            let content_range = format!("bytes 0-{}/{}", file.len() - 1, file.len());
+            let headers = [("ETag", ETAG), ("Content-Range", content_range.as_str())];
+            send(stream, "206 Partial Content", &headers, &file).await
+        }
+        "/short-range" => {
+            // Honours `Range: bytes=N-` with only the next 1000 bytes.
+            let start = request
+                .header("range")
+                .and_then(|range| range.strip_prefix("bytes="))
+                .and_then(|range| range.strip_suffix('-'))
+                .and_then(|start| start.parse::<usize>().ok());
+            let mut headers = vec![("ETag", ETAG), ("Accept-Ranges", "bytes")];
+            match start {
+                Some(start) if start + 1000 <= file.len() => {
+                    let content_range = format!("bytes {start}-{}/{}", start + 999, file.len());
+                    headers.push(("Content-Range", &content_range));
+                    send(
+                        stream,
+                        "206 Partial Content",
+                        &headers,
+                        &file[start..start + 1000],
+                    )
+                    .await
+                }
+                _ => send(stream, "200 OK", &headers, &file).await,
+            }
+        }
+        "/unavailable" => send(stream, "503 Service Unavailable", &[], b"later").await,
         "/missing" => send(stream, "404 Not Found", &[], b"no such file").await,
         "/broken" => send(stream, "500 Internal Server Error", &[], b"oops").await,
         "/cut" => cut(stream, true).await,
@@ -257,8 +302,13 @@ async fn ranged(
         .and_then(|range| range.strip_prefix("bytes="))
         .and_then(|range| range.strip_suffix('-'))
         .and_then(|start| start.parse::<usize>().ok())
-        .filter(|start| *start < body.len() && validator_matches);
+        .filter(|_| validator_matches);
     match start {
+        Some(start) if start >= body.len() => {
+            let content_range = format!("bytes */{}", body.len());
+            headers.push(("Content-Range", &content_range));
+            send(stream, "416 Range Not Satisfiable", &headers, b"").await
+        }
         Some(start) => {
             let content_range = format!("bytes {start}-{}/{}", body.len() - 1, body.len());
             headers.push(("Content-Range", &content_range));

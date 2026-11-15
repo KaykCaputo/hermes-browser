@@ -14,6 +14,7 @@
 //! One download, from the first request to the published file.
 
 use std::collections::VecDeque;
+use std::future::Future;
 use std::io;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,9 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Response, StatusCode};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
+use std::io::Seek;
+
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::watch;
 use url::Url;
 
@@ -109,30 +112,27 @@ impl Transfer {
     /// is removed.
     pub(crate) async fn run(self, mut cancelled: watch::Receiver<bool>) -> Outcome {
         let mut on_disk = OnDisk::default();
-        let fetched = AssertUnwindSafe(async {
-            tokio::select! {
-                biased;
-                () = wait_for_cancel(&mut cancelled) => None,
-                result = self.fetch(&mut on_disk) => Some(result),
-            }
-        })
-        .catch_unwind()
-        .await;
+        let fetched = AssertUnwindSafe(self.fetch(&mut on_disk, &mut cancelled))
+            .catch_unwind()
+            .await;
         match fetched {
             Err(_) => {
-                remove_partial(on_disk.part.as_deref());
+                remove_partial(on_disk.part).await;
                 Outcome::internal_failure()
             }
-            Ok(None) => {
-                remove_partial(on_disk.part.as_deref());
+            Ok(Err(TransferError::Cancelled)) => {
+                remove_partial(on_disk.part).await;
                 Outcome::Cancelled
             }
-            Ok(Some(Err(error))) => {
+            Ok(Err(error)) => {
                 let keep = on_disk.resumable
                     && error.is_transient()
-                    && on_disk.part.as_deref().is_some_and(is_regular_file);
+                    && match &on_disk.part {
+                        Some(part) => is_regular_file(part).await,
+                        None => false,
+                    };
                 if !keep {
-                    remove_partial(on_disk.part.as_deref());
+                    remove_partial(on_disk.part).await;
                 }
                 Outcome::Failed {
                     error: error.to_string(),
@@ -140,30 +140,34 @@ impl Transfer {
                 }
             }
             // From here the download is complete: a late cancel no longer applies.
-            Ok(Some(Ok(complete))) => {
-                let finished = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    publish(&complete).inspect(|target_path| {
-                        quarantine::mark_downloaded(
-                            target_path,
-                            &complete.final_url,
-                            self.request.referrer.as_ref(),
-                        );
-                    })
-                }));
+            Ok(Ok(complete)) => {
+                let part = complete.part.clone();
+                let referrer = self.request.referrer.clone();
+                let finished = tokio::task::spawn_blocking(move || {
+                    // Marked before it gets its final name, so that name never exists without
+                    // the attribute (which lives on the file and so carries over).
+                    quarantine::mark_downloaded(
+                        &complete.part,
+                        &complete.final_url,
+                        referrer.as_ref(),
+                    );
+                    publish(&complete).map(|target_path| (target_path, complete.received))
+                })
+                .await;
                 match finished {
-                    Ok(Ok(target_path)) => Outcome::Finished {
+                    Ok(Ok((target_path, received_bytes))) => Outcome::Finished {
                         target_path,
-                        received_bytes: complete.received,
+                        received_bytes,
                     },
                     Ok(Err(error)) => {
-                        remove_partial(Some(&complete.part));
+                        remove_partial(Some(part)).await;
                         Outcome::Failed {
                             error: TransferError::Io(error).to_string(),
                             resumable: false,
                         }
                     }
                     Err(_) => {
-                        remove_partial(Some(&complete.part));
+                        remove_partial(Some(part)).await;
                         Outcome::internal_failure()
                     }
                 }
@@ -171,14 +175,25 @@ impl Transfer {
         }
     }
 
-    async fn fetch(&self, on_disk: &mut OnDisk) -> Result<Complete, TransferError> {
+    /// Requests, claims the partial file and streams the body into it.
+    ///
+    /// Cancel is honoured only while waiting on the network (`until_cancelled`), never in the
+    /// middle of creating or opening the partial file, so whatever file exists is recorded in
+    /// `on_disk` before a cancel can act and is always cleaned up.
+    async fn fetch(
+        &self,
+        on_disk: &mut OnDisk,
+        cancelled: &mut watch::Receiver<bool>,
+    ) -> Result<Complete, TransferError> {
         let request = &self.request;
         // Before any I/O.
         check_scheme(&request.url).map_err(TransferError::UnsupportedScheme)?;
 
         let plan = match &request.resume {
             Some(resume) => {
-                let plan = check_resume(&request.destination_dir, resume)?;
+                let destination_dir = request.destination_dir.clone();
+                let resume = resume.clone();
+                let plan = blocking(move || check_resume(&destination_dir, &resume)).await?;
                 if plan.offset.is_some() {
                     on_disk.part = Some(plan.part.clone());
                     on_disk.resumable = true;
@@ -187,11 +202,17 @@ impl Transfer {
             }
             None => None,
         };
-        let range = plan
+        let mut range = plan
             .as_ref()
             .and_then(|plan| plan.offset.zip(plan.if_range.as_deref()));
 
-        let mut response = self.send(range).await?;
+        let mut response = until_cancelled(cancelled, self.send(range)).await??;
+        if response.status() == StatusCode::RANGE_NOT_SATISFIABLE && range.is_some() {
+            // The partial file is as long as the resource or longer: start again from zero,
+            // once, without `Range`.
+            range = None;
+            response = until_cancelled(cancelled, self.send(range)).await??;
+        }
         let status = response.status();
         if !status.is_success() {
             return Err(TransferError::Status(status));
@@ -240,7 +261,8 @@ impl Transfer {
 
         let (dir, target, part, file) = match plan {
             Some(plan) => {
-                let file = open_partial(&plan, appending).await?;
+                let part = plan.part.clone();
+                let file = blocking(move || open_partial(&part, appending)).await?;
                 (plan.dir, plan.target, plan.part, file)
             }
             None => {
@@ -254,11 +276,13 @@ impl Transfer {
                     mime_type.as_deref(),
                     request.suggested_name.as_deref(),
                 );
-                claim_partial(&request.destination_dir, &name).await?
+                let destination_dir = request.destination_dir.clone();
+                blocking(move || claim_partial(&destination_dir, &name)).await?
             }
         };
         on_disk.part = Some(part.clone());
         on_disk.resumable = (etag.is_some() || last_modified.is_some()) && accepts_ranges;
+        let file = tokio::fs::File::from_std(file);
 
         let file_name = target
             .file_name()
@@ -276,7 +300,9 @@ impl Transfer {
             last_modified,
         });
 
-        let received = self.write_body(&mut response, file, offset, total).await?;
+        let received = self
+            .write_body(&mut response, file, offset, total, cancelled)
+            .await?;
         Ok(Complete {
             dir,
             final_url,
@@ -355,16 +381,19 @@ impl Transfer {
         file: tokio::fs::File,
         offset: u64,
         total: Option<u64>,
+        cancelled: &mut watch::Receiver<bool>,
     ) -> Result<u64, TransferError> {
         let mut writer = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
         let mut received = offset;
         let mut meter = SpeedMeter::new(Instant::now(), received);
         let ended = loop {
-            let chunk = match tokio::time::timeout(self.timeouts.idle, response.chunk()).await {
-                Err(_) => break Err(TransferError::Stalled(self.timeouts.idle)),
-                Ok(Err(error)) => break Err(TransferError::network(error)),
-                Ok(Ok(None)) => break Ok(()),
-                Ok(Ok(Some(chunk))) => chunk,
+            let next = tokio::time::timeout(self.timeouts.idle, response.chunk());
+            let chunk = match until_cancelled(cancelled, next).await {
+                Err(cancel) => break Err(cancel),
+                Ok(Err(_)) => break Err(TransferError::Stalled(self.timeouts.idle)),
+                Ok(Ok(Err(error))) => break Err(TransferError::network(error)),
+                Ok(Ok(Ok(None))) => break Ok(()),
+                Ok(Ok(Ok(Some(chunk)))) => chunk,
             };
             if let Err(error) = writer.write_all(&chunk).await {
                 break Err(TransferError::Io(error));
@@ -375,8 +404,10 @@ impl Transfer {
             }
         };
         if let Err(error) = ended {
-            // Keep what did arrive, in case the partial file is resumable.
-            let _ = writer.flush().await;
+            if !matches!(error, TransferError::Cancelled) {
+                // Keep what did arrive, in case the partial file is resumable.
+                let _ = writer.flush().await;
+            }
             return Err(error);
         }
         writer.flush().await?;
@@ -409,6 +440,30 @@ async fn wait_for_cancel(cancelled: &mut watch::Receiver<bool>) {
         if cancelled.changed().await.is_err() {
             return;
         }
+    }
+}
+
+/// Runs `work` unless cancel is requested first.
+async fn until_cancelled<T>(
+    cancelled: &mut watch::Receiver<bool>,
+    work: impl Future<Output = T>,
+) -> Result<T, TransferError> {
+    tokio::select! {
+        biased;
+        () = wait_for_cancel(cancelled) => Err(TransferError::Cancelled),
+        output = work => Ok(output),
+    }
+}
+
+/// Runs blocking file-system work off the runtime's workers. A panic in it is resumed here, so
+/// `Transfer::run` reports it as an internal failure.
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, TransferError> + Send + 'static,
+) -> Result<T, TransferError> {
+    match tokio::task::spawn_blocking(work).await {
+        Ok(result) => result,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(_) => Err(TransferError::Io(io::Error::other("file task stopped"))),
     }
 }
 
@@ -447,19 +502,25 @@ fn insert(
     Ok(())
 }
 
-/// The `Referer` to send to `target`: no fragment or credentials, nothing from a non-web URL,
-/// and nothing from `https` to `http` (the default referrer policy).
+/// The `Referer` to send to `target` under the browsers' default policy,
+/// `strict-origin-when-cross-origin`: the full URL (without fragment or credentials) to the same
+/// origin, only the origin to another origin, and nothing from `https` to `http` or from a
+/// non-web URL. Applied on every hop, so a redirect to another origin gets only the origin.
 fn referrer_for(referrer: Option<&Url>, target: &Url) -> Option<String> {
-    let mut referrer = referrer?.clone();
-    if check_scheme(&referrer).is_err()
+    let referrer = referrer?;
+    if check_scheme(referrer).is_err()
         || (referrer.scheme() == "https" && target.scheme() == "http")
     {
         return None;
     }
-    referrer.set_fragment(None);
-    let _ = referrer.set_username("");
-    let _ = referrer.set_password(None);
-    Some(referrer.into())
+    if referrer.origin() != target.origin() {
+        return Some(format!("{}/", referrer.origin().ascii_serialization()));
+    }
+    let mut full = referrer.clone();
+    full.set_fragment(None);
+    let _ = full.set_username("");
+    let _ = full.set_password(None);
+    Some(full.into())
 }
 
 /// The cookie header belongs to the first request's host: it is sent while requests stay on
@@ -494,8 +555,9 @@ fn exists_without_following(path: &Path) -> bool {
     path.symlink_metadata().is_ok()
 }
 
-fn is_regular_file(path: &Path) -> bool {
-    path.symlink_metadata()
+async fn is_regular_file(path: &Path) -> bool {
+    tokio::fs::symlink_metadata(path)
+        .await
         .is_ok_and(|metadata| metadata.file_type().is_file())
 }
 
@@ -505,25 +567,37 @@ fn partial_path_for(target: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Options for opening a partial file for writing.
+///
+/// On Unix, `O_NOFOLLOW` makes `open` itself refuse a symlink at the path, and `O_NONBLOCK`
+/// makes it fail at once on a FIFO with no reader instead of blocking a thread until one
+/// appears. Neither changes how a regular file is written.
+fn partial_open_options() -> std::fs::OpenOptions {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    options
+}
+
 /// Creates the destination folder and exclusively creates `<unique name>.part` in it.
+/// Blocking: run through `blocking`.
 ///
 /// `create_new` fails if anything at all is at the path, a symlink included, so this neither
 /// overwrites nor writes through a link; on a lost race the next free name is tried.
-async fn claim_partial(
+fn claim_partial(
     destination_dir: &Path,
     name: &str,
-) -> Result<(PathBuf, PathBuf, PathBuf, tokio::fs::File), TransferError> {
-    tokio::fs::create_dir_all(destination_dir).await?;
-    let dir = tokio::fs::canonicalize(destination_dir).await?;
+) -> Result<(PathBuf, PathBuf, PathBuf, std::fs::File), TransferError> {
+    std::fs::create_dir_all(destination_dir)?;
+    let dir = std::fs::canonicalize(destination_dir)?;
     for _ in 0..MAX_CLAIM_ATTEMPTS {
         let target = naming::unique_path(&dir, name, exists_without_following);
         let part = partial_path_for(&target);
-        match tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&part)
-            .await
-        {
+        match partial_open_options().create_new(true).open(&part) {
             Ok(file) => return Ok((dir, target, part, file)),
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
@@ -535,6 +609,7 @@ async fn claim_partial(
 /// Checks a `ResumeFrom` without writing anything: both paths directly inside the destination
 /// folder, the partial name exactly the target name plus `.part`, the target name already
 /// sanitised, and the partial file (if present) a regular file rather than a link.
+/// Blocking: run through `blocking`.
 fn check_resume(destination_dir: &Path, resume: &ResumeFrom) -> Result<ResumePlan, TransferError> {
     use TransferError::InvalidResume;
 
@@ -593,32 +668,27 @@ fn check_resume(destination_dir: &Path, resume: &ResumeFrom) -> Result<ResumePla
     })
 }
 
-/// Opens the partial file of a resumed download, appending to it or starting it over.
-async fn open_partial(
-    plan: &ResumePlan,
-    appending: bool,
-) -> Result<tokio::fs::File, TransferError> {
-    if !exists_without_following(&plan.part) {
-        let file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&plan.part)
-            .await?;
-        return Ok(file);
-    }
-    let file = std::fs::OpenOptions::new().write(true).open(&plan.part)?;
-    // The path was a regular file when checked; make sure it still is the file now open, so a
-    // link swapped in meanwhile is never written through.
+/// Opens the partial file of a resumed download, appending to it or starting it over, or
+/// creates it if it is gone. Blocking: run through `blocking`.
+fn open_partial(part: &Path, appending: bool) -> Result<std::fs::File, TransferError> {
+    let mut file = match partial_open_options().create_new(true).open(part) {
+        Ok(file) => return Ok(file),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => partial_open_options()
+            .open(part)
+            .map_err(|_| TransferError::InvalidResume("the partial file cannot be opened"))?,
+        Err(error) => return Err(error.into()),
+    };
+    // It was a regular file when checked; make sure what is open now still is that file, so a
+    // link or special file swapped in meanwhile is never written to.
     let opened = file.metadata()?;
-    let at_path = plan.part.symlink_metadata()?;
+    let at_path = part.symlink_metadata()?;
     if !at_path.file_type().is_file() || !opened.is_file() || !same_file(&opened, &at_path) {
         return Err(TransferError::InvalidResume("the partial file changed"));
     }
-    let mut file = tokio::fs::File::from_std(file);
     if appending {
-        file.seek(io::SeekFrom::End(0)).await?;
+        file.seek(io::SeekFrom::End(0))?;
     } else {
-        file.set_len(0).await?;
+        file.set_len(0)?;
     }
     Ok(file)
 }
@@ -635,6 +705,7 @@ fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
 }
 
 /// Gives the complete partial file its final name without replacing anything.
+/// Blocking: run through `spawn_blocking`.
 ///
 /// A hard link fails if the name exists (a symlink included), which `rename` would silently
 /// replace; if the name was taken while downloading, the next free one is used. On file systems
@@ -669,9 +740,9 @@ fn publish(complete: &Complete) -> io::Result<PathBuf> {
     ))
 }
 
-fn remove_partial(part: Option<&Path>) {
+async fn remove_partial(part: Option<PathBuf>) {
     let Some(part) = part else { return };
-    match std::fs::remove_file(part) {
+    match tokio::fs::remove_file(&part).await {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => log::warn!("could not remove {}: {error}", part.display()),
@@ -771,18 +842,81 @@ mod tests {
     }
 
     #[test]
-    fn a_referrer_is_trimmed_and_not_sent_on_a_downgrade() {
+    fn the_referrer_follows_strict_origin_when_cross_origin() {
         let page = Url::parse("https://user:pw@example.com/page?q=1#frag").unwrap();
-        let https = Url::parse("https://files.example.com/a.zip").unwrap();
-        let http = Url::parse("http://files.example.com/a.zip").unwrap();
+        let same_origin = Url::parse("https://example.com:443/a.zip").unwrap();
+        let cross_origin = Url::parse("https://files.example.com/a.zip").unwrap();
+        let downgrade = Url::parse("http://example.com/a.zip").unwrap();
         assert_eq!(
-            referrer_for(Some(&page), &https).as_deref(),
+            referrer_for(Some(&page), &same_origin).as_deref(),
             Some("https://example.com/page?q=1")
         );
-        assert_eq!(referrer_for(Some(&page), &http), None);
+        assert_eq!(
+            referrer_for(Some(&page), &cross_origin).as_deref(),
+            Some("https://example.com/")
+        );
+        assert_eq!(referrer_for(Some(&page), &downgrade), None);
+        // http to https is an upgrade: the origin is still sent across origins.
+        let plain = Url::parse("http://example.com:8080/page").unwrap();
+        assert_eq!(
+            referrer_for(Some(&plain), &cross_origin).as_deref(),
+            Some("http://example.com:8080/")
+        );
         let about = Url::parse("about:blank").unwrap();
-        assert_eq!(referrer_for(Some(&about), &https), None);
-        assert_eq!(referrer_for(None, &https), None);
+        assert_eq!(referrer_for(Some(&about), &same_origin), None);
+        assert_eq!(referrer_for(None, &same_origin), None);
+    }
+
+    /// A FIFO swapped in after the `lstat` check must not block a worker in `open`.
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_fifo_as_the_partial_file_fails_instead_of_blocking() {
+        let dir = std::env::temp_dir().join(format!(
+            "mercury-downloads-fifo-unit-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("file.bin.part");
+        let _ = std::fs::remove_file(&fifo);
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let path = fifo.clone();
+        std::thread::spawn(move || {
+            let _ = sender.send(open_partial(&path, true).is_err());
+        });
+        let outcome = receiver.recv_timeout(Duration::from_secs(2));
+        if outcome.is_err() {
+            // Release the stuck writer by opening the reading end.
+            let _ = std::fs::File::open(&fifo);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(outcome, Ok(true), "opening the FIFO blocked or succeeded");
+    }
+
+    /// A symlink at the partial path is refused by `open` itself, not only by the earlier check.
+    #[cfg(unix)]
+    #[test]
+    fn opening_a_symlink_as_the_partial_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "mercury-downloads-link-unit-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = dir.join("victim.txt");
+        std::fs::write(&victim, b"victim").unwrap();
+        let link = dir.join("file.bin.part");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let refused = partial_open_options().open(&link).is_err();
+        let untouched = std::fs::read(&victim).unwrap() == b"victim";
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(refused, "open followed the link");
+        assert!(untouched);
     }
 
     #[test]

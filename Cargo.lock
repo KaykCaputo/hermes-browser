@@ -5341,6 +5341,7 @@ name = "mercury-downloads"
 version = "0.2.0"
 dependencies = [
  "futures-util",
+ "libc",
  "log",
  "mime_guess",
  "objc2 0.6.5",

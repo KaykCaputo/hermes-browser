@@ -22,7 +22,7 @@ pub(crate) enum TransferError {
     Network(#[source] reqwest::Error),
     #[error("no data received for {0:?}")]
     Stalled(Duration),
-    #[error("the connection closed after {received} of {expected} bytes")]
+    #[error("the download ended after {received} of {expected} bytes")]
     Truncated { received: u64, expected: u64 },
     #[error("the server sent part of the file without being asked to")]
     UnexpectedPartial,
@@ -30,6 +30,9 @@ pub(crate) enum TransferError {
     RangeMismatch,
     #[error("cannot resume: {0}")]
     InvalidResume(&'static str),
+    /// Not shown to anyone: a cancelled transfer ends with `DownloadEvent::Cancelled`.
+    #[error("cancelled")]
+    Cancelled,
     #[error("file error: {0}")]
     Io(#[from] std::io::Error),
 }
