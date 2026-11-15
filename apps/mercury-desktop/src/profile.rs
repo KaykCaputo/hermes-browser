@@ -298,9 +298,10 @@ impl ActiveProfile {
 pub(crate) fn open_profile(
     override_root: Option<&Path>,
     automated_run: bool,
+    temporary_area: &TemporaryProfileArea,
 ) -> Result<ActiveProfile, ProfileInUse> {
     // Leftovers of killed runs hold their cookies; remove them before anything else.
-    let swept = sweep_stale_temporary_profiles(&std::env::temp_dir(), &SweepRules::for_this_run());
+    let swept = sweep_stale_temporary_profiles(&temporary_area.directory, &temporary_area.sweep);
     if swept > 0 {
         eprintln!("mercury-browser: removed {swept} temporary profile(s) left by earlier runs");
     }
@@ -315,7 +316,7 @@ pub(crate) fn open_profile(
             }
         }
     } else if automated_run {
-        match TemporaryProfile::create() {
+        match TemporaryProfile::create(&temporary_area.directory) {
             Ok(profile) => {
                 let paths = ProfilePaths::resolve(None, Some(profile.root()));
                 temporary = Some(profile);
@@ -429,11 +430,11 @@ struct TemporaryProfile {
 }
 
 impl TemporaryProfile {
-    fn create() -> io::Result<Self> {
+    fn create(directory: &Path) -> io::Result<Self> {
         let nanoseconds = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_nanos());
-        let root = std::env::temp_dir().join(format!(
+        let root = directory.join(format!(
             "{TEMPORARY_PROFILE_PREFIX}{}-{nanoseconds}",
             std::process::id()
         ));
@@ -487,6 +488,23 @@ const MAX_SWEEP_ENTRIES: usize = 4096;
 /// Overrides `STALE_TEMPORARY_PROFILE_AGE`, in seconds (used to test the sweep without waiting).
 const STALE_AGE_VARIABLE: &str = "MERCURY_STALE_PROFILE_AGE_SECONDS";
 
+/// Where temporary profiles are created, and the rules for sweeping their leftovers there.
+#[derive(Clone, Debug)]
+pub(crate) struct TemporaryProfileArea {
+    pub directory: PathBuf,
+    pub sweep: SweepRules,
+}
+
+impl TemporaryProfileArea {
+    /// The system temporary directory, with this run's sweep rules.
+    pub(crate) fn for_this_run() -> Self {
+        Self {
+            directory: std::env::temp_dir(),
+            sweep: SweepRules::for_this_run(),
+        }
+    }
+}
+
 /// What makes a leftover temporary profile safe to remove.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SweepRules {
@@ -514,8 +532,10 @@ fn is_temporary_profile_name(name: &str) -> bool {
 ///
 /// An entry of `directory` is removed only if all of these hold: its name is exactly one this
 /// code generates; it is a real directory (not a symbolic link) owned by `rules.owner` with mode
-/// 0700; it was last modified at least `rules.min_age` before `rules.now`; and an exclusive lock
-/// on its `lock` file can be taken without waiting, so no live run owns it. Process ids in names
+/// 0700; it was last modified at least `rules.min_age` before `rules.now`; and no live run owns
+/// it: an exclusive lock on its `lock` file can be taken without waiting, or that file is gone
+/// (a removal that stopped after everything else; the lock file is always removed last). A
+/// `lock` entry that is a symbolic link or cannot be opened keeps the leftover. Process ids in names
 /// are not trusted: they repeat, and are not unique across containers sharing the directory.
 /// At most `rules.max_entries` entries are examined. Failures are skipped, never fatal.
 #[cfg(unix)]
@@ -560,21 +580,25 @@ fn remove_if_stale(root: &Path, rules: &SweepRules) -> bool {
     {
         return false;
     }
-    // Opening never creates the file and never follows a symbolic link.
-    let Ok(lock_file) = OpenOptions::new()
+    // Opening never creates the file and never follows a symbolic link. A missing lock file
+    // means an earlier removal got that far (it removes the lock file last): nothing holds it.
+    let lock_file = match OpenOptions::new()
         .read(true)
         .write(true)
         .custom_flags(libc::O_NOFOLLOW)
         .open(root.join(LOCK_FILE_NAME))
-    else {
-        return false;
+    {
+        Ok(lock_file) => {
+            if lock_file.try_lock().is_err() {
+                return false;
+            }
+            Some(lock_file)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(_) => return false,
     };
-    if lock_file.try_lock().is_err() {
-        return false;
-    }
-    // `remove_dir_all` removes symbolic links themselves and never follows them. The lock is
-    // held until the directory is gone.
-    let removed = std::fs::remove_dir_all(root).is_ok();
+    // The lock, if any, is held until the directory is gone.
+    let removed = remove_temporary_profile_directory(root).is_ok();
     drop(lock_file);
     removed
 }
@@ -618,8 +642,40 @@ pub(crate) fn remove_temporary_profile() {
     }
 }
 
+/// Removes a temporary profile directory, its `lock` file last: if the removal stops part-way
+/// (the shutdown watchdog's exit, a crash), what is left either still has its lock file, or
+/// has none and is recognised by the sweep as unlocked. Symbolic links are removed, never
+/// followed (`DirEntry::file_type` and `remove_dir_all` do not follow them).
+fn remove_temporary_profile_directory(root: &Path) -> io::Result<()> {
+    let mut first_error = None;
+    for entry in std::fs::read_dir(root)? {
+        let result = entry.and_then(|entry| {
+            if entry.file_name() == LOCK_FILE_NAME {
+                return Ok(());
+            }
+            if entry.file_type()?.is_dir() {
+                std::fs::remove_dir_all(entry.path())
+            } else {
+                std::fs::remove_file(entry.path())
+            }
+        });
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    match std::fs::remove_file(root.join(LOCK_FILE_NAME)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::remove_dir(root)
+}
+
 fn remove_directory(root: &Path) {
-    match std::fs::remove_dir_all(root) {
+    match remove_temporary_profile_directory(root) {
         Ok(()) => {}
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => eprintln!(
@@ -641,6 +697,30 @@ mod tests {
             "mercury-profile-test-{label}-{}-{nanoseconds}",
             std::process::id()
         ))
+    }
+
+    /// A temporary-profile area of the test's own: nothing outside it is swept or created.
+    struct TestArea(TemporaryProfileArea);
+
+    impl TestArea {
+        fn new(label: &str) -> Self {
+            let directory = unique_temporary_directory(&format!("area-{label}"));
+            std::fs::create_dir_all(&directory).expect("the test area");
+            Self(TemporaryProfileArea {
+                directory,
+                sweep: SweepRules::for_this_run(),
+            })
+        }
+
+        fn get(&self) -> &TemporaryProfileArea {
+            &self.0
+        }
+    }
+
+    impl Drop for TestArea {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0.directory);
+        }
     }
 
     #[test]
@@ -788,6 +868,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_directory_holding_an_unrelated_servo_directory_and_lock_file_is_refused_and_unchanged() {
+        let area = TestArea::new("a_directory_holding_an_unrelated_servo_d");
         let root = unique_temporary_directory("unrelated");
         std::fs::create_dir_all(root.join("servo").join("components")).expect("a checkout");
         std::fs::write(root.join("servo").join("README.md"), "Servo").expect("a file");
@@ -796,7 +877,8 @@ mod tests {
         set_mode(&root, 0o755);
         let before = snapshot(&root);
 
-        let profile = open_profile(Some(&root), false).expect("the directory is not locked");
+        let profile =
+            open_profile(Some(&root), false, area.get()).expect("the directory is not locked");
         let used = profile.paths.is_some();
         drop(profile);
         let after = snapshot(&root);
@@ -937,7 +1019,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_temporary_profile_is_private() {
-        let profile = open_profile(None, true).expect("temporary profiles are never locked");
+        let area = TestArea::new("a_temporary_profile_is_private");
+        let profile =
+            open_profile(None, true, area.get()).expect("temporary profiles are never locked");
         let paths = profile.paths.as_ref().expect("a temporary profile");
 
         assert_eq!(mode(&paths.root), 0o700);
@@ -972,10 +1056,12 @@ mod tests {
 
     #[test]
     fn a_profile_in_use_is_refused() {
+        let area = TestArea::new("a_profile_in_use_is_refused");
         let root = unique_temporary_directory("in-use");
 
-        let first = open_profile(Some(&root), false).expect("the first run gets the profile");
-        let second = open_profile(Some(&root), false);
+        let first =
+            open_profile(Some(&root), false, area.get()).expect("the first run gets the profile");
+        let second = open_profile(Some(&root), false, area.get());
         drop(first);
         let _ = std::fs::remove_dir_all(&root);
 
@@ -984,8 +1070,10 @@ mod tests {
 
     #[test]
     fn dropping_a_temporary_profile_removes_only_its_own_directory() {
-        let first = TemporaryProfile::create().expect("a temporary profile");
-        let second = TemporaryProfile::create().expect("another temporary profile");
+        let area = TestArea::new("dropping_a_temporary_profile_removes_onl");
+        let first = TemporaryProfile::create(&area.get().directory).expect("a temporary profile");
+        let second =
+            TemporaryProfile::create(&area.get().directory).expect("another temporary profile");
         let (first_root, second_root) = (first.root().to_path_buf(), second.root().to_path_buf());
 
         drop(first);
@@ -1150,22 +1238,96 @@ mod tests {
         }
 
         #[test]
-        fn a_leftover_without_a_lock_file_or_with_a_linked_one_is_left_alone() {
+        fn a_leftover_whose_lock_file_is_already_gone_is_removed() {
             let base = base("no-lock");
-            let without = leftover(&base, NAME);
-            std::fs::remove_file(without.join("lock")).expect("the lock file");
-            let linked = leftover(&base, "mercury-browser-profile-123-789");
-            std::fs::remove_file(linked.join("lock")).expect("the lock file");
+            let root = leftover(&base, NAME);
+            std::fs::remove_file(root.join("lock")).expect("the lock file");
+
+            let removed = sweep_stale_temporary_profiles(&base, &later(&base));
+            let exists = root.exists();
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 1);
+            assert!(!exists);
+        }
+
+        #[test]
+        fn a_leftover_whose_lock_file_is_a_symbolic_link_is_left_alone() {
+            let base = base("linked-lock");
+            let root = leftover(&base, NAME);
+            std::fs::remove_file(root.join("lock")).expect("the lock file");
             std::fs::write(base.join("elsewhere"), "").expect("a file");
-            std::os::unix::fs::symlink(base.join("elsewhere"), linked.join("lock"))
+            std::os::unix::fs::symlink(base.join("elsewhere"), root.join("lock"))
                 .expect("the test symlink");
 
             let removed = sweep_stale_temporary_profiles(&base, &later(&base));
-            let kept = without.exists() && linked.exists();
+            let kept = root.exists() && base.join("elsewhere").exists();
             let _ = std::fs::remove_dir_all(&base);
 
             assert_eq!(removed, 0);
             assert!(kept);
+        }
+
+        #[test]
+        fn a_symbolic_link_inside_a_leftover_is_removed_and_its_target_kept() {
+            let base = base("inner-link");
+            let target = base.join("outside.txt");
+            std::fs::write(&target, "keep me").expect("a file");
+            let root = leftover(&base, NAME);
+            std::os::unix::fs::symlink(&target, root.join("servo").join("link"))
+                .expect("the test symlink");
+            std::os::unix::fs::symlink(&base, root.join("link-to-a-directory"))
+                .expect("the test symlink");
+
+            let removed = sweep_stale_temporary_profiles(&base, &later(&base));
+            let gone = !root.exists();
+            let target_contents = std::fs::read_to_string(&target);
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert_eq!(removed, 1);
+            assert!(gone);
+            assert_eq!(target_contents.expect("the target is intact"), "keep me");
+        }
+
+        #[test]
+        fn removal_takes_the_lock_file_last() {
+            // SAFETY: `geteuid` has no preconditions and cannot fail.
+            if unsafe { libc::geteuid() } == 0 {
+                eprintln!(
+                    "skipped: permissions do not stop root from removing (effective user id 0)"
+                );
+                return;
+            }
+            let base = base("lock-last");
+            let root = leftover(&base, NAME);
+            // A directory whose contents cannot be removed stops the removal part-way.
+            let stuck = root.join("stuck");
+            std::fs::create_dir_all(&stuck).expect("a directory");
+            std::fs::write(stuck.join("file"), "").expect("a file");
+            set_mode(&stuck, 0o500);
+
+            let result = remove_temporary_profile_directory(&root);
+            let lock_kept = root.join("lock").exists();
+            set_mode(&stuck, 0o700);
+            let _ = std::fs::remove_dir_all(&base);
+
+            assert!(result.is_err());
+            assert!(lock_kept, "the lock file must be the last thing removed");
+        }
+
+        #[test]
+        fn opening_a_profile_sweeps_only_its_own_area() {
+            let area = TestArea::new("sweeps-own");
+            let leftover_root = leftover(&area.get().directory, NAME);
+            let mut area_now = area.get().clone();
+            area_now.sweep.min_age = Duration::ZERO;
+            area_now.sweep.now = SystemTime::now() + Duration::from_secs(1);
+
+            let profile = open_profile(None, true, &area_now).expect("a temporary profile");
+            let leftover_gone = !leftover_root.exists();
+            drop(profile);
+
+            assert!(leftover_gone);
         }
 
         #[test]
@@ -1196,7 +1358,9 @@ mod tests {
 
         #[test]
         fn a_temporary_profile_is_locked_while_it_exists() {
-            let profile = TemporaryProfile::create().expect("a temporary profile");
+            let area = TestArea::new("a_temporary_profile_is_locked_while_it_e");
+            let profile =
+                TemporaryProfile::create(&area.get().directory).expect("a temporary profile");
 
             let second = ProfileLock::acquire(profile.root());
 
@@ -1223,6 +1387,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_unwritable_profile_directory_is_not_used() {
+        let area = TestArea::new("an_unwritable_profile_directory_is_not_u");
         use std::os::unix::fs::PermissionsExt;
 
         // SAFETY: `geteuid` has no preconditions and cannot fail.
@@ -1240,7 +1405,8 @@ mod tests {
         std::fs::set_permissions(&servo, std::fs::Permissions::from_mode(0o500))
             .expect("the test permissions");
 
-        let profile = open_profile(Some(&root), false).expect("the profile is not in use");
+        let profile =
+            open_profile(Some(&root), false, area.get()).expect("the profile is not in use");
         let used = profile.paths.is_some();
         drop(profile);
         let _ = std::fs::set_permissions(&servo, std::fs::Permissions::from_mode(0o700));
@@ -1251,7 +1417,9 @@ mod tests {
 
     #[test]
     fn an_automated_run_uses_a_temporary_profile_that_is_removed_afterwards() {
-        let profile = open_profile(None, true).expect("temporary profiles are never locked");
+        let area = TestArea::new("an_automated_run_uses_a_temporary_profil");
+        let profile =
+            open_profile(None, true, area.get()).expect("temporary profiles are never locked");
         let paths = profile
             .paths
             .as_ref()
@@ -1266,9 +1434,11 @@ mod tests {
 
     #[test]
     fn an_explicit_profile_directory_is_kept() {
+        let area = TestArea::new("an_explicit_profile_directory_is_kept");
         let root = unique_temporary_directory("explicit");
 
-        let profile = open_profile(Some(&root), true).expect("the profile is not in use");
+        let profile =
+            open_profile(Some(&root), true, area.get()).expect("the profile is not in use");
         assert_eq!(profile.servo_config_dir(), Some(root.join("servo")));
         drop(profile);
         let kept = root.join("servo").is_dir();

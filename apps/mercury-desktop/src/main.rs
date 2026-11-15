@@ -65,18 +65,21 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
 
     use_automatic_gpu_selection();
     // Dropped last, after the engine has saved its data: a temporary profile is deleted then.
-    let profile =
-        match profile::open_profile(options.profile_dir.as_deref(), options.is_automated()) {
-            Ok(profile) => profile,
-            Err(ProfileInUse { root }) => {
-                eprintln!(
-                    "mercury-browser: the profile at {} is in use by another Mercury Browser; \
+    let profile = match profile::open_profile(
+        options.profile_dir.as_deref(),
+        options.is_automated(),
+        &profile::TemporaryProfileArea::for_this_run(),
+    ) {
+        Ok(profile) => profile,
+        Err(ProfileInUse { root }) => {
+            eprintln!(
+                "mercury-browser: the profile at {} is in use by another Mercury Browser; \
                  close it or choose another --profile-dir",
-                    root.display()
-                );
-                return Ok(ExitCode::from(EXIT_PROFILE_IN_USE));
-            }
-        };
+                root.display()
+            );
+            return Ok(ExitCode::from(EXIT_PROFILE_IN_USE));
+        }
+    };
     select_hardware_accelerated_backend(options.is_automated())?;
 
     let window = MainWindow::new()?;
@@ -294,7 +297,12 @@ mod tests {
             "mercury-runtime-options-test-{}",
             std::process::id()
         ));
-        let profile = profile::open_profile(Some(&root), false).expect("the profile is free");
+        let area = profile::TemporaryProfileArea {
+            directory: root.join("area"),
+            ..profile::TemporaryProfileArea::for_this_run()
+        };
+        let profile =
+            profile::open_profile(Some(&root), false, &area).expect("the profile is free");
         let options = LaunchOptions {
             gpu_canvas: false,
             experimental_web_features: false,
