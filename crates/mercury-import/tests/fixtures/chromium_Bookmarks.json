@@ -1,0 +1,85 @@
+{
+   "checksum": "00000000000000000000000000000000",
+   "roots": {
+      "bookmark_bar": {
+         "children": [ {
+            "date_added": "13344473600123456",
+            "date_last_used": "0",
+            "guid": "00000000-0000-4000-8000-000000000005",
+            "id": "5",
+            "meta_info": {
+               "power_bookmark_meta": ""
+            },
+            "name": "News & Views",
+            "type": "url",
+            "url": "https://news.example/"
+         }, {
+            "children": [ {
+               "date_added": "13344473700000000",
+               "date_last_used": "0",
+               "guid": "00000000-0000-4000-8000-000000000007",
+               "id": "7",
+               "name": "Mail",
+               "type": "url",
+               "url": "https://mail.example/inbox?a=1&b=2"
+            }, {
+               "date_added": "13344473700000001",
+               "guid": "00000000-0000-4000-8000-000000000008",
+               "id": "8",
+               "name": "Bookmarklet",
+               "type": "url",
+               "url": "javascript:alert(1)"
+            } ],
+            "date_added": "13344473650000000",
+            "date_last_used": "0",
+            "date_modified": "13344473700000001",
+            "guid": "00000000-0000-4000-8000-000000000006",
+            "id": "6",
+            "name": "Work",
+            "type": "folder"
+         }, {
+            "date_added": "0",
+            "guid": "00000000-0000-4000-8000-000000000009",
+            "id": "9",
+            "name": "Unknown kind",
+            "type": "shortcut",
+            "url": "https://ignored.example/"
+         } ],
+         "date_added": "13344473500000000",
+         "date_last_used": "0",
+         "date_modified": "13344473700000001",
+         "guid": "0bc5d13f-2cba-5d74-951f-3f233fe6c908",
+         "id": "1",
+         "name": "Bookmarks bar",
+         "type": "folder"
+      },
+      "other": {
+         "children": [ {
+            "date_added": "0",
+            "guid": "00000000-0000-4000-8000-000000000010",
+            "id": "10",
+            "name": "Über uns — 日本語",
+            "type": "url",
+            "url": "https://later.example/über"
+         } ],
+         "date_added": "13344473500000000",
+         "date_last_used": "0",
+         "date_modified": "0",
+         "guid": "82b081ec-3dd3-529c-8475-ab6c344590dd",
+         "id": "2",
+         "name": "Other bookmarks",
+         "type": "folder"
+      },
+      "synced": {
+         "children": [ ],
+         "date_added": "13344473500000000",
+         "date_last_used": "0",
+         "date_modified": "0",
+         "guid": "4cf2e351-0e85-532b-bb37-df045d8f8d0f",
+         "id": "3",
+         "name": "Mobile bookmarks",
+         "type": "folder"
+      }
+   },
+   "version": 1
+}
