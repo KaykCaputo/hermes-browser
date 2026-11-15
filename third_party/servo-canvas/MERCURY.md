@@ -132,6 +132,14 @@ synchronously when it sees a device error (`wgpu-core` `Device::lose`); if the
 loss is first seen while waiting for a read-back, wgpu panics instead (see
 "Known limitations").
 
+One exception: every canvas's previous frame is drawn from its renderer's
+image atlas, which is at most 8192×8192. Two canvases larger than 4096 on
+either side cannot both live in one atlas, and when drawn in turns the
+earlier drawing of one of them was lost (`tests/pages/canvas-parity.html`,
+cases `two-large-alternating` and `two-large-after-resize`). Such a canvas,
+whether created at that size or resized to it, therefore gets a renderer of
+its own on the shared device (`renderer_for`), at about 175 MB each.
+
 Drop it when Servo shares the device itself.
 
 ## 7. Apply non-rectangular clips (`vello_backend.rs`, `render_to_texture`)

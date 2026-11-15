@@ -596,6 +596,30 @@
       return [sample(c, "i", 50, 25, RED), sample(c, "i", 9950, 25, BLUE)];
     });
 
+    run("two-large-alternating", () => {
+      // Two canvases too large to share one 8192x8192 image atlas, drawn in turns.
+      const a = canvas(5000, 5000).getContext("2d");
+      const b = canvas(5000, 5000).getContext("2d");
+      a.fillStyle = "rgb(255,0,0)"; a.fillRect(0, 0, 100, 100); px(a, 0, 0);
+      b.fillStyle = "rgb(0,0,255)"; b.fillRect(0, 0, 100, 100); px(b, 0, 0);
+      a.fillStyle = "rgb(0,128,0)"; a.fillRect(200, 0, 100, 100); px(a, 0, 0);
+      b.fillStyle = "rgb(255,255,0)"; b.fillRect(200, 0, 100, 100);
+      return [sample(a, "i", 50, 50, RED), sample(a, "i", 250, 50, GREEN), sample(b, "i", 50, 50, BLUE),
+        sample(b, "i", 250, 50, YELLOW)];
+    });
+
+    run("two-large-after-resize", () => {
+      const ea = canvas(100, 100), eb = canvas(100, 100);
+      const a = ea.getContext("2d"), b = eb.getContext("2d");
+      ea.width = 5000; ea.height = 5000; eb.width = 5000; eb.height = 5000;
+      a.fillStyle = "rgb(255,0,0)"; a.fillRect(0, 0, 100, 100); px(a, 0, 0);
+      b.fillStyle = "rgb(0,0,255)"; b.fillRect(0, 0, 100, 100); px(b, 0, 0);
+      a.fillStyle = "rgb(0,128,0)"; a.fillRect(200, 0, 100, 100); px(a, 0, 0);
+      b.fillStyle = "rgb(255,255,0)"; b.fillRect(200, 0, 100, 100);
+      return [sample(a, "i", 50, 50, RED), sample(a, "i", 250, 50, GREEN), sample(b, "i", 50, 50, BLUE),
+        sample(b, "i", 250, 50, YELLOW)];
+    });
+
     function finish() {
       const out = document.getElementById("out");
       out.textContent = lines.join("\n");

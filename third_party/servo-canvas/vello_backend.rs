@@ -254,7 +254,24 @@ impl VelloDrawTarget {
                 shared
             },
         };
+        let renderer = Self::renderer_for(&device, &renderer, size)?;
         Ok(Self::new_with_renderer(device, queue, renderer, size))
+    }
+
+    /// Mercury: each canvas's previous frame lives in its renderer's image
+    /// atlas (at most 8192x8192). Two canvases over half that size cannot
+    /// share one atlas, so such a canvas gets a renderer of its own.
+    fn renderer_for(
+        device: &Device,
+        renderer: &Rc<RefCell<vello::Renderer>>,
+        size: Size2D<u32>,
+    ) -> Result<Rc<RefCell<vello::Renderer>>, String> {
+        let is_shared = SHARED_GPU
+            .with_borrow(|shared| shared.as_ref().is_some_and(|(_, _, r)| Rc::ptr_eq(r, renderer)));
+        if is_shared && (size.width > 4096 || size.height > 4096) {
+            return Ok(Rc::new(RefCell::new(Self::create_renderer(device)?)));
+        }
+        Ok(renderer.clone())
     }
 
     fn create_device_and_renderer() -> Result<SharedGpu, String> {
@@ -288,9 +305,14 @@ impl VelloDrawTarget {
             log::warn!("VELLO WGPU DEVICE LOST {reason:?} {message}");
             GPU_DEVICE_LOST.store(true, Ordering::Relaxed);
         });
+        let renderer = Self::create_renderer(&device)?;
+        Ok((device, queue, Rc::new(RefCell::new(renderer))))
+    }
+
+    fn create_renderer(device: &Device) -> Result<vello::Renderer, String> {
         let error_scope = device.push_error_scope(ErrorFilter::Validation);
         let renderer = vello::Renderer::new(
-            &device,
+            device,
             vello::RendererOptions {
                 use_cpu: false,
                 num_init_threads: NonZeroUsize::new(1),
@@ -298,12 +320,11 @@ impl VelloDrawTarget {
                 pipeline_cache: None,
             },
         );
-        let renderer = match (renderer, pollster::block_on(error_scope.pop())) {
-            (Ok(renderer), None) => renderer,
-            (Err(error), _) => return Err(format!("renderer creation failed: {error}")),
-            (Ok(_), Some(error)) => return Err(format!("renderer creation failed: {error}")),
-        };
-        Ok((device, queue, Rc::new(RefCell::new(renderer))))
+        match (renderer, pollster::block_on(error_scope.pop())) {
+            (Ok(renderer), None) => Ok(renderer),
+            (Err(error), _) => Err(format!("renderer creation failed: {error}")),
+            (Ok(_), Some(error)) => Err(format!("renderer creation failed: {error}")),
+        }
     }
 }
 
@@ -393,10 +414,16 @@ impl GenericDrawTarget for VelloDrawTarget {
     }
 
     fn create_similar_draw_target(&self, size: &Size2D<i32>) -> Self {
+        // Mercury: a canvas resized beyond half the atlas gets its own renderer.
+        let renderer = Self::renderer_for(&self.device, &self.renderer, size.cast())
+            .unwrap_or_else(|error| {
+                log::warn!("VELLO RENDERER ERROR {error}");
+                self.renderer.clone()
+            });
         Self::new_with_renderer(
             self.device.clone(),
             self.queue.clone(),
-            self.renderer.clone(),
+            renderer,
             size.cast(),
         )
     }
