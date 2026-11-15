@@ -37,14 +37,25 @@ ignore = [
     # only by pages that do RSA decryption or signing through crypto.subtle;
     # Mercury does no RSA itself and its TLS is rustls with aws-lc-rs.
     { id = "RUSTSEC-2023-0071", reason = "rsa =0.10.0-rc.19 pinned by servo-script-webcrypto 0.8.0 (Servo's WebCrypto); no fixed version is selectable" },
-    # SQLite before 3.54.0 can return uninitialised page-cache memory for a
-    # database opened with a crafted -wal file. libsqlite3-sys 0.36.0 (bundled
-    # SQLite) <- rusqlite 0.38 <- servo-net / servo-storage / sea-query-rusqlite
-    # 0.8.0 <- servo. Servo requires rusqlite 0.38; the fix is in
-    # libsqlite3-sys 0.39 (rusqlite 0.41), which that requirement excludes.
-    # Exposure is local: a process must open a database and -wal pair that a
-    # less trusted party wrote. Servo's databases live in the user's own profile.
-    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.36 via rusqlite 0.38, required by servo-net and servo-storage 0.8.0; the fix needs rusqlite 0.41" },
+    # SQLite before 3.54.0 can return uninitialised page-cache memory to
+    # queries on a database opened together with a crafted -wal file whose
+    # page size differs. One bundled SQLite, libsqlite3-sys 0.36.0, serves the
+    # whole process, and two kinds of code open databases with it:
+    #   - Servo (servo-net, servo-storage, sea-query-rusqlite 0.8.0, through
+    #     rusqlite 0.38) opens its own databases in Mercury's profile;
+    #   - mercury-import (rusqlite 0.38, direct) copies another browser's
+    #     history database WITH ITS -wal (Firefox places.sqlite, Chromium
+    #     History) to a private directory and opens the copy. Those files were
+    #     written by another program, which is the advisory's scenario: a
+    #     crafted pair in a profile directory could make the import read stale
+    #     memory of the browser process.
+    # The fix (SQLite 3.54, libsqlite3-sys 0.39, rusqlite 0.41) cannot be taken
+    # while Servo requires rusqlite 0.38: libsqlite3-sys declares
+    # `links = "sqlite3"`, so only one version can be in the graph and it must
+    # be the one Servo's rusqlite accepts. The remedy is a Servo release that
+    # moves to rusqlite 0.41, or carrying a patched libsqlite3-sys 0.36 that
+    # bundles SQLite 3.54 through [patch.crates-io]. Neither is done yet.
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.36 (links = sqlite3) is pinned by Servo's rusqlite 0.38; mercury-import opens copied third-party databases with their -wal, the advisory's scenario; fix needs a Servo upgrade or a patched libsqlite3-sys" },
 ]
 
 [bans]
@@ -57,6 +68,7 @@ multiple-versions = "allow"
 # them has `publish = false`, which no crate's manifest says yet. Until every
 # workspace crate carries `publish = false` (none is published to crates.io),
 # this warns; change it to "deny" in the same commit that adds those lines.
+# Agreed: done by the lead when the parallel lanes are merged.
 wildcards = "warn"
 # Path dependencies in crates with `publish = false` are not wildcards.
 allow-wildcard-paths = true
