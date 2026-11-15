@@ -18,6 +18,7 @@ mod callbacks;
 mod cli;
 mod engine;
 mod keyboard;
+mod keyutils;
 mod rendering;
 mod screenshot;
 mod shortcuts;

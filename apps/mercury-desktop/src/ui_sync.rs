@@ -10,6 +10,7 @@ pub(crate) fn sync_ui(window: &MainWindow, controller: &BrowserController) {
     window.set_can_go_back(state.can_go_back());
     window.set_can_go_forward(state.can_go_forward());
     window.set_is_loading(matches!(state.load_state(), LoadState::Loading));
+    window.set_zoom_percent(i32::from(state.zoom_percent()));
     window.set_web_view_visible(
         !state.url().is_empty() && !matches!(state.load_state(), LoadState::Failed { .. }),
     );

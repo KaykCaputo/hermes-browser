@@ -5,6 +5,7 @@ mod input;
 mod page_icon;
 mod tab;
 mod web_view;
+mod zoom;
 
 pub use address::{AddressResolutionError, NavigationTarget, classify_address, resolve_address};
 pub use browser::{
@@ -17,3 +18,4 @@ pub use input::{
 pub use page_icon::PageIcon;
 pub use tab::{Tab, TabActivation, TabCommand, TabEvent, TabId};
 pub use web_view::{WebView, dispatch_command};
+pub use zoom::{DEFAULT_ZOOM_PERCENT, ZOOM_STEPS, zoom_in, zoom_out};

@@ -7,8 +7,8 @@ use std::time::Duration;
 use mercury_ui::MainWindow;
 use slint::{ComponentHandle, GraphicsAPI, Image, RenderingState, Timer};
 use talaria_core::{
-    BrowserController, BrowserEvent, LoadState, TabEvent, TabId, WebView as TalariaWebView,
-    dispatch_command,
+    BrowserController, BrowserEvent, DEFAULT_ZOOM_PERCENT, LoadState, TabEvent, TabId,
+    WebView as TalariaWebView, dispatch_command,
 };
 use talaria_servo::{
     EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ServoRuntime, ServoWebView, ServoWebViewError,
@@ -313,8 +313,12 @@ impl EngineState {
             );
 
             match create_result {
-                Ok(created_web_view) => {
+                Ok(mut created_web_view) => {
                     created_web_view.hide();
+                    let zoom_percent = tab_zoom_percent(&self.controller.borrow(), tab_id);
+                    if zoom_percent != DEFAULT_ZOOM_PERCENT {
+                        let _zoom_result = created_web_view.set_page_zoom(zoom_percent);
+                    }
                     self.web_views.insert(tab_id, created_web_view);
                     self.event_receivers.insert(tab_id, event_receiver);
                 }
@@ -470,6 +474,13 @@ pub(crate) fn apply_pending_browser_events(
     state_changed
 }
 
+fn tab_zoom_percent(controller: &BrowserController, tab_id: TabId) -> u16 {
+    controller
+        .tabs()
+        .find(|tab| tab.id() == tab_id)
+        .map_or(DEFAULT_ZOOM_PERCENT, |tab| tab.state().zoom_percent())
+}
+
 fn is_engine_ready(controller: &BrowserController, tab_id: TabId) -> bool {
     controller
         .tabs()
@@ -555,6 +566,12 @@ mod tests {
             Ok(())
         }
         fn ime_input(&mut self, _event: ImeInput) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn set_page_zoom(&mut self, _percent: u16) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn pinch_zoom(&mut self, _delta: f32, _x: f32, _y: f32) -> Result<(), Self::Error> {
             Ok(())
         }
     }

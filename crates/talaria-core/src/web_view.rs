@@ -20,6 +20,8 @@ pub trait WebView {
     fn set_focus(&mut self, focused: bool) -> Result<(), Self::Error>;
     fn keyboard_input(&mut self, event: KeyboardInput) -> Result<(), Self::Error>;
     fn ime_input(&mut self, event: ImeInput) -> Result<(), Self::Error>;
+    fn set_page_zoom(&mut self, percent: u16) -> Result<(), Self::Error>;
+    fn pinch_zoom(&mut self, delta: f32, x: f32, y: f32) -> Result<(), Self::Error>;
 }
 
 pub fn dispatch_command<W>(web_view: &mut W, command: BrowserCommand) -> Result<(), W::Error>
@@ -47,5 +49,7 @@ where
         BrowserCommand::FocusChanged { focused } => web_view.set_focus(focused),
         BrowserCommand::KeyboardInput(event) => web_view.keyboard_input(event),
         BrowserCommand::ImeInput(event) => web_view.ime_input(event),
+        BrowserCommand::SetPageZoom { percent } => web_view.set_page_zoom(percent),
+        BrowserCommand::PinchZoom { delta, x, y } => web_view.pinch_zoom(delta, x, y),
     }
 }

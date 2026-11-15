@@ -140,7 +140,7 @@ impl ServoRuntime {
             .build();
 
         info!("created Servo WebView for tab {}", tab_id.value());
-        Ok(ServoWebView::new(inner, frame_ready, tab_id))
+        Ok(ServoWebView::new(inner, frame_ready, tab_id, scale_factor))
     }
 
     pub fn spin_event_loop(&self) {

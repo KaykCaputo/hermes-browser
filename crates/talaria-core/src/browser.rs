@@ -1,4 +1,4 @@
-use crate::{ImeInput, KeyboardInput, PageIcon};
+use crate::{DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon};
 
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
 const INITIAL_ADDRESS: &str = "";
@@ -54,6 +54,16 @@ pub enum BrowserCommand {
     },
     KeyboardInput(KeyboardInput),
     ImeInput(ImeInput),
+    /// Page zoom as a percentage of the default size.
+    SetPageZoom {
+        percent: u16,
+    },
+    /// Multiplies the pinch zoom by `delta`, centred on the given web-view point.
+    PinchZoom {
+        delta: f32,
+        x: f32,
+        y: f32,
+    },
 }
 
 impl BrowserCommand {
@@ -62,7 +72,10 @@ impl BrowserCommand {
     pub(crate) const fn is_discarded_before_engine_ready(&self) -> bool {
         matches!(
             self,
-            Self::PointerMoved { .. } | Self::PointerButton { .. } | Self::Scrolled { .. }
+            Self::PointerMoved { .. }
+                | Self::PointerButton { .. }
+                | Self::Scrolled { .. }
+                | Self::PinchZoom { .. }
         )
     }
 
@@ -114,6 +127,7 @@ pub struct BrowserState {
     load_state: LoadState,
     can_go_back: bool,
     can_go_forward: bool,
+    zoom_percent: u16,
 }
 
 impl Default for BrowserState {
@@ -125,6 +139,7 @@ impl Default for BrowserState {
             load_state: LoadState::Idle,
             can_go_back: false,
             can_go_forward: false,
+            zoom_percent: DEFAULT_ZOOM_PERCENT,
         }
     }
 }
@@ -147,6 +162,13 @@ impl BrowserState {
     }
     pub fn can_go_forward(&self) -> bool {
         self.can_go_forward
+    }
+    pub fn zoom_percent(&self) -> u16 {
+        self.zoom_percent
+    }
+
+    pub(crate) fn set_zoom_percent(&mut self, percent: u16) {
+        self.zoom_percent = percent;
     }
 
     pub fn apply(&mut self, event: BrowserEvent) {
