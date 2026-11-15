@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Adapted from Zervo, https://github.com/Goddv/Zervo, commit 86cb7126,
+  scripts/bundle-macos.sh lines 192-251, MPL-2.0, and from Servo,
+  https://github.com/servo/servo, tag v0.8.0,
+  ports/servoshell/platform/macos/Info.plist, MPL-2.0.
+
+  Template for Mercury Browser's Info.plist. Two copies are made from it:
+  scripts/macos/bundle.sh writes Contents/Info.plist of the application
+  bundle, and apps/mercury-desktop/build.rs embeds one in the executable's
+  __TEXT,__info_plist section so a binary run straight from target/ behaves
+  like an application too. Both replace the same two placeholders, written
+  between at signs below: VERSION, the workspace version from Cargo.toml, and
+  MINIMUM_SYSTEM_VERSION, MACOSX_DEPLOYMENT_TARGET from .cargo/config.toml.
+
+  There are deliberately no camera, microphone, location or Bluetooth usage
+  descriptions: those web features are off. Add the matching string here in
+  the same change that turns one on, or macOS will end the process when a page
+  first uses it.
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Mercury Browser</string>
+	<key>CFBundleDisplayName</key>
+	<string>Mercury Browser</string>
+	<key>CFBundleExecutable</key>
+	<string>mercury-browser</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.github.thepigdestroyer.mercury-browser</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>@VERSION@</string>
+	<key>CFBundleVersion</key>
+	<string>@VERSION@</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>@MINIMUM_SYSTEM_VERSION@</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Kayk Caputo and Mercury Browser contributors. Licensed under MPL-2.0.</string>
+	<!-- Lets macOS list Mercury Browser as a web browser for http and https links. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>Web site URL</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>http</string>
+				<string>https</string>
+			</array>
+		</dict>
+	</array>
+	<!-- "Open With" for web pages; Alternate so installing it does not take over HTML files. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>HTML document</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.html</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>XHTML document</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.xhtml</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

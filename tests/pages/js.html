@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury JavaScript test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  body { padding: 24px; font: 28px/1.5 sans-serif; color: #000000; }
+  h1 { margin: 0 0 16px; font-size: 40px; }
+  #status { font-weight: bold; }
+  .pass { color: #006400; }
+  .fail { color: #b00000; }
+</style>
+</head>
+<body>
+  <h1>JavaScript test page</h1>
+  <!-- Replaced by the script; still showing this means scripts did not run. -->
+  <div id="status">JavaScript did not run</div>
+  <div id="results"></div>
+<script>
+  // Hot loops that SpiderMonkey compiles with its JIT. The page shows each result next to its
+  // known value and how long the whole run took. Used to check that a signed
+  // Mercury Browser.app runs JavaScript under the hardened runtime
+  // (docs/developer-guide/releases.md).
+  "use strict";
+
+  function countPrimesBelow(limit) {
+    const composite = new Uint8Array(limit);
+    let count = 0;
+    for (let i = 2; i < limit; i++) {
+      if (composite[i] === 0) {
+        count++;
+        for (let j = i * i; j < limit; j += i) {
+          composite[j] = 1;
+        }
+      }
+    }
+    return count;
+  }
+
+  function fibonacci(n) {
+    return n < 2 ? n : fibonacci(n - 1) + fibonacci(n - 2);
+  }
+
+  function checksum(rounds) {
+    let hash = 0;
+    for (let i = 0; i < rounds; i++) {
+      hash = (Math.imul(hash, 31) + i) | 0;
+    }
+    return hash >>> 0;
+  }
+
+  const checks = [
+    ["primes below 5,000,000", () => countPrimesBelow(5000000), 348513],
+    ["fibonacci(30)", () => fibonacci(30), 832040],
+    // h = (31 h + i) mod 2^32 for i = 0 … 9,999,999, computed independently in Python.
+    ["32-bit hash of 0..9,999,999", () => checksum(10000000), 823511872],
+  ];
+
+  const results = document.getElementById("results");
+  const started = performance.now();
+  let failures = 0;
+  for (const [name, run, expected] of checks) {
+    const value = run();
+    const ok = value === expected;
+    if (!ok) failures++;
+    const line = document.createElement("div");
+    line.className = ok ? "pass" : "fail";
+    line.textContent = `${name} = ${value} (expected ${expected}) ${ok ? "PASS" : "FAIL"}`;
+    results.appendChild(line);
+  }
+  const elapsed = performance.now() - started;
+
+  const timing = document.createElement("div");
+  timing.textContent = `time: ${elapsed.toFixed(1)} ms (performance.now)`;
+  results.appendChild(timing);
+
+  const status = document.getElementById("status");
+  status.className = failures === 0 ? "pass" : "fail";
+  status.textContent = failures === 0 ? "JavaScript ran: PASS" : `JavaScript ran: ${failures} FAIL`;
+</script>
+</body>
+</html>
