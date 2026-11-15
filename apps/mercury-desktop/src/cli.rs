@@ -75,16 +75,17 @@ Exit status:
   3  The screenshot's page did not finish loading
   4  The profile is in use by another Mercury Browser";
 
-/// `--profile-dir` needs a path that is valid UTF-8; anything else would be silently altered
-/// by the conversion to `String`. Returns the usage error to print, if any.
-pub(crate) fn reject_non_utf8_profile_dir(arguments: &[std::ffi::OsString]) -> Option<CliOutcome> {
-    let value = arguments
-        .windows(2)
-        .find(|pair| pair[0] == "--profile-dir" && pair[1].to_str().is_none())?;
+/// `--profile-dir` and `--screenshot` need paths that are valid UTF-8; anything else would be
+/// silently altered by the conversion to `String`. Returns the usage error to print, if any.
+pub(crate) fn reject_non_utf8_paths(arguments: &[std::ffi::OsString]) -> Option<CliOutcome> {
+    let pair = arguments.windows(2).find(|pair| {
+        (pair[0] == "--profile-dir" || pair[0] == "--screenshot") && pair[1].to_str().is_none()
+    })?;
     Some(CliOutcome::PrintAndExit {
         text: format!(
-            "mercury-browser: the --profile-dir path '{}' is not valid UTF-8; choose another directory\n\n{USAGE}",
-            value[1].to_string_lossy()
+            "mercury-browser: the {} path '{}' is not valid UTF-8; choose another path\n\n{USAGE}",
+            pair[0].to_string_lossy(),
+            pair[1].to_string_lossy()
         ),
         code: 2,
     })
@@ -478,7 +479,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_profile_dir_that_is_not_utf8_is_a_usage_error() {
+    fn path_options_that_are_not_utf8_are_usage_errors() {
         use std::ffi::{OsStr, OsString};
         use std::os::unix::ffi::OsStrExt;
 
@@ -488,20 +489,26 @@ mod tests {
         ];
 
         assert_eq!(
-            reject_non_utf8_profile_dir(&arguments)
+            reject_non_utf8_paths(&arguments)
                 .as_ref()
                 .and_then(exit_code),
             Some(2)
         );
         assert_eq!(
-            reject_non_utf8_profile_dir(&[OsString::from("--profile-dir"), OsString::from("/x")]),
+            reject_non_utf8_paths(&[OsString::from("--profile-dir"), OsString::from("/x")]),
             None
         );
         assert_eq!(
-            reject_non_utf8_profile_dir(&[
+            reject_non_utf8_paths(&[
                 OsString::from("--screenshot"),
                 OsStr::from_bytes(b"\xff.png").to_owned()
-            ]),
+            ])
+            .as_ref()
+            .and_then(exit_code),
+            Some(2)
+        );
+        assert_eq!(
+            reject_non_utf8_paths(&[OsString::from("--screenshot"), OsString::from("out.png")]),
             None
         );
     }

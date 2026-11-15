@@ -4,7 +4,7 @@ use std::process::ExitCode;
 use std::rc::Rc;
 
 use callbacks::connect_ui_callbacks;
-use cli::{CliOutcome, LaunchOptions, parse_arguments, reject_non_utf8_profile_dir};
+use cli::{CliOutcome, LaunchOptions, parse_arguments, reject_non_utf8_paths};
 use engine::connect_servo_runtime;
 use keyboard::connect_native_keyboard_input;
 use mercury_ui::MainWindow;
@@ -40,7 +40,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     record_browser_process_id();
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let parsed = reject_non_utf8_profile_dir(&arguments).unwrap_or_else(|| {
+    let parsed = reject_non_utf8_paths(&arguments).unwrap_or_else(|| {
         parse_arguments(
             arguments
                 .iter()

@@ -11,6 +11,7 @@ pub(crate) const APP_DIR_NAME: &str = "mercury-browser";
 
 const DEFAULT_PROFILE_NAME: &str = "Default";
 const LOCK_FILE_NAME: &str = "lock";
+const SERVO_DIRECTORY_NAME: &str = "servo";
 
 /// Exit status when the profile is already in use by another Mercury Browser.
 pub(crate) const EXIT_PROFILE_IN_USE: u8 = 4;
@@ -36,23 +37,31 @@ impl ProfilePaths {
             None => data_dir?.join(APP_DIR_NAME).join(DEFAULT_PROFILE_NAME),
         };
         Some(Self {
-            servo_config_dir: root.join("servo"),
+            servo_config_dir: root.join(SERVO_DIRECTORY_NAME),
             places_database: root.join("places.sqlite"),
             root,
         })
     }
 
     /// Creates `root` and `servo_config_dir`, readable by this user only: the profile holds
-    /// cookies and, while the browser runs, HTTP credentials. Existing directories that are
-    /// open to others are tightened.
+    /// cookies and, while the browser runs, HTTP credentials. An existing directory that other
+    /// users can read is tightened only if it is already a Mercury profile (it holds the `lock`
+    /// file or the `servo` directory); any other such directory is refused, never changed, so
+    /// `--profile-dir ~` or a shared directory keeps its permissions. Symbolic links are never
+    /// followed to change a mode.
     pub(crate) fn create(&self) -> io::Result<()> {
-        create_private_directory(&self.root)?;
-        create_private_directory(&self.servo_config_dir)?;
+        let is_profile = |root: &Path| {
+            [LOCK_FILE_NAME, SERVO_DIRECTORY_NAME]
+                .iter()
+                .any(|name| std::fs::symlink_metadata(root.join(name)).is_ok())
+        };
         let mut tightened = Vec::new();
-        for directory in [&self.root, &self.servo_config_dir] {
-            if make_private(directory)? {
-                tightened.push(directory.display().to_string());
-            }
+        if prepare_private_directory(&self.root, is_profile(&self.root))? {
+            tightened.push(self.root.display().to_string());
+        }
+        // Inside a profile root that is ours, `servo` is ours too.
+        if prepare_private_directory(&self.servo_config_dir, true)? {
+            tightened.push(self.servo_config_dir.display().to_string());
         }
         if !tightened.is_empty() {
             eprintln!(
@@ -64,6 +73,50 @@ impl ProfilePaths {
     }
 }
 
+/// Makes sure `path` is a directory only this user can read: creates it (mode 0700, set at
+/// creation) if it is missing; accepts it if it is already private; tightens it if `may_tighten`;
+/// refuses it otherwise. Returns whether it was tightened.
+fn prepare_private_directory(path: &Path, may_tighten: bool) -> io::Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_private_directory(path)?;
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() {
+        // Use the target as it is, but never change it.
+        let target = std::fs::metadata(path)?;
+        if !target.is_dir() {
+            return Err(io::Error::other(
+                "it is a symbolic link to something that is not a directory",
+            ));
+        }
+        if is_open_to_others(&target) {
+            return Err(io::Error::other(
+                "it is a symbolic link to a directory other users can read; Mercury does not change \
+                 a link's target (make the target private with chmod 700, or choose another directory)",
+            ));
+        }
+        return Ok(false);
+    }
+    if !metadata.is_dir() {
+        return Err(io::Error::other("it is not a directory"));
+    }
+    if !is_open_to_others(&metadata) {
+        return Ok(false);
+    }
+    if !may_tighten {
+        return Err(io::Error::other(
+            "other users can read it and it is not a Mercury profile; Mercury does not change its \
+             permissions (choose a directory that does not exist yet, or make it private with chmod 700)",
+        ));
+    }
+    make_private(path, &metadata)?;
+    Ok(true)
+}
+
 /// Creates `path` and any missing parents with mode 0700 on Unix, set at creation.
 fn create_private_directory(path: &Path) -> io::Result<()> {
     let mut builder = DirBuilder::new();
@@ -73,22 +126,31 @@ fn create_private_directory(path: &Path) -> io::Result<()> {
     builder.create(path)
 }
 
-/// Removes group and other permissions from an existing directory. Returns whether it changed.
 #[cfg(unix)]
-fn make_private(path: &Path) -> io::Result<bool> {
+fn is_open_to_others(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
 
-    let mode = std::fs::metadata(path)?.permissions().mode();
-    if mode & 0o077 == 0 {
-        return Ok(false);
-    }
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o700))?;
-    Ok(true)
+    metadata.permissions().mode() & 0o077 != 0
 }
 
 #[cfg(not(unix))]
-fn make_private(_path: &Path) -> io::Result<bool> {
-    Ok(false)
+fn is_open_to_others(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Removes group and other permissions from a directory (not a symbolic link: the caller checked
+/// with `symlink_metadata`).
+#[cfg(unix)]
+fn make_private(path: &Path, metadata: &std::fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o700))
+}
+
+#[cfg(not(unix))]
+fn make_private(_path: &Path, _metadata: &std::fs::Metadata) -> io::Result<()> {
+    Ok(())
 }
 
 /// Fails unless a file can be created and removed in `directory`.
@@ -409,6 +471,103 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("the test permissions");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_shared_directory_that_is_not_a_profile_is_refused_and_left_alone() {
+        let root = unique_temporary_directory("shared");
+        std::fs::create_dir_all(&root).expect("the test directory");
+        set_mode(&root, 0o755);
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+
+        let result = paths.create();
+        let mode_after = mode(&root);
+        let servo_created = paths.servo_config_dir.exists();
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(result.is_err());
+        assert_eq!(mode_after, 0o755);
+        assert!(!servo_created);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_marked_by_its_lock_file_is_tightened() {
+        let root = unique_temporary_directory("marked");
+        std::fs::create_dir_all(&root).expect("the test directory");
+        std::fs::write(root.join("lock"), "").expect("the lock file");
+        set_mode(&root, 0o755);
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+
+        let result = paths.create();
+        let mode_after = mode(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        result.expect("an existing profile is accepted");
+        assert_eq!(mode_after, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_private_directory_is_accepted() {
+        let root = unique_temporary_directory("private-empty");
+        std::fs::create_dir_all(&root).expect("the test directory");
+        set_mode(&root, 0o700);
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+
+        let result = paths.create();
+        let _ = std::fs::remove_dir_all(&root);
+
+        result.expect("a private directory is a fine profile");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_target_of_a_symlinked_profile_is_never_changed() {
+        let base = unique_temporary_directory("symlink");
+        let target = base.join("target");
+        std::fs::create_dir_all(target.join("servo")).expect("the test directories");
+        set_mode(&target, 0o755);
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("the test symlink");
+        let paths = ProfilePaths::resolve(None, Some(&link)).expect("an override is enough");
+
+        let result = paths.create();
+        let target_mode = mode(&target);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(result.is_err());
+        assert_eq!(target_mode, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_servo_directory_is_never_changed() {
+        let base = unique_temporary_directory("servo-symlink");
+        let root = base.join("profile");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&root).expect("the test directories");
+        std::fs::create_dir_all(&elsewhere).expect("the test directories");
+        set_mode(&root, 0o700);
+        set_mode(&elsewhere, 0o755);
+        std::os::unix::fs::symlink(&elsewhere, root.join("servo")).expect("the test symlink");
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+
+        let result = paths.create();
+        let elsewhere_mode = mode(&elsewhere);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(result.is_err());
+        assert_eq!(elsewhere_mode, 0o755);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn a_temporary_profile_is_private() {
         let profile = open_profile(None, true).expect("temporary profiles are never locked");
@@ -484,6 +643,12 @@ mod tests {
     #[test]
     fn an_unwritable_profile_directory_is_not_used() {
         use std::os::unix::fs::PermissionsExt;
+
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: permissions do not stop root from writing (effective user id 0)");
+            return;
+        }
 
         let root = unique_temporary_directory("read-only");
         let servo = root.join("servo");
