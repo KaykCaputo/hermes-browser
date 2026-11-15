@@ -42,6 +42,8 @@ On macOS, Surfman renders Servo's frames with hardware OpenGL into an IOSurface.
 
 If Slint's WGPU device is not a Metal device, or an import fails, Mercury logs the reason once at `warn` level and from then on reads each frame back with `glReadPixels` from the same OpenGL context. Web views are not recreated. Setting `MERCURY_FORCE_FRAME_READBACK=1` selects the read-back path from the start. The active path and the OpenGL version and renderer are logged once at `info` level when the context is created. With `RUST_LOG=mercury_browser=debug`, the time spent importing each frame is summarised (count, median, 95th percentile) every few hundred frames and when the context is dropped.
 
+If resizing Servo's surface fails, the bridge logs it once and keeps the previous size, which still matches the surface Servo draws into; Slint stretches that frame to the new viewport. The resize is not retried by itself: the desktop resizes the web view only when the viewport size or the active tab changes, so the next attempt happens with the next window resize or tab switch.
+
 The Linux and macOS bridges follow the structure of Slint's Servo example (`examples/servo/src/webview/rendering_context/` in https://github.com/slint-ui/slint, tag `v1.17.1`, MIT). `metal.rs` is adapted from that example's `metal.rs`; see `THIRD-PARTY-NOTICES.md` and `LICENSES/MIT-slint-examples.txt`.
 
 This callback is the important distinction between a page that loaded and one that became visible. URL or title events alone do not prove that rendering succeeded.
