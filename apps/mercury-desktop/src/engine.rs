@@ -219,7 +219,7 @@ impl EngineState {
 
         window.set_web_view_visible(false);
 
-        let GraphicsAPI::WGPU29 { device, .. } = graphics_api else {
+        let GraphicsAPI::WGPU29 { device, queue, .. } = graphics_api else {
             window.set_content_message(
                 "The selected Slint renderer does not provide WGPU 29.".into(),
             );
@@ -231,7 +231,7 @@ impl EngineState {
             return;
         };
 
-        let context = match BrowserRenderingContext::new(viewport_size, device) {
+        let context = match BrowserRenderingContext::new(viewport_size, device, queue) {
             Ok(context) => context,
             Err(error) => {
                 window.set_content_message(

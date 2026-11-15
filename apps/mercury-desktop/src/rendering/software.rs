@@ -33,6 +33,7 @@ impl BrowserRenderingContext {
     pub fn new(
         size: ViewportSize,
         _wgpu_device: &wgpu::Device,
+        _wgpu_queue: &wgpu::Queue,
     ) -> Result<Self, RenderingBridgeError> {
         Ok(Self {
             inner: SoftwareRenderingContext::new(PhysicalSize::new(size.width(), size.height()))?,

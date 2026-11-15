@@ -1,3 +1,13 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+// This file follows the Slint Servo example step for step
+// (https://github.com/slint-ui/slint, tag v1.17.1,
+// examples/servo/src/webview/rendering_context/vulkan.rs;
+// Copyright © SixtyFPS GmbH <info@slint.dev>, SPDX-License-Identifier: MIT; licence text in
+// LICENSES/MIT-slint-examples.txt).
+
 use ash::vk;
 use glow::HasContext;
 use slint::wgpu_29::wgpu::{self, hal};

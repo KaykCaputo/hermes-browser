@@ -1,11 +1,13 @@
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod metal;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod software;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod surfman;
 #[cfg(target_os = "linux")]
 mod vulkan;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use self::surfman::BrowserRenderingContext;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub use software::BrowserRenderingContext;

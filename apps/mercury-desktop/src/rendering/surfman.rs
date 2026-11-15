@@ -1,12 +1,25 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+// This file follows the Slint Servo example step for step
+// (https://github.com/slint-ui/slint, tag v1.17.1,
+// examples/servo/src/webview/rendering_context/{surfman_context,gpu_rendering_context}.rs;
+// Copyright © SixtyFPS GmbH <info@slint.dev>, SPDX-License-Identifier: MIT; licence text in
+// LICENSES/MIT-slint-examples.txt). `SurfmanContext` follows Servo's `SurfmanRenderingContext`
+// (servo-paint-api, components/shared/paint/rendering_context.rs, MPL-2.0).
+
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[cfg(target_os = "linux")]
 use ash::vk;
 use dpi::PhysicalSize;
 use euclid::default::Size2D;
 use gleam::gl::{self, Gl};
 use servo::{DeviceIntRect, RenderingContext, RgbaImage};
+#[cfg(target_os = "linux")]
 use slint::Image;
 use slint::wgpu_29::wgpu;
 use surfman::chains::{PreserveBuffer, SwapChain};
@@ -21,20 +34,31 @@ use talaria_servo::ViewportSize;
 pub enum RenderingBridgeError {
     #[error("Surfman failed to create the offscreen rendering context: {0:?}")]
     Surfman(surfman::Error),
+    #[cfg(target_os = "linux")]
     #[error("Slint's WGPU renderer is not using Vulkan")]
     WgpuNotVulkan,
+    #[cfg(target_os = "linux")]
     #[error("the offscreen surface has no framebuffer")]
     NoFramebuffer,
     #[error("the offscreen surface disappeared while importing a frame")]
     NoSurface,
+    #[cfg(target_os = "linux")]
     #[error("no Vulkan memory type can back the shared frame")]
     NoCompatibleMemoryType,
+    #[cfg(target_os = "linux")]
     #[error("Vulkan texture import failed: {0}")]
     Vulkan(#[from] vk::Result),
+    #[cfg(target_os = "linux")]
     #[error("OpenGL texture import failed: {0}")]
     OpenGl(String),
     #[error("Slint rejected the imported WGPU texture: {0}")]
     SlintTexture(String),
+    #[cfg(target_os = "macos")]
+    #[error("Metal frame import failed: {0}")]
+    MetalImport(#[from] super::metal::MetalImportError),
+    #[cfg(target_os = "macos")]
+    #[error("Servo did not produce an image for the current frame")]
+    MissingFrame,
 }
 
 impl From<surfman::Error> for RenderingBridgeError {
@@ -44,7 +68,7 @@ impl From<surfman::Error> for RenderingBridgeError {
 }
 
 pub(super) struct SurfmanContext {
-    gleam_gl: Rc<dyn Gl>,
+    pub(super) gleam_gl: Rc<dyn Gl>,
     pub(super) glow_gl: Arc<glow::Context>,
     pub(super) device: RefCell<Device>,
     pub(super) context: RefCell<Context>,
@@ -84,13 +108,13 @@ impl SurfmanContext {
         })
     }
 
-    fn make_current(&self) -> Result<(), surfman::Error> {
+    pub(super) fn make_current(&self) -> Result<(), surfman::Error> {
         self.device
             .borrow()
             .make_context_current(&self.context.borrow())
     }
 
-    fn framebuffer(&self) -> Option<glow::NativeFramebuffer> {
+    pub(super) fn framebuffer(&self) -> Option<glow::NativeFramebuffer> {
         self.device
             .borrow()
             .context_surface_info(&self.context.borrow())
@@ -113,13 +137,19 @@ pub struct BrowserRenderingContext {
     pub(super) size: Cell<ViewportSize>,
     swap_chain: SwapChain<Device>,
     pub(super) surfman: SurfmanContext,
+    #[cfg(target_os = "macos")]
+    pub(super) frame_bridge: super::metal::MacFrameBridge,
 }
 
 impl BrowserRenderingContext {
     pub fn new(
         size: ViewportSize,
         wgpu_device: &wgpu::Device,
+        wgpu_queue: &wgpu::Queue,
     ) -> Result<Self, RenderingBridgeError> {
+        #[cfg(target_os = "linux")]
+        let _ = wgpu_queue;
+        #[cfg(target_os = "linux")]
         if unsafe { wgpu_device.as_hal::<wgpu::wgc::api::Vulkan>() }.is_none() {
             return Err(RenderingBridgeError::WgpuNotVulkan);
         }
@@ -151,15 +181,21 @@ impl BrowserRenderingContext {
             let mut context = surfman.context.borrow_mut();
             SwapChain::create_attached(&*device, &mut *context, SurfaceAccess::GPUOnly)?
         };
+        #[cfg(target_os = "macos")]
+        let frame_bridge =
+            super::metal::MacFrameBridge::new(&*surfman.gleam_gl, wgpu_device, wgpu_queue);
 
         Ok(Self {
             size: Cell::new(size),
             swap_chain,
             surfman,
+            #[cfg(target_os = "macos")]
+            frame_bridge,
         })
     }
 
     /// Imports the completed Servo framebuffer into the WGPU device owned by Slint.
+    #[cfg(target_os = "linux")]
     pub fn current_frame_as_image(
         &self,
         wgpu_device: &wgpu::Device,
@@ -190,8 +226,14 @@ impl RenderingContext for BrowserRenderingContext {
             .bind_framebuffer(gl::FRAMEBUFFER, framebuffer);
     }
 
+    #[cfg(target_os = "linux")]
     fn read_to_image(&self, _source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
         None
+    }
+
+    #[cfg(target_os = "macos")]
+    fn read_to_image(&self, source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
+        self.read_framebuffer_to_image(source_rectangle)
     }
 
     fn size(&self) -> PhysicalSize<u32> {
