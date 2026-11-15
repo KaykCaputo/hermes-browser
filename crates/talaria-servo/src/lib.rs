@@ -7,6 +7,7 @@ mod opengl_context;
 mod panics;
 mod runtime;
 mod screen;
+mod session_data;
 mod web_view;
 
 pub use content_process::{ContentProcessArgumentError, run_content_process_if_requested};

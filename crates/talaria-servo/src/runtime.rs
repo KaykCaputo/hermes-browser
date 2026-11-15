@@ -20,6 +20,7 @@ use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::screen::ScreenMetrics;
+use crate::session_data::{SavedCredentialsRemover, end_session_cookies, remove_saved_credentials};
 use crate::{ServoWebView, ServoWebViewError};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
@@ -89,6 +90,9 @@ pub struct ServoRuntime {
     redraw_waker: EventLoopWaker,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
+    /// Declared after `inner`, so it is dropped after this handle to Servo. Every web view's
+    /// delegate holds a clone too; see `SavedCredentialsRemover`.
+    credentials_remover: Option<Rc<SavedCredentialsRemover>>,
 }
 
 impl ServoRuntime {
@@ -96,6 +100,10 @@ impl ServoRuntime {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
+        // Servo reads saved HTTP credentials when it starts; they belong to an earlier session.
+        if let Some(config_dir) = &runtime_options.config_dir {
+            remove_saved_credentials(config_dir);
+        }
         let options = mercury_options(runtime_options.config_dir.clone());
         let multiprocess_enabled = options.multiprocess;
         let sandbox_enabled = options.sandbox;
@@ -105,6 +113,11 @@ impl ServoRuntime {
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
+        let credentials_remover = runtime_options.config_dir.clone().map(|config_dir| {
+            // Session cookies saved by a run that did not end them (it was killed) end now.
+            end_session_cookies(&inner);
+            Rc::new(SavedCredentialsRemover::new(config_dir))
+        });
         if multiprocess_enabled {
             info!(
                 "Servo content process isolation enabled; operating-system sandbox {}",
@@ -127,6 +140,7 @@ impl ServoRuntime {
             redraw_waker,
             content_blocker,
             screen_metrics: Rc::default(),
+            credentials_remover,
         }
     }
 
@@ -152,6 +166,7 @@ impl ServoRuntime {
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
+            _credentials_remover: self.credentials_remover.clone(),
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -167,6 +182,15 @@ impl ServoRuntime {
     pub fn spin_event_loop(&self) {
         self.redraw_waker.acknowledge();
         self.inner.spin_event_loop();
+    }
+}
+
+impl Drop for ServoRuntime {
+    /// Ends the session cookies while Servo still runs, before it saves its cookie jar.
+    fn drop(&mut self) {
+        if self.credentials_remover.is_some() {
+            end_session_cookies(&self.inner);
+        }
     }
 }
 
@@ -281,6 +305,8 @@ struct BrowserDelegate {
     load_metrics: RefCell<PageLoadMetrics>,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
+    /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
+    _credentials_remover: Option<Rc<SavedCredentialsRemover>>,
 }
 
 impl BrowserDelegate {
