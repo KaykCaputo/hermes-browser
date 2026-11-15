@@ -55,9 +55,14 @@ fn suggestions_match_host_prefix_with_or_without_www() {
             "https://exampleshop.net/",
         ]
     );
+    // A typed "www." is ignored, as the scheme is (round 4: the index holds hosts without it).
     assert_eq!(
         urls(&store.suggest("www.exam", 10, NOW).unwrap()),
-        ["https://www.example.com/"]
+        [
+            "https://www.example.com/",
+            "https://example.org/news",
+            "https://exampleshop.net/",
+        ]
     );
     assert_eq!(
         urls(&store.suggest("example.com", 10, NOW).unwrap()),
@@ -360,7 +365,7 @@ fn refresh_rescores_the_highest_stale_scores_first() {
     assert_eq!(f.place("https://c.example/").unwrap().frecency, 200);
     // Everything was scored less than a day ago: nothing to do.
     assert_eq!(f.store.refresh_frecencies(NOW + 1000, 10).unwrap(), 0);
-    assert_eq!(f.store.refresh_frecencies(NOW, 0).unwrap(), 0);
+    assert!(f.store.refresh_frecencies(NOW, 0).is_err());
 }
 
 #[test]
@@ -403,18 +408,102 @@ fn limit_is_clamped_to_the_maximum() {
 #[test]
 fn the_first_keystrokes_of_a_url_still_suggest_pages() {
     let store = store();
+    const COM: &str = "https://www.example.com/";
+    const NEWS: &str = "https://example.org/news";
+    const DOCS: &str = "https://docs.rs/rusqlite/latest";
+    const SHOP: &str = "https://exampleshop.net/";
+    let all = [COM, NEWS, DOCS, SHOP];
+    let expected: [(&str, &[&str]); 10] = [
+        ("h", &all),
+        ("ht", &all),
+        ("https", &all),
+        ("https://", &all),
+        // "w" occurs in two URLs ("www", "news").
+        ("w", &[COM, NEWS]),
+        ("www", &[COM]),
+        ("www.", &[COM]),
+        // "c" occurs in "docs" and "com"; "co" and "com" only in "com".
+        ("c", &[COM, DOCS]),
+        ("co", &[COM]),
+        ("com", &[COM]),
+    ];
+    for (input, pages) in expected {
+        assert_eq!(
+            urls(&store.suggest(input, 10, NOW).unwrap()),
+            pages,
+            "{input:?}"
+        );
+    }
+    // Scheme and "www." are ignored: every "exa…" host.
+    assert_eq!(
+        urls(&store.suggest("https://www.exa", 10, NOW).unwrap()),
+        [COM, NEWS, SHOP]
+    );
+}
+
+#[test]
+fn a_pasted_url_is_suggested() {
+    let store = store();
     for input in [
-        "h", "ht", "https", "https://", "w", "www", "www.", "c", "co", "com",
+        "https://docs.rs/rusqlite/latest",
+        "http://docs.rs/rusqlite/latest",
+        "https://someone@docs.rs/rusqlite",
+        "docs.rs/rusqlite",
     ] {
-        assert!(
-            !store.suggest(input, 10, NOW).unwrap().is_empty(),
-            "{input:?} found nothing"
+        assert_eq!(
+            urls(&store.suggest(input, 10, NOW).unwrap()),
+            ["https://docs.rs/rusqlite/latest"],
+            "{input}"
         );
     }
     assert_eq!(
-        urls(&store.suggest("https://www.exa", 10, NOW).unwrap()),
+        urls(&store.suggest("www.example.com", 10, NOW).unwrap()),
         ["https://www.example.com/"]
     );
+}
+
+#[test]
+fn input_beyond_the_limits_returns_nothing() {
+    let store = store();
+    let pasted = "lorem ".repeat(10_000);
+    assert!(pasted.len() > mercury_store::MAX_SEARCH_INPUT_BYTES);
+    assert!(store.suggest(&pasted, 20, NOW).unwrap().is_empty());
+}
+
+#[test]
+fn a_typed_international_host_with_www_matches_like_without() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_visit(
+            "https://www.xn--bcher-kva.test/",
+            None,
+            VisitTransition::Link,
+            NOW,
+        )
+        .unwrap();
+    store
+        .record_visit(
+            "https://xn--bcher-kva.test/no-www",
+            None,
+            VisitTransition::Link,
+            NOW,
+        )
+        .unwrap();
+    let both = [
+        "https://www.xn--bcher-kva.test/",
+        "https://xn--bcher-kva.test/no-www",
+    ];
+    assert_eq!(urls_of(&store.suggest("www.bü", 10, NOW).unwrap()), both);
+    assert_eq!(urls_of(&store.suggest("bü", 10, NOW).unwrap()), both);
+}
+
+#[test]
+fn refreshing_zero_places_is_refused() {
+    let mut store = stale_and_fresh();
+    assert!(matches!(
+        store.refresh_frecencies(NOW, 0),
+        Err(mercury_store::StoreError::InvalidArgument(_))
+    ));
 }
 
 #[test]

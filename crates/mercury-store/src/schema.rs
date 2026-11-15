@@ -24,7 +24,7 @@ const MIGRATIONS: &[&str] = &[
         frecency_at   INTEGER NOT NULL DEFAULT 0, -- when `frecency` was computed
         title_at      INTEGER                    -- when the visit that gave `title` happened
     ) STRICT;
-    CREATE INDEX places_by_url_key  ON places(url_key, frecency);
+    CREATE INDEX places_by_url_key  ON places(url_key);
     CREATE INDEX places_by_frecency ON places(frecency);
     CREATE INDEX places_frecency_by_id ON places(id, frecency);
     CREATE INDEX places_by_frecency_at ON places(frecency_at, frecency);

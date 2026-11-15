@@ -194,25 +194,28 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// Deletes one visit. Returns `false` if it did not exist.
+    /// Deletes one visit. Returns `false` if it did not exist. If the page's title was seen on
+    /// that visit (the visit's time is the title's), the title is cleared too: what was
+    /// learned from a deleted visit is forgotten. A bookmark's own title is never touched.
     pub fn delete_visit(&mut self, id: VisitId, now_ms: i64) -> Result<bool> {
         let tx = self.conn.transaction()?;
-        let place_id: Option<i64> = tx
-            .prepare_cached("SELECT place_id FROM visits WHERE id = ?1")?
-            .query_row([id.0], |row| row.get(0))
+        let visit: Option<(i64, i64)> = tx
+            .prepare_cached("SELECT place_id, visited_at FROM visits WHERE id = ?1")?
+            .query_row([id.0], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()?;
-        let Some(place_id) = place_id else {
+        let Some((place_id, visited_at)) = visit else {
             return Ok(false);
         };
         tx.prepare_cached("DELETE FROM visits WHERE id = ?1")?
             .execute([id.0])?;
+        forget_titles_seen(&tx, place_id, visited_at, visited_at)?;
         refresh_place(&tx, place_id, now_ms)?;
         tx.commit()?;
         Ok(true)
     }
 
     /// Deletes all visits of one URL. Returns `false` if there were none. A bookmarked page is
-    /// kept, with no visits.
+    /// kept, with no visits and without the title its visits supplied.
     pub fn delete_page(&mut self, url: &str, now_ms: i64) -> Result<bool> {
         let tx = self.conn.transaction()?;
         let place_id: Option<i64> = tx
@@ -225,13 +228,18 @@ impl Store {
         let removed = tx
             .prepare_cached("DELETE FROM visits WHERE place_id = ?1")?
             .execute([place_id])?;
+        if removed > 0 {
+            forget_titles_seen(&tx, place_id, i64::MIN, i64::MAX)?;
+        }
         refresh_place(&tx, place_id, now_ms)?;
         tx.commit()?;
         Ok(removed > 0)
     }
 
     /// Deletes the visits in `range` and returns how many were removed. Pages left with no
-    /// visits are removed unless bookmarked.
+    /// visits are removed unless bookmarked. A page whose title was seen on a visit in the range
+    /// loses that title (the older one cannot be restored, as visits do not keep titles); a
+    /// later visit gives it a title again. Bookmark titles are never touched.
     pub fn clear_history(&mut self, range: ClearRange, now_ms: i64) -> Result<u64> {
         let from = match range {
             ClearRange::All => i64::MIN,
@@ -246,6 +254,7 @@ impl Store {
             .prepare_cached("DELETE FROM visits WHERE visited_at >= ?1")?
             .execute([from])?;
         for place_id in places {
+            forget_titles_seen(&tx, place_id, from, i64::MAX)?;
             refresh_place(&tx, place_id, now_ms)?;
         }
         tx.commit()?;
@@ -315,6 +324,17 @@ pub(crate) fn insert_visit(
     )?
     .execute(params![place_id, visited_at_ms, transition as u8])?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Clears a page's title if it was seen on a visit between `from_ms` and `to_ms` (inclusive),
+/// that is if `title_at` falls in that range. The full-text trigger follows the change.
+fn forget_titles_seen(conn: &Connection, place_id: i64, from_ms: i64, to_ms: i64) -> Result<()> {
+    conn.prepare_cached(
+        "UPDATE places SET title = NULL, title_at = NULL
+         WHERE id = ?1 AND title_at BETWEEN ?2 AND ?3",
+    )?
+    .execute(params![place_id, from_ms, to_ms])?;
+    Ok(())
 }
 
 /// Brings a page's counters, last-visit time and frecency in line with its remaining visits and

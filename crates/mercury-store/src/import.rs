@@ -69,8 +69,9 @@ impl Store {
     /// [`MAX_TITLE_CHARS`] are cut.
     ///
     /// A page's title is that of its most recent titled visit, across the visits already stored
-    /// and those imported; the order of `visits` does not matter (for titled visits at the same
-    /// millisecond, the greater title wins). Visit counts, typed counts and last-visit times are
+    /// and those imported; the order of `visits` does not matter. Ties at the same millisecond:
+    /// within the import, the greater title wins; against a stored title from the same
+    /// millisecond, the imported one wins. Visit counts, typed counts and last-visit times are
     /// computed from the visit rows.
     pub fn import_visits(&mut self, visits: &[VisitImport<'_>], now_ms: i64) -> Result<u64> {
         let tx = self.conn.transaction()?;

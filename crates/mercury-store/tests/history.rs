@@ -101,10 +101,14 @@ fn a_title_from_an_older_visit_does_not_replace_a_newer_one() {
             NOW - 7 * DAY_MS,
         )
         .unwrap();
-    assert_eq!(f.place(A).unwrap().title.as_deref(), Some("Today"));
+    let place = f.place(A).unwrap();
+    assert_eq!(place.title.as_deref(), Some("Today"));
+    assert_eq!((place.visit_count, place.last_visit_at), (2, Some(NOW)));
     f.store
         .record_visit(A, Some("Later today"), VisitTransition::Link, NOW + 1)
         .unwrap();
+    assert_eq!(f.place(A).unwrap().visit_count, 3);
+    assert_eq!(f.place(A).unwrap().last_visit_at, Some(NOW + 1));
     assert_eq!(f.place(A).unwrap().title.as_deref(), Some("Later today"));
 }
 
@@ -552,4 +556,171 @@ fn long_titles_are_cut_and_long_urls_refused() {
         })
     ));
     assert_eq!(f.count("SELECT count(*) FROM places"), 2);
+}
+
+// ---- searching by the text the index holds ----
+
+#[test]
+fn a_pasted_url_finds_its_page() {
+    let store = sample();
+    for query in [
+        "https://example.com/docs/getting-started",
+        "http://example.com/docs/getting-started",
+        "https://user:pw@example.com/docs/getting-started",
+        "example.com/docs",
+        "https://www.rust-lang.org/learn",
+        "www.rust-lang.org",
+    ] {
+        let found = store.history(Some(query), None, 10).unwrap();
+        assert_eq!(found.len(), 1, "{query}");
+    }
+    assert_eq!(
+        urls(&store.history(Some("www.rust-lang.org"), None, 10).unwrap()),
+        ["https://www.rust-lang.org/learn"]
+    );
+    // The scheme is not a word of any page: on its own it finds nothing.
+    assert!(store.history(Some("https"), None, 10).unwrap().is_empty());
+    assert!(
+        store
+            .history(Some("https://"), None, 10)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn search_input_beyond_the_limits_finds_nothing_or_is_cut() {
+    use mercury_store::{MAX_SEARCH_INPUT_BYTES, MAX_SEARCH_WORDS};
+    let store = sample();
+    let pasted = "lorem ".repeat(10_000);
+    assert!(pasted.len() > MAX_SEARCH_INPUT_BYTES);
+    assert!(store.history(Some(&pasted), None, 10).unwrap().is_empty());
+    // Words beyond the first MAX_SEARCH_WORDS are ignored.
+    let mut many = vec!["servo"; MAX_SEARCH_WORDS];
+    many.push("nonexistent");
+    assert_eq!(
+        store
+            .history(Some(&many.join(" ")), None, 10)
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+// ---- clearing what was learned in a cleared period ----
+
+#[test]
+fn clearing_recent_history_clears_a_title_it_supplied() {
+    let mut f = Fixture::new("clear-title");
+    f.store
+        .record_visit(A, None, VisitTransition::Link, NOW - 10 * DAY_MS)
+        .unwrap();
+    f.store
+        .record_visit(A, Some("Private matter"), VisitTransition::Link, NOW)
+        .unwrap();
+    // Two visits listed by history search, one suggestion.
+    assert_eq!(found_titles(&f.store, "private"), 3);
+
+    f.store
+        .clear_history(
+            ClearRange::Since {
+                from_ms: NOW - DAY_MS,
+            },
+            NOW,
+        )
+        .unwrap();
+    let place = f.place(A).unwrap();
+    assert_eq!(place.title, None);
+    assert_eq!(
+        (place.visit_count, place.last_visit_at),
+        (1, Some(NOW - 10 * DAY_MS))
+    );
+    assert_eq!(found_titles(&f.store, "private"), 0);
+    assert!(f.store.suggest("private", 10, NOW).unwrap().is_empty());
+
+    // A later visit gives the page a title again.
+    f.store
+        .record_visit(A, Some("Fresh title"), VisitTransition::Link, NOW + 1)
+        .unwrap();
+    assert_eq!(f.place(A).unwrap().title.as_deref(), Some("Fresh title"));
+}
+
+#[test]
+fn deleting_the_titled_visit_clears_the_title_but_not_a_bookmark_title() {
+    let mut f = Fixture::new("delete-title");
+    f.store
+        .record_visit(
+            A,
+            Some("Old visible"),
+            VisitTransition::Link,
+            NOW - 10 * DAY_MS,
+        )
+        .unwrap();
+    let titled = f
+        .store
+        .record_visit(A, Some("Secret"), VisitTransition::Link, NOW)
+        .unwrap();
+    let toolbar = f.store.bookmark_root(BookmarkRoot::Toolbar).unwrap();
+    f.store
+        .add_bookmark(toolbar, None, "My bookmark", A, "bm-a", NOW)
+        .unwrap();
+
+    assert!(f.store.delete_visit(titled, NOW).unwrap());
+    let place = f.place(A).unwrap();
+    assert_eq!(place.title, None, "the older title cannot be restored");
+    assert_eq!(
+        (place.visit_count, place.last_visit_at),
+        (1, Some(NOW - 10 * DAY_MS))
+    );
+    assert_eq!(found_titles(&f.store, "secret"), 0);
+    assert!(f.store.suggest("secret", 10, NOW).unwrap().is_empty());
+    // The bookmark's title is the user's and stays.
+    let hit = f.store.suggest("bookmark", 10, NOW).unwrap();
+    assert_eq!(hit[0].title.as_deref(), Some("My bookmark"));
+
+    // Deleting a visit that did not supply the title leaves it.
+    f.store
+        .record_visit(A, Some("Again"), VisitTransition::Link, NOW + 1)
+        .unwrap();
+    let old = f.store.history(None, None, 10).unwrap();
+    let untitled = old
+        .iter()
+        .find(|e| e.visited_at_ms == NOW - 10 * DAY_MS)
+        .unwrap();
+    f.store.delete_visit(untitled.visit_id, NOW + 1).unwrap();
+    assert_eq!(f.place(A).unwrap().title.as_deref(), Some("Again"));
+}
+
+#[test]
+fn deleting_a_page_or_all_history_clears_visit_titles() {
+    let mut f = Fixture::new("clear-all-title");
+    let toolbar = f.store.bookmark_root(BookmarkRoot::Toolbar).unwrap();
+    f.store
+        .record_visit(A, Some("Kept by bookmark"), VisitTransition::Link, NOW)
+        .unwrap();
+    f.store
+        .add_bookmark(toolbar, None, "", A, "bm-a", NOW)
+        .unwrap();
+    f.store
+        .record_visit(B, Some("Other"), VisitTransition::Link, NOW)
+        .unwrap();
+    f.store
+        .add_bookmark(toolbar, None, "", B, "bm-b", NOW)
+        .unwrap();
+
+    f.store.delete_page(A, NOW).unwrap();
+    assert_eq!(f.place(A).unwrap().title, None);
+    f.store.clear_history(ClearRange::All, NOW).unwrap();
+    assert_eq!(f.place(B).unwrap().title, None);
+    assert_eq!(found_titles(&f.store, "other"), 0);
+}
+
+fn found_titles(store: &Store, query: &str) -> usize {
+    store.history(Some(query), None, 100).unwrap().len()
+        + store
+            .suggest(query, 10, NOW)
+            .unwrap()
+            .iter()
+            .filter(|s| s.title.is_some())
+            .count()
 }

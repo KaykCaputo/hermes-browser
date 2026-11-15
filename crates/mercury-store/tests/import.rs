@@ -105,12 +105,14 @@ fn titled<'a>(url: &'a str, title: Option<&'a str>, days_ago: i64) -> VisitImpor
 fn title_after(visits: &[VisitImport<'_>]) -> Option<String> {
     let mut store = Store::open_in_memory().unwrap();
     store.import_visits(visits, NOW).unwrap();
-    store
-        .history(None, None, 1)
-        .unwrap()
-        .into_iter()
-        .next()
-        .and_then(|e| e.title)
+    let entries = store.history(None, None, 100).unwrap();
+    // Counts and the newest visit are right too: every visit listed, newest first.
+    assert_eq!(entries.len(), visits.len());
+    assert_eq!(
+        entries[0].visited_at_ms,
+        visits.iter().map(|v| v.visited_at_ms).max().unwrap()
+    );
+    entries.into_iter().next().and_then(|e| e.title)
 }
 
 #[test]
@@ -159,18 +161,38 @@ fn an_import_older_than_the_stored_title_leaves_it() {
             NOW,
         )
         .unwrap();
-    assert_eq!(
-        f.place("https://t.example/").unwrap().title.as_deref(),
-        Some("Seen today")
-    );
+    let place = f.place("https://t.example/").unwrap();
+    assert_eq!(place.title.as_deref(), Some("Seen today"));
+    assert_eq!((place.visit_count, place.last_visit_at), (3, Some(NOW)));
     // A newer titled visit in an import does replace it.
     f.store
         .import_visits(&[titled("https://t.example/", Some("Tomorrow"), -1)], NOW)
         .unwrap();
+    let place = f.place("https://t.example/").unwrap();
+    assert_eq!(place.title.as_deref(), Some("Tomorrow"));
     assert_eq!(
-        f.place("https://t.example/").unwrap().title.as_deref(),
-        Some("Tomorrow")
+        (place.visit_count, place.last_visit_at),
+        (4, Some(NOW + DAY_MS))
     );
+}
+
+#[test]
+fn an_imported_title_from_the_same_millisecond_as_the_stored_one_wins() {
+    let mut f = Fixture::new("import-same-ms");
+    f.store
+        .record_visit(
+            "https://t.example/",
+            Some("Stored"),
+            VisitTransition::Link,
+            NOW,
+        )
+        .unwrap();
+    f.store
+        .import_visits(&[titled("https://t.example/", Some("Imported"), 0)], NOW)
+        .unwrap();
+    let place = f.place("https://t.example/").unwrap();
+    assert_eq!(place.title.as_deref(), Some("Imported"));
+    assert_eq!((place.visit_count, place.last_visit_at), (2, Some(NOW)));
 }
 
 #[test]

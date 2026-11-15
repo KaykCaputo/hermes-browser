@@ -4,43 +4,61 @@
 
 //! Turning user text into a safe FTS5 query.
 
-/// Longer input is not searched at all.
-const MAX_QUERY_BYTES: usize = 4 * 1024;
-/// Only this many words are used.
-const MAX_TOKENS: usize = 8;
-/// Each word is cut to this many characters.
-const MAX_TOKEN_CHARS: usize = 256;
+/// Search input longer than this many bytes finds nothing, in [`Store::history`] and
+/// [`Store::suggest`] alike; it is not searched at all.
+///
+/// [`Store::history`]: crate::Store::history
+/// [`Store::suggest`]: crate::Store::suggest
+pub const MAX_SEARCH_INPUT_BYTES: usize = 4 * 1024;
 
-/// Builds an FTS5 `MATCH` argument that requires every word of `query`, the last one as a
-/// prefix. Every word is quoted, so nothing the user types is read as FTS5 syntax. Returns
-/// `None` if no searchable word is left.
+/// Only the first this many words of search input are used; later ones are ignored.
+pub const MAX_SEARCH_WORDS: usize = 8;
+
+/// Each search word is cut to this many characters.
+const MAX_WORD_CHARS: usize = 256;
+
+/// The words of search input, normalised the way the page index was built: each
+/// whitespace-separated piece loses a leading `scheme://`, user info and a leading `www.`, and
+/// its host is read as lower-case Unicode (see [`url_key`]); `"` and control characters are
+/// removed, pieces with no character the tokenizer keeps are dropped, each is cut to 256
+/// characters and only the first [`MAX_SEARCH_WORDS`] are kept. `None` if the input is longer
+/// than [`MAX_SEARCH_INPUT_BYTES`]. Shared by the full-text query and the in-memory match.
+pub(crate) fn search_terms(input: &str) -> Option<Vec<String>> {
+    if input.len() > MAX_SEARCH_INPUT_BYTES {
+        return None;
+    }
+    Some(
+        input
+            .split_whitespace()
+            .map(|piece| {
+                url_key(piece, true)
+                    .chars()
+                    .filter(|c| !c.is_control() && *c != '"')
+                    .take(MAX_WORD_CHARS)
+                    .collect::<String>()
+            })
+            .filter(|term| term.chars().any(is_token_char))
+            .take(MAX_SEARCH_WORDS)
+            .collect(),
+    )
+}
+
+/// Builds an FTS5 `MATCH` argument that requires every term of `query` (see
+/// [`search_terms`]), the last one as a prefix. Every term is quoted, so nothing the user types
+/// is read as FTS5 syntax. Returns `None` if no searchable term is left.
 ///
 /// The result is bound as a parameter, never formatted into SQL.
 ///
 /// Differences from the donor: only the last word is a prefix (the donor makes every word
-/// one), and a word with no character the tokenizer keeps is dropped (see [`is_token_char`]).
+/// one); a word with no character the tokenizer keeps is dropped (see [`is_token_char`]); and
+/// each word is normalised like the indexed URL key.
 pub(crate) fn fts_query(query: &str) -> Option<String> {
-    if query.len() > MAX_QUERY_BYTES {
+    let terms = search_terms(query)?;
+    if terms.is_empty() {
         return None;
     }
-    let tokens: Vec<String> = query
-        .split_whitespace()
-        .map(|token| {
-            token
-                .chars()
-                .filter(|c| !c.is_control() && *c != '"')
-                .take(MAX_TOKEN_CHARS)
-                .collect::<String>()
-        })
-        .filter(|token| token.chars().any(is_token_char))
-        .take(MAX_TOKENS)
-        .map(|token| format!("\"{token}\""))
-        .collect();
-    if tokens.is_empty() {
-        None
-    } else {
-        Some(tokens.join(" ") + "*")
-    }
+    let quoted: Vec<String> = terms.iter().map(|term| format!("\"{term}\"")).collect();
+    Some(quoted.join(" ") + "*")
 }
 
 /// Whether FTS5's `unicode61` tokenizer, as the tables use it (default options), keeps `c` as
@@ -72,22 +90,24 @@ pub(crate) fn is_token_char(c: char) -> bool {
 /// is dropped too.
 pub(crate) fn url_key(url: &str, strip_www: bool) -> String {
     let url = url.trim();
-    let rest = match url.find("://") {
+    let (rest, has_scheme) = match url.find("://") {
         Some(end)
             if end > 0
                 && url[..end]
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
         {
-            &url[end + 3..]
+            (&url[end + 3..], true)
         }
-        _ => url,
+        _ => (url, false),
     };
     let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, tail) = rest.split_at(authority_end);
-    let host_port = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
+    // User info exists only after `scheme://`: `mailto:a@b.com` keeps its address.
+    let host_port = match authority.rsplit_once('@') {
+        Some((_, host)) if has_scheme => host,
+        _ => authority,
+    };
     let host_port = host_port.to_lowercase();
     let host_port = if host_port.contains("xn--") && !host_port.starts_with('[') {
         let (host, port) = match host_port.rsplit_once(':') {
@@ -147,6 +167,7 @@ mod tests {
         );
         assert_eq!(url_key("BÜCH", false), "büch");
         assert_eq!(url_key("https://[::1]:8080/", true), "[::1]:8080/");
+        assert_eq!(url_key("mailto:a@b.com", true), "mailto:a@b.com");
     }
 
     #[test]
@@ -159,10 +180,24 @@ mod tests {
     fn syntax_is_neutralised() {
         assert_eq!(
             fts_query("\"a\" OR b*").as_deref(),
-            Some("\"a\" \"OR\" \"b*\"*")
+            Some("\"a\" \"or\" \"b*\"*")
         );
-        assert_eq!(fts_query("NEAR(x").as_deref(), Some("\"NEAR(x\"*"));
+        assert_eq!(fts_query("NEAR(x").as_deref(), Some("\"near(x\"*"));
         assert_eq!(fts_query("servo -").as_deref(), Some("\"servo\"*"));
+    }
+
+    #[test]
+    fn search_terms_are_normalised_like_the_index() {
+        assert_eq!(
+            fts_query("https://user@www.Example.com/Docs Intro").as_deref(),
+            Some("\"example.com/docs\" \"intro\"*")
+        );
+        assert_eq!(
+            fts_query("www.rust-lang.org").as_deref(),
+            Some("\"rust-lang.org\"*")
+        );
+        assert_eq!(fts_query("https://"), None);
+        assert_eq!(fts_query("https").as_deref(), Some("\"https\"*"));
     }
 
     #[test]
