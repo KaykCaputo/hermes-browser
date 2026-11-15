@@ -417,7 +417,11 @@ jobs:
           # line: macOS strips DYLD_* from the environment of SIP-protected
           # programs such as /bin/bash, so it cannot come from $GITHUB_ENV.
           # cargo is not protected and passes it on to the test binaries.
-          DYLD_FALLBACK_LIBRARY_PATH="${MERCURY_GSTREAMER_PREFIX}/lib" \
+          # Setting the variable replaces dyld's own fallback list, so its
+          # traditional entries (man dyld: /usr/local/lib:/usr/lib, the
+          # default for binaries built before late 2023) follow the GStreamer
+          # directory, and leaf-name loads behave as they would without it.
+          DYLD_FALLBACK_LIBRARY_PATH="${MERCURY_GSTREAMER_PREFIX}/lib:/usr/local/lib:/usr/lib" \
             cargo test --locked --release --workspace
 
   scripts:
