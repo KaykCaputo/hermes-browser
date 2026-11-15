@@ -1,7 +1,7 @@
 //! The neutral values every reader returns, the errors they report, and the rule for which
 //! addresses may be imported at all.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use url::Url;
 
@@ -86,6 +86,30 @@ pub enum ImportError {
     Malformed(String),
 }
 
+impl ImportError {
+    pub(crate) fn io(path: &Path, source: std::io::Error) -> ImportError {
+        let path = path.to_owned();
+        match source.kind() {
+            std::io::ErrorKind::NotFound => ImportError::NotFound(path),
+            // ERROR_SHARING_VIOLATION and ERROR_LOCK_VIOLATION on Windows.
+            _ if cfg!(windows) && matches!(source.raw_os_error(), Some(32 | 33)) => {
+                ImportError::Locked(path)
+            }
+            _ => ImportError::Io { path, source },
+        }
+    }
+
+    pub(crate) fn database(path: &Path, source: rusqlite::Error) -> ImportError {
+        let path = path.to_owned();
+        match source.sqlite_error_code() {
+            Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
+                ImportError::Locked(path)
+            }
+            _ => ImportError::Database { path, source },
+        }
+    }
+}
+
 /// Whether an address may be imported: only `http`, `https`, `ftp`, `file` and `about`.
 /// Script, data and browser-internal addresses (`javascript:`, `data:`, `chrome:`, `place:`, …)
 /// and anything that does not parse are refused.
@@ -128,6 +152,81 @@ fn filter_nodes(nodes: Vec<ImportedNode>, dropped: &mut usize) -> Vec<ImportedNo
             node => Some(node),
         })
         .collect()
+}
+
+/// Collects history visits newest first, keeping only importable addresses, up to `cap`.
+pub(crate) struct VisitCollector {
+    pub(crate) visits: Vec<ImportedVisit>,
+    cap: usize,
+    dropped: usize,
+}
+
+impl VisitCollector {
+    pub(crate) fn new(limit: usize) -> VisitCollector {
+        VisitCollector {
+            visits: Vec::new(),
+            cap: limit.min(MAX_IMPORTED_VISITS),
+            dropped: 0,
+        }
+    }
+
+    pub(crate) fn is_full(&self) -> bool {
+        self.visits.len() >= self.cap
+    }
+
+    /// Adds one visit; returns whether there is room for more.
+    pub(crate) fn push(&mut self, url: String, title: Option<String>, visited_at_ms: i64) -> bool {
+        if self.is_full() {
+            return false;
+        }
+        if is_importable_url(&url) {
+            self.visits.push(ImportedVisit {
+                url,
+                title: title.filter(|title| !title.is_empty()),
+                visited_at_ms,
+            });
+        } else {
+            self.dropped += 1;
+        }
+        !self.is_full()
+    }
+
+    pub(crate) fn finish(self, source: &str) -> Vec<ImportedVisit> {
+        if self.dropped > 0 {
+            log::debug!(
+                "{source}: left out {} visits to addresses that cannot be imported",
+                self.dropped
+            );
+        }
+        self.visits
+    }
+}
+
+/// Adds `profile` unless one with the same directory is already in `found`. Directories are
+/// compared after resolving links and, on case-insensitive file systems, letter case, so that
+/// `Chromium` and `chromium` on macOS give one profile.
+pub(crate) fn push_unique(found: &mut Vec<BrowserProfile>, profile: BrowserProfile) {
+    if !found
+        .iter()
+        .any(|known| same_directory(&known.path, &profile.path))
+    {
+        found.push(profile);
+    }
+}
+
+#[cfg(unix)]
+fn same_directory(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(a), Ok(b)) => (a.dev(), a.ino()) == (b.dev(), b.ino()),
+        _ => a == b,
+    }
+}
+
+#[cfg(not(unix))]
+fn same_directory(a: &Path, b: &Path) -> bool {
+    let key = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    key(a) == key(b)
 }
 
 /// Folders nested deeper than this are opened into their parent. Real browsers nest a handful of
