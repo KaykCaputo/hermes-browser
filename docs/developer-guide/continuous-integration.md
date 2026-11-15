@@ -5,13 +5,13 @@ description: What Mercury Browser's CI and release workflows check, how to run t
 
 # Continuous integration
 
-Every push to a branch and every pull request runs `.github/workflows/ci.yml` on Linux and on macOS (Apple Silicon). A tag `v*` runs `.github/workflows/release.yml`, which builds the release artefacts for both platforms and publishes them. Everything a job checks can also be checked on a development machine; see [Run the checks locally](#run-the-checks-locally).
+Every push to `master` or `mercury` and every pull request runs `.github/workflows/ci.yml` on Linux and on macOS (Apple Silicon). Other branches are checked through their pull request, so a push to a pull-request branch does not run the multi-hour macOS job twice. A tag `v*` runs `.github/workflows/release.yml`, which builds the release artefacts for both platforms and publishes them. Everything a job checks can also be checked on a development machine; see [Run the checks locally](#run-the-checks-locally).
 
 ## The jobs
 
 The expected times below are estimates from the size of the work and the runners' specifications (GitHub's arm64 macOS runner has 3 M1 cores and 7 GB of memory; the Ubuntu runners have 4 cores and 16 GB on public repositories). Replace them with measured times once the workflows have run.
 
-### `ci.yml` (pushes to branches, pull requests, manual runs)
+### `ci.yml` (pushes to `master` and `mercury`, pull requests, manual runs)
 
 | Job | Runner | What it checks | Expected time |
 | --- | --- | --- | --- |
@@ -19,14 +19,14 @@ The expected times below are estimates from the size of the work and the runners
 | Fast checks (Linux) | `ubuntu-24.04` | `cargo fmt --check`; clippy with `-D warnings` and the tests of every crate that depends on neither Servo nor Slint | 3–6 minutes |
 | Fast checks (macOS) | `macos-26` | the same, on Apple Silicon (some of those crates have macOS-only code) | 3–6 minutes |
 | Linux quality checks | `ubuntu-22.04` | the whole workspace: `make fmt-check`, clippy with `-D warnings --all-features`, `cargo test` | 60–110 minutes (limit 120) |
-| macOS (Apple Silicon) | `macos-26` | GStreamer set-up; `cargo fmt --check`; the release build; `make app-macos`; the bundle checks; a rendering smoke test; clippy with `-D warnings`; the workspace tests | 3–4 hours (limit 330 minutes) |
-| Shell scripts | `ubuntu-24.04` | `shellcheck -x` over every `*.sh` under `scripts/` | 1 minute |
+| macOS (Apple Silicon) | `macos-26` | GStreamer set-up; `cargo fmt --check`; the release build; `make app-macos`; the bundle checks, media libraries included (`--require-media`); a rendering smoke test; clippy with `-D warnings`; the workspace tests | 3–4 hours (limit 330 minutes) |
+| Scripts | `ubuntu-24.04` | `shellcheck -x` over every `*.sh` under `scripts/`; `python3 -m py_compile` over every `*.py` | 1 minute |
 | Workflows | `ubuntu-24.04` | `actionlint` over `.github/workflows/`, which also runs shellcheck over every `run:` block | 1 minute |
 | Dependency policy | `ubuntu-24.04` | `cargo-deny check` against `deny.toml` | 2 minutes |
 
 The fast jobs exist so that most mistakes are reported in minutes rather than after an engine build. Their crate list is not written down anywhere: `scripts/ci/light-crates.sh` works it out from `cargo metadata` each time, so a new library crate is checked as soon as it is added, provided nothing it depends on (including its dev-dependencies) pulls in `servo` or `slint`. `scripts/ci/light-crates.sh --explain` prints the verdict for every member.
 
-The macOS job builds, tests and lints with one Cargo profile, `release`, the profile the project uses everywhere, so the engine's code is generated once: `cargo test --release` reuses what `cargo build --release` produced. Clippy still type-checks the dependency graph separately, as it always does. The `.app` is zipped and uploaded as an artefact before the smoke test, clippy and the tests, so a later failure or timeout cannot lose it. The smoke test runs the bundled app with `--screenshot` on `tests/pages/colors.html` and checks the picture with `scripts/ci/check-colors-screenshot.py`; the PNG is uploaded whether it passes or fails.
+The macOS job builds, tests and lints with one Cargo profile, `release`, the profile the project uses everywhere, so the engine's code is generated once: `cargo test --release` reuses what `cargo build --release` produced. Clippy still type-checks the dependency graph separately, as it always does. Building and linting link against GStreamer but load none of its libraries. The test binaries do, and they have no rpath to them, so the test step sets `DYLD_FALLBACK_LIBRARY_PATH="$MERCURY_GSTREAMER_PREFIX/lib"` on the `cargo test` command line. It cannot come from an earlier step: macOS strips `DYLD_*` variables whenever a SIP-protected program such as `/bin/bash` starts. The `.app` is zipped and uploaded as an artefact before the smoke test, clippy and the tests, so a later failure or timeout cannot lose it. The smoke test runs the bundled app with `--screenshot` on `tests/pages/colors.html` and checks the picture with `scripts/ci/check-colors-screenshot.py`; the PNG is uploaded whether it passes or fails.
 
 Superseded runs on the same branch or pull request are cancelled. Tags run only the release workflow, whose runs are never cancelled.
 
@@ -36,22 +36,26 @@ Superseded runs on the same branch or pull request are cancelled. Tags run only 
 | --- | --- | --- | --- |
 | Check the version | `ubuntu-24.04` | reads `[workspace.package] version` from `Cargo.toml`; on a tag, fails unless the tag is `v<version>` | 1 minute |
 | Linux x86-64 | `ubuntu-22.04` | `make qa`, the release build, the glibc 2.35 check, `mercury-browser-linux-x86_64.tar.gz` and its `.sha256` | 90–120 minutes (limit 120) |
-| macOS Apple Silicon | `macos-26` | GStreamer set-up, the release build, `make package-macos` (signed with a Developer ID when the secrets exist, otherwise ad hoc), notarisation and stapling when the notarisation secrets exist, the bundle checks, `mercury-browser-<version>-macos-arm64.dmg` and its `.sha256` | 2–3 hours (limit 240 minutes) |
-| Publish GitHub Release | `ubuntu-24.04` | tags only: verifies every `.sha256`, writes `SHA256SUMS`, attests build provenance for the files it lists, creates the release (or adds to an existing one) and uploads everything | 3 minutes |
+| macOS Apple Silicon (build) | `macos-26` | GStreamer set-up and the release build, with no secrets and no environment; hands the unsigned executable and Servo's GStreamer plugin lists to the next job | 2–3 hours (limit 240 minutes) |
+| macOS Apple Silicon (sign and package) | `macos-26` | in the `release` environment, on a fresh runner that runs no cargo: GStreamer set-up, `scripts/macos/bundle.sh` (Developer ID when the secrets exist, otherwise ad hoc), the bundle checks, notarisation and stapling when the notarisation secrets exist, the checks again on the mounted disk image; uploads `mercury-browser-<version>-macos-arm64.dmg` and its `.sha256` | 15–30 minutes, plus Apple's notarisation time (limit 90) |
+| Publish GitHub Release | `ubuntu-24.04` | only for a push of a `v*` tag: verifies every `.sha256`, writes `SHA256SUMS`, attests build provenance for the files it lists, creates a draft release, uploads every file, then publishes it. An already published release is refused, not changed. | 3 minutes |
 
-A manual run builds both platforms and keeps the artefacts on the run without publishing anything.
+A manual run (`workflow_dispatch`) builds and uploads the artefacts to the run and publishes nothing. The signing job of a manual run is held to the `release` environment's rules like any other: started from a branch that the environment does not allow, it does not run.
+
+The macOS release is split in two because the build runs the build scripts and procedural macros of about 1,100 crates. They run on a runner that never holds a signing secret. The signing job receives only the executable and the plugin lists. A stand-in `cargo` that fails is first on its `PATH`, so nothing can rebuild there. Its secrets come only from the `release` environment, and each step receives only the secrets it uses.
 
 ### Supply-chain rules for the workflows
 
 - Every action is pinned to a full commit SHA with its version in a comment, for example `actions/checkout@3d3c42e… # v7.0.1`. Dependabot (`.github/dependabot.yml`) proposes updates weekly, all actions in one pull request.
-- The workflows' token is read-only (`contents: read`). Only the publishing job gets `contents: write`, `id-token: write`, `attestations: write` and `artifact-metadata: write`, which publishing and `actions/attest` need.
+- The workflows' token is read-only (`contents: read`). Only the publishing job gets `contents: write`, `id-token: write` and `attestations: write`, which publishing and `actions/attest` need.
 - No workflow uses `pull_request_target`. Event data that a contributor controls is never written into a `run:` script; values reach scripts through `env:`.
-- `ci.yml` uses no secrets, so pull requests, including those from forks, never see one. Only the macOS release job reads secrets, and only in the steps that need them.
+- `ci.yml` uses no secrets, so pull requests, including those from forks, never see one. Only the macOS signing job reads secrets, from the `release` environment, and only in the steps that need them; no step that runs cargo has any.
+- `scripts/ci/github-env.sh` passes exactly the variables `scripts/macos/gstreamer.sh env` sets (`MERCURY_GSTREAMER_PREFIX`, `PKG_CONFIG`, `PKG_CONFIG_LIBDIR`, a `PATH` prefix, and the unsetting of `PKG_CONFIG_PATH`) to later steps, and refuses anything else.
 - The linters and cargo-deny are official release binaries at pinned versions, downloaded by `scripts/ci/install-tools.sh`, which checks each archive's SHA-256 before unpacking it.
 
 ### What is cached
 
-- **The GStreamer packages** (`~/Library/Caches/mercury-browser/gstreamer/**/*.pkg`), keyed on `scripts/macos/gstreamer.sh`. That script holds the GStreamer version and the packages' checksums, so changing either starts a new cache. Only the downloaded `.pkg` files are kept: they come from a server outside GitHub and are a few hundred megabytes; unpacking them is quick.
+- **The GStreamer packages** (`~/Library/Caches/mercury-browser/gstreamer/**/*.pkg`), keyed on `scripts/macos/gstreamer.sh`. That script holds the GStreamer version and the packages' checksums, so changing either starts a new cache. Only the downloaded `.pkg` files are kept: they come from a server outside GitHub; unpacking them is quick. The cache is saved straight after `gstreamer.sh fetch` has verified the checksums, so a run that fails later does not make the next one download them again.
 - **Not the Cargo build directory.** A release build of the engine is roughly 10–15 GB, more than GitHub's per-repository cache allowance, so saving it would evict everything else and would take a large part of the time it saves to upload and download. The macOS job therefore builds the engine from scratch on every run. If that becomes too slow, a compiler cache such as `sccache` with a size limit is the next thing to try.
 - **Not the Cargo registry.** Downloading the crates takes a minute or two from crates.io.
 
@@ -61,9 +65,9 @@ A manual run builds both platforms and keeps the artefacts on the run without pu
 | --- | --- |
 | `make qa` | Linux quality checks (`fmt-check`, `lint`, `test`) |
 | `make qa-fast` | Fast checks: formatting, then clippy and tests for the crates `scripts/ci/light-crates.sh` lists |
-| `make lint-scripts` | Shell scripts and Workflows jobs: shellcheck and actionlint |
+| `make lint-scripts` | Scripts and Workflows jobs: shellcheck, `py_compile` and actionlint |
 | `make deny` | Dependency policy job |
-| `make app-macos` then `scripts/ci/check-macos-bundle.sh --signature adhoc "dist/Mercury Browser.app"` | the bundle checks of the macOS job |
+| `make gstreamer-macos app-macos` then `scripts/ci/check-macos-bundle.sh --signature adhoc --require-media "dist/Mercury Browser.app"` | the bundle checks of the macOS job (with `eval "$(scripts/macos/gstreamer.sh env)"` in the shell first) |
 | `scripts/ci/check-colors-screenshot.py <png>` | the smoke-test check (see below for the screenshot) |
 
 `make lint-scripts` and `make deny` need shellcheck, actionlint and cargo-deny. If they are not installed, the targets say so; `make ci-tools` downloads the pinned versions into `target/ci-tools/bin` (checksums verified, nothing installed system-wide), where both targets look first.
@@ -76,9 +80,9 @@ The smoke test, as CI runs it:
 scripts/ci/check-colors-screenshot.py /tmp/colors.png
 ```
 
-`--screenshot` does not take focus; the browser writes the PNG and exits. The checker finds the page below the browser's own toolbar by its red square, measures the square to learn the display scale, and then checks a red square at the top left, a blue one at the top right, a green bar along the bottom and white in between. It prints one line per check and exits 0 (matches), 1 (wrong picture) or 2 (not a readable PNG). It needs only Python's standard library.
+`--screenshot` does not take focus; the browser writes the PNG and exits. The checker finds the page below the browser's own toolbar by its red square, measures the square to learn the display scale, and then checks a red square at the top left, a blue one at the top right, a green bar along the bottom and white in between. It prints one line per check and exits 0 (matches), 1 (wrong picture) or 2 (not a usable PNG: truncated, corrupt, malformed, or larger than any screenshot could be). It needs only Python's standard library.
 
-`scripts/ci/check-macos-bundle.sh` checks that every Mach-O file in the bundle is arm64 only and records exactly one minimum macOS version; that the executable's equals `LSMinimumSystemVersion` and no library's is newer; that `Info.plist` passes `plutil -lint`; that `codesign --verify --deep --strict` passes with the hardened runtime on; that the entitlements are exactly the file `scripts/macos/bundle.sh` uses for that kind of signature (ad hoc or Developer ID); and that `scripts/macos/test-bundle.sh` passes. `--signature adhoc` or `--signature developer-id` also requires that kind of signature.
+`scripts/ci/check-macos-bundle.sh` checks that every Mach-O file in the bundle is arm64 only and records exactly one minimum macOS version; that the executable's equals `LSMinimumSystemVersion` and no library's is newer; that `Info.plist` passes `plutil -lint`; that `codesign --verify --deep --strict` passes with the hardened runtime on; that the entitlements are exactly the file `scripts/macos/bundle.sh` uses for that kind of signature (ad hoc or Developer ID); and that `scripts/macos/test-bundle.sh` passes. `--signature adhoc` or `--signature developer-id` also requires that kind of signature. `--require-media`, which both workflows pass, makes a bundle without its media libraries fail. It checks that `Contents/MacOS/lib` holds `libgstreamer-1.0.0.dylib` and every plugin in Servo's plugin lists. Those lists are found by `scripts/ci/servo-plugin-lists.sh` in the same way the collector finds them (`$MERCURY_SERVO_PLUGIN_LISTS`, or the resolved `servo` crate). It also checks that the executable loads `@rpath/libgstreamer-1.0.0.dylib` and has the rpath `@executable_path/lib/`, and that no Mach-O file loads a library from outside the bundle other than the system's own.
 
 ## Dependency policy
 
@@ -86,9 +90,9 @@ scripts/ci/check-colors-screenshot.py /tmp/colors.png
 
 - **Advisories.** A known vulnerability anywhere in the graph fails the check. Yanked crates fail it. Unmaintained and unsound crates fail it when the workspace depends on them directly. Each ignored advisory names the crate path that brings it in and why it cannot be fixed here:
   - `RUSTSEC-2023-0071` (the Marvin timing attack on RSA): `rsa 0.10.0-rc.19` ← `servo-script-webcrypto` 0.8.0, which pins that exact pre-release for WebCrypto.
-  - `RUSTSEC-2026-0459` (SQLite before 3.54.0 with a crafted `-wal` file): `libsqlite3-sys 0.36` ← `rusqlite 0.38` ← `servo-net` and `servo-storage` 0.8.0; the fix needs `rusqlite` 0.41.
+  - `RUSTSEC-2026-0459` (SQLite before 3.54.0 with a crafted `-wal` file): one bundled SQLite, `libsqlite3-sys 0.36`, serves Servo's own databases (`servo-net`, `servo-storage`) and `mercury-import`. The importer copies another browser's history database together with its `-wal` and opens the copy, which is the advisory's scenario with files another program wrote. The fix (`rusqlite` 0.41) cannot be taken while Servo requires `rusqlite 0.38`: `libsqlite3-sys` declares `links = "sqlite3"`, so only one version can be in the graph. The remedy is a Servo upgrade, or carrying a patched `libsqlite3-sys` that bundles SQLite 3.54.
   Review both whenever Servo is upgraded.
-- **Bans.** Several versions of one crate are allowed (the engine's graph needs them). A `*` version requirement is reported. The intended level for that is "deny". It warns for now, because cargo-deny counts the workspace's own `path` dependencies as wildcards in any crate that is not marked `publish = false`, and no crate is marked yet.
+- **Bans.** Several versions of one crate are allowed (the engine's graph needs them). A `*` version requirement is reported. The intended level for that is "deny". It warns for now, because cargo-deny counts the workspace's own `path` dependencies as wildcards in any crate that is not marked `publish = false`, and no crate is marked yet. `publish = false` is added to every crate, and the level switched to "deny", when the parallel lanes are merged.
 - **Sources.** Only crates.io. Git dependencies and other registries are refused. The vendored crates in `third_party/` are path dependencies and need no exception.
 - **Licences.** An explicit allow-list of what the graph needs. No copyleft licence is on it. A crate that offers a copyleft licence as one alternative among permissive ones passes on its permissive terms. A licence that is not on the list fails the check until someone decides about it.
 
@@ -112,7 +116,7 @@ scripts/ci/check-colors-screenshot.py /tmp/colors.png
 
 ## Release secrets
 
-The macOS release job understands these repository secrets. All are optional; none is available to pull requests or to `ci.yml`.
+The macOS signing job understands these secrets. Store them as secrets of the `release` **environment**, not as repository secrets, so that only that job can read them (see [The release environment](#the-release-environment)). All are optional; none is available to pull requests, to `ci.yml` or to any job that runs cargo.
 
 | Secret | What it is |
 | --- | --- |
@@ -123,11 +127,42 @@ The macOS release job understands these repository secrets. All are optional; no
 | `APPLE_TEAM_ID` | The ten-character team identifier |
 | `APPLE_APP_PASSWORD` | An app-specific password for that Apple ID (appleid.apple.com → Sign-In and Security) |
 
-- **Without the first three,** the app is signed ad hoc (`scripts/macos/bundle.sh`'s default), is not notarised, and the job summary says so. Setting only some of them fails the job rather than quietly building ad hoc.
-- **With them,** the certificate is imported into a keychain created for the job under the runner's temporary directory. That keychain is deleted in a final step that always runs, and the login keychain is never used. The app, its libraries and the disk image are signed with that identity, with the hardened runtime and a secure timestamp.
-- **With the last three as well,** the disk image is submitted with `xcrun notarytool submit --wait`, stapled, and its checksum written again.
+- **Without the first three,** the app is signed ad hoc (`scripts/macos/bundle.sh`'s default), is not notarised, and the job summary says so. Setting only some of them fails the job rather than quietly building ad hoc. The same holds for the last three, and notarisation secrets without signing secrets also fail.
+- **With them,** the certificate is imported into a keychain created for the job under the runner's temporary directory. That keychain is deleted in a final step that always runs, and the login keychain is never used. The app, its libraries and the disk image are signed with that identity, with the hardened runtime and a secure timestamp. The bundle is checked before anything is sent to Apple.
+- **With the last three as well,** the disk image is submitted with `xcrun notarytool submit --wait`, stapled, and its checksum written again. The stapled image is then verified (`stapler validate`, `spctl`), mounted, and the app inside checked once more.
 
 Secrets are passed only through `env:` to the steps that use them and are never printed.
+
+### The release environment
+
+The signing job declares `environment: release`. GitHub creates that environment with no rules the first time the job runs. Before the first release, the repository owner sets it up under **Settings → Environments → release**:
+
+1. **Deployment branches and tags:** choose "Selected branches and tags" and add a **tag** rule `v*`. Add no branch rule. Only a run for a `v*` tag can then use the environment. A run started from a branch, manually or otherwise, is refused before the job starts, and its secrets are never handed to that branch's code.
+2. **Required reviewers:** add the people who may approve a release (on a public repository this is available on every plan), and consider "Prevent self-review". The signing job then waits for an approval before it receives any secret.
+3. **Environment secrets:** add the six secrets above here, and delete any repository secrets of the same names.
+4. Optionally untick "Allow administrators to bypass configured protection rules".
+
+## First push
+
+Nothing in these workflows has run on GitHub yet. On the first push, watch the jobs in this order; they fail fastest and say most about the rest:
+
+1. **Workflows, Scripts, Dependency policy** (about a minute each). actionlint and the pinned shellcheck may disagree with a newer runner image. cargo-deny clones the RustSec database on every run, and an advisory published since the last local run fails it.
+2. **Fast checks, Linux and macOS** (minutes). These are the first proof that `rustup toolchain install` reads `rust-toolchain.toml` on the runners, and that the engine-free crates build on Linux.
+3. **Linux quality checks** (up to 2 hours). The first compile of the Linux-only code since the fork, including the Vulkan frame import and anything other lanes changed under `cfg(target_os = "linux")`.
+4. **macOS (Apple Silicon)** (3–4 hours). In order of likelihood, the things to check:
+   - free disk (the `df -h` lines of "Free disk space"; GitHub documents 14 GB, and the engine's build directory is far larger);
+   - memory while linking (7 GB);
+   - the GStreamer download and `github-env.sh` accepting `gstreamer.sh env`'s variables;
+   - whether the runner can render at all in the smoke test (it needs a window server and a GPU);
+   - the tests finding GStreamer through `DYLD_FALLBACK_LIBRARY_PATH`;
+   - the 330-minute limit.
+5. **The release workflow.** Its first run is the first real release, because the tag must equal `v<version>` and a manual run from a branch is refused the `release` environment. That is safe enough: nothing is published until both platforms have built, signed and passed their checks, and the release stays a draft until every file is uploaded. A failure leaves at most a draft, which can be deleted with the tag before trying again. Check, in order:
+   - the environment's approval;
+   - the certificate import (`set-key-partition-list`) and `notarytool store-credentials --keychain`;
+   - notarisation and stapling;
+   - the checks on the mounted image;
+   - the provenance attestation (public repositories only);
+   - the draft being published.
 
 ## Updating the pins
 
