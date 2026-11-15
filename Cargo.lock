@@ -5335,6 +5335,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "talaria-core",
  "tempfile",
  "thiserror 2.0.21",
  "url",

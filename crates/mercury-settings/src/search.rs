@@ -37,9 +37,70 @@ pub struct SearchEngine {
     pub suggest_template: Option<String>,
 }
 
-/// The built-in engines, the default first.
+/// The built-in engines: the default first, then the others in alphabetical order of name, so
+/// the order implies no ranking.
+///
+/// Each template is the engine's own: from its OpenSearch description where it publishes one,
+/// otherwise from the search form on its home page (Google and Bing publish no OpenSearch
+/// description), fetched on 2026-11-15. Attribution and language parameters in the published
+/// templates are left out; see the crate's report for the full sources. Keywords start with `@`,
+/// as Firefox's do, so an ordinary first word of a search is never mistaken for one and sent to
+/// a different engine.
 pub fn builtin_engines() -> Vec<SearchEngine> {
-    vec![duckduckgo()]
+    vec![
+        duckduckgo(),
+        // The search form on https://www.bing.com/: GET /search with the query in `q`.
+        engine(
+            "bing",
+            "Bing",
+            "@bing",
+            "https://www.bing.com/search?q={searchTerms}",
+            None,
+        ),
+        // https://search.brave.com/opensearch.xml
+        engine(
+            "brave",
+            "Brave Search",
+            "@brave",
+            "https://search.brave.com/search?q={searchTerms}",
+            Some("https://search.brave.com/api/suggest?q={searchTerms}"),
+        ),
+        // https://www.ecosia.org/opensearch.xml (without `&addon=opensearch`)
+        engine(
+            "ecosia",
+            "Ecosia",
+            "@ecosia",
+            "https://www.ecosia.org/search?q={searchTerms}",
+            Some("https://ac.ecosia.org/autocomplete?q={searchTerms}&type=list"),
+        ),
+        // The search form on https://www.google.com/: GET /search with the query in `q`.
+        engine(
+            "google",
+            "Google",
+            "@google",
+            "https://www.google.com/search?q={searchTerms}",
+            None,
+        ),
+        // https://cdn.startpage.com/sp/cdn/opensearch/en/opensearch.xml, linked from
+        // https://www.startpage.com/ (without `&cat=web&pl=opensearch&language=english`)
+        engine(
+            "startpage",
+            "Startpage",
+            "@startpage",
+            "https://www.startpage.com/sp/search?query={searchTerms}",
+            Some("https://www.startpage.com/osuggestions?q={searchTerms}"),
+        ),
+        // https://en.wikipedia.org/w/opensearch_desc.php
+        engine(
+            "wikipedia",
+            "Wikipedia (en)",
+            "@wikipedia",
+            "https://en.wikipedia.org/w/index.php?title=Special:Search&search={searchTerms}",
+            Some(
+                "https://en.wikipedia.org/w/api.php?action=opensearch&search={searchTerms}&namespace=0",
+            ),
+        ),
+    ]
 }
 
 fn engine(
@@ -58,6 +119,7 @@ fn engine(
     }
 }
 
+// https://duckduckgo.com/opensearch.xml
 fn duckduckgo() -> SearchEngine {
     engine(
         DEFAULT_ENGINE_ID,
@@ -79,7 +141,8 @@ enum Component {
 impl SearchEngine {
     /// Checks the template: http or https, exactly one `{searchTerms}`, a valid URL once filled.
     ///
-    /// Also refuses other `{…}` placeholders, a placeholder in the scheme or host, a template
+    /// Also refuses other `{…}` placeholders, a placeholder in the scheme or host, a user name
+    /// or password in the URL, a template
     /// over [`MAX_TEMPLATE_BYTES`], the same for `suggest_template` when present, and an id,
     /// name or keyword outside the limits documented on the fields.
     pub fn validate(&self) -> Result<(), SettingsError> {
@@ -95,6 +158,40 @@ impl SearchEngine {
                 id: self.id.clone(),
                 reason,
             })
+    }
+
+    /// The results page for `query`, encoded correctly for where the placeholder sits.
+    ///
+    /// In the query string the query is form-encoded (a space becomes `+`), exactly as the
+    /// address bar encodes a DuckDuckGo search today; in the path or the fragment every byte
+    /// other than `A-Z a-z 0-9 - . _ ~` is percent-encoded. A query of `.` or `..` filling a
+    /// whole path segment cannot be placed (a URL parser resolves it away) and is an error.
+    pub fn search_url(&self, query: &str) -> Result<url::Url, SettingsError> {
+        let component = check_template(&self.url_template).map_err(|reason| {
+            SettingsError::InvalidSearchEngine {
+                id: self.id.clone(),
+                reason,
+            }
+        })?;
+        let encoded = match component {
+            Component::Query => url::form_urlencoded::byte_serialize(query.as_bytes()).collect(),
+            Component::Path | Component::Fragment => percent_encode_strict(query),
+        };
+        if component == Component::Path
+            && matches!(query, "." | "..")
+            && fills_a_path_segment(&self.url_template)
+        {
+            return Err(SettingsError::UnplaceableQuery {
+                id: self.id.clone(),
+            });
+        }
+        let filled = self
+            .url_template
+            .replacen(SEARCH_TERMS_PLACEHOLDER, &encoded, 1);
+        url::Url::parse(&filled).map_err(|error| SettingsError::InvalidSearchEngine {
+            id: self.id.clone(),
+            reason: format!("not a valid URL once filled: {error}"),
+        })
     }
 
     fn check_identity(&self) -> Result<(), String> {
@@ -176,7 +273,33 @@ fn check_template(template: &str) -> Result<Component, String> {
     if url.host_str().is_none_or(str::is_empty) {
         return Err("the template has no host".to_owned());
     }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("the template must not carry a user name or password".to_owned());
+    }
     Ok(component)
+}
+
+/// Percent-encodes every byte except the unreserved characters of RFC 3986.
+fn percent_encode_strict(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+/// Whether the placeholder is a whole path segment: `/{searchTerms}` followed by `/`, `?`, `#`
+/// or the end.
+fn fills_a_path_segment(template: &str) -> bool {
+    template
+        .split_once(SEARCH_TERMS_PLACEHOLDER)
+        .is_some_and(|(before, after)| {
+            before.ends_with('/') && (after.is_empty() || after.starts_with(['/', '?', '#']))
+        })
 }
 
 /// The custom engines that can be used alongside the built-in ones, and a repair for each one
@@ -235,6 +358,24 @@ pub(crate) fn usable_custom_engines(custom: &[SearchEngine]) -> (Vec<SearchEngin
 }
 
 impl SearchSettings {
+    /// `"w rust book"` → (Wikipedia, "rust book") when `w` is an engine's keyword.
+    ///
+    /// The keyword must be the first word, compared case-insensitively, and be followed by
+    /// whitespace and a non-empty query; the query is returned trimmed. A keyword alone, or a
+    /// word that merely starts with a keyword (`w.org`), is not a match.
+    pub fn match_keyword<'a>(&self, input: &'a str) -> Option<(SearchEngine, &'a str)> {
+        let (word, rest) = input.trim_start().split_once(char::is_whitespace)?;
+        let query = rest.trim();
+        if word.is_empty() || query.is_empty() {
+            return None;
+        }
+        let word = word.to_lowercase();
+        self.engines()
+            .into_iter()
+            .find(|engine| !engine.keyword.is_empty() && engine.keyword.to_lowercase() == word)
+            .map(|engine| (engine, query))
+    }
+
     /// Built-in engines followed by valid custom ones; ids and keywords unique.
     pub fn engines(&self) -> Vec<SearchEngine> {
         let mut engines = builtin_engines();

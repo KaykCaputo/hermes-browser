@@ -12,4 +12,5 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+talaria-core = { path = "../talaria-core" }
 tempfile.workspace = true
