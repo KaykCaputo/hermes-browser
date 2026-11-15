@@ -46,21 +46,34 @@ and keep their own licences; the table below lists them.
   so libraries signed by someone else load. A Developer ID build has library validation on and
   loads only libraries signed by its own team; to use a replaced library with it, sign the whole
   application ad hoc as above (it then loses its Developer ID signature and notarisation).
-- **Corresponding source.** GStreamer 1.28.9:
-  https://gstreamer.freedesktop.org/src/gstreamer/gstreamer-1.28.9.tar.xz,
-  https://gstreamer.freedesktop.org/src/gst-plugins-base/gst-plugins-base-1.28.9.tar.xz,
-  https://gstreamer.freedesktop.org/src/gst-plugins-good/gst-plugins-good-1.28.9.tar.xz,
-  https://gstreamer.freedesktop.org/src/gst-plugins-bad/gst-plugins-bad-1.28.9.tar.xz and
-  https://gstreamer.freedesktop.org/src/gst-libav/gst-libav-1.28.9.tar.xz. Every other library
-  was built by GStreamer's build system, cerbero, at commit
-  `efda998b6e8032a8ed785a70000a63d337898f82` ("Build 1.28.9 release",
+- **Corresponding source.** Every bundled library was built by GStreamer's build system,
+  cerbero, at commit `efda998b6e8032a8ed785a70000a63d337898f82` ("Build 1.28.9 release",
   https://gitlab.freedesktop.org/gstreamer/cerbero/-/tree/efda998b6e8032a8ed785a70000a63d337898f82);
-  its `recipes/<project>.recipe` names each project's source URL, checksum and patches. The
-  versions below are those the packages record in `share/versions.txt`. FFmpeg, for example, is
-  https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz (SHA-256
-  `40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6`) with the patches in
-  cerbero's `recipes/ffmpeg/`. The bundled build records `-Dnonfree=disabled -Dversion3=disabled`
-  and reports its licence as "LGPL version 2.1 or later".
+  its `recipes/<project>.recipe` names each project's source, checksum and patches, and the
+  patches themselves are in `recipes/<project>/` at that commit. The versions in the table below
+  are those the packages record in `share/versions.txt`. For the LGPL projects:
+  - GStreamer 1.28.9, built from these releases without patches:
+    https://gstreamer.freedesktop.org/src/gstreamer/gstreamer-1.28.9.tar.xz,
+    https://gstreamer.freedesktop.org/src/gst-plugins-base/gst-plugins-base-1.28.9.tar.xz,
+    https://gstreamer.freedesktop.org/src/gst-plugins-good/gst-plugins-good-1.28.9.tar.xz,
+    https://gstreamer.freedesktop.org/src/gst-plugins-bad/gst-plugins-bad-1.28.9.tar.xz and
+    https://gstreamer.freedesktop.org/src/gst-libav/gst-libav-1.28.9.tar.xz.
+  - GLib 2.82.4: https://download.gnome.org/sources/glib/2.82/glib-2.82.4.tar.xz (the recipe's SHA-256
+    `37dd0877fe964cd15e9a2710b044a1830fb1bd93652a6d0cb6b8b2dff187c709`), **with 14 patches** from
+    cerbero's `recipes/glib/` (GIO module paths, platform build fixes).
+  - FFmpeg 7.1: https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz (the recipe's SHA-256
+    `40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6`), **with the patches** in
+    cerbero's `recipes/ffmpeg/` (among them a Meson build). The bundled build records
+    `-Dnonfree=disabled -Dversion3=disabled` and reports its licence as "LGPL version 2.1 or later".
+  - libnice 0.1.24 (LGPL-2.1-or-later or MPL-1.1):
+    https://libnice.freedesktop.org/releases/libnice-0.1.24.tar.gz (the recipe's SHA-256
+    `cfb5e8e778534f2f5b3c6f4958a1eb057c6b95c537c0f100817a537cf5d64fcc`), without patches.
+  - proxy-libintl 0.5: https://github.com/frida/proxy-libintl/archive/refs/tags/0.5.tar.gz
+    (the recipe's SHA-256 `f7a1cbd7579baaf575c66f9d99fb6295e9b0684a28b095967cfda17857595303`), with one patch
+    from cerbero's `recipes/proxy-libintl/`.
+
+  The other bundled projects are under permissive licences (see the table) with no source
+  obligation.
 - **Licence texts.** The LGPL version 2.1 is in `LICENSES/LGPL-2.1.txt` (the LGPL 2.1 permits use
   under any later version, which covers the "LGPL-2.0-or-later" projects too). Each project's
   own licence files, as the packages ship them under `share/licenses/<project>/`, are copied into
