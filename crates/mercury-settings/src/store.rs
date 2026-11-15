@@ -6,6 +6,16 @@
 //! version enough to overwrite it. A file that cannot be understood is moved aside to
 //! `<name>.damaged-<n>` (the first free `n`) before anything replaces it.
 //!
+//! The version is read first, from the start of the file, before the size limit or anything
+//! else is checked, so a file from a newer version is recognised and left alone whatever its
+//! size or content. Two edges of that rule:
+//!
+//! - A file that starts with a byte-order mark (`EF BB BF`) is not JSON by RFC 8259's rule for
+//!   writers and is treated as damaged (moved aside), not read.
+//! - When `format_version` is not the first member (never so in a file this crate writes), the
+//!   whole document must be scanned to find it, and that scan honours the size limit: such a
+//!   file over the limit is treated as damaged, even if it would have said it was newer.
+//!
 //! A version bump is needed for any change an older reader would misread or reject: a new enum
 //! value (an older reader would call the file damaged), a renamed or retyped field. Adding a
 //! field with a default needs none.

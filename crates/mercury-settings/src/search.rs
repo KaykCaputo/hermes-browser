@@ -43,10 +43,10 @@ pub struct SearchEngine {
 /// the order implies no ranking.
 ///
 /// Each template is the engine's own: from its OpenSearch description where it publishes one,
-/// otherwise from the search form on its home page, fetched on 2026-11-15. Attribution and language parameters in the published
-/// templates are left out; see the crate's report for the full sources. Keywords start with `@`,
-/// as Firefox's do, so an ordinary first word of a search is never mistaken for one and sent to
-/// a different engine.
+/// otherwise from the search form on its home page, fetched on 2026-11-15. Attribution and
+/// language parameters in the published templates are left out; see the crate's report for
+/// the full sources. Keywords start with `@`, as Firefox's do, so an ordinary first word of a
+/// search is never mistaken for one and sent to a different engine.
 pub fn builtin_engines() -> Vec<SearchEngine> {
     vec![
         duckduckgo(),
@@ -103,9 +103,10 @@ pub fn builtin_engines() -> Vec<SearchEngine> {
             "Wikipedia (en)",
             "@wikipedia",
             "https://en.wikipedia.org/w/index.php?title=Special:Search&search={searchTerms}",
-            Some(
-                "https://en.wikipedia.org/w/api.php?action=opensearch&search={searchTerms}&namespace=0",
-            ),
+            Some(concat!(
+                "https://en.wikipedia.org/w/api.php",
+                "?action=opensearch&search={searchTerms}&namespace=0"
+            )),
         ),
     ]
 }

@@ -261,7 +261,8 @@ fn a_second_crash_before_any_save_does_not_lose_the_session() {
 fn the_session_returned_is_sanitized() {
     let dir = tempfile::tempdir().expect("a profile");
     let raw = r#"{"format_version": 1, "exited_cleanly": false, "windows": [
-        {"tabs": [{"url": "javascript:alert(1)"}, {"url": "https://ok.example/", "zoom_percent": 9000}],
+        {"tabs": [{"url": "javascript:alert(1)"},
+                  {"url": "https://ok.example/", "zoom_percent": 9000}],
          "active_tab": 7}]}"#;
     fs::write(session_path(dir.path()), raw).expect("seed");
 
@@ -348,7 +349,11 @@ fn a_newer_session_is_left_alone_and_never_overwritten() {
     let saved = store.save(&example(), false);
 
     assert!(
-        matches!(saved, Err(SettingsError::NewerVersion { found, .. }) if found == SESSION_FORMAT_VERSION + 1),
+        matches!(
+            saved,
+            Err(SettingsError::NewerVersion { found, .. })
+                if found == SESSION_FORMAT_VERSION + 1
+        ),
         "{saved:?}"
     );
     assert_eq!(

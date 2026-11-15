@@ -550,3 +550,20 @@ fn the_largest_valid_settings_fit_under_the_file_limit() {
         }
     );
 }
+
+#[test]
+fn a_file_starting_with_a_byte_order_mark_is_damaged() {
+    assert_damaged(b"\xEF\xBB\xBF{\"format_version\": 1}");
+}
+
+#[test]
+fn a_newer_file_over_the_limit_whose_version_is_not_first_is_damaged() {
+    // The documented edge: finding a late version needs a scan, and the scan honours the limit.
+    let limit = usize::try_from(MAX_SETTINGS_FILE_BYTES).expect("fits");
+    let mut text = b"{\"homepage\": \"".to_vec();
+    text.resize(limit + 10, b'p');
+    text.extend_from_slice(
+        format!("\", \"format_version\": {}}}", SETTINGS_FORMAT_VERSION + 1).as_bytes(),
+    );
+    assert_damaged(&text);
+}

@@ -29,6 +29,14 @@ pub const MAX_WINDOW_SIDE: u32 = 32_768;
 pub const MAX_WINDOW_COORDINATE: u32 = 65_536;
 
 /// Everything needed to put the windows and tabs back.
+///
+/// Its `Deserialize` is bounded, for any caller: at most [`MAX_RESTORED_TABS`] windows and
+/// [`MAX_CLOSED_TABS`] closed tabs are kept and the rest of each list is skipped unread; a tab
+/// URL longer than [`crate::MAX_URL_BYTES`] is read as empty and a title is cut to
+/// [`MAX_TITLE_BYTES`] (see [`TabSnapshot`]). Within [`crate::SessionStore`] the
+/// [`MAX_RESTORED_TABS`] tab cap is shared by all the windows of a file; a caller decoding a
+/// snapshot directly gets that cap per window instead. Decoding never sanitizes: call
+/// [`sanitized`](Self::sanitized).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionSnapshot {
@@ -43,6 +51,9 @@ pub struct SessionSnapshot {
 }
 
 /// One window.
+///
+/// Its `Deserialize` keeps at most [`MAX_RESTORED_TABS`] tabs (shared with the other windows
+/// of the same file when read by [`crate::SessionStore`]) and skips the rest unread.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowSnapshot {
@@ -74,6 +85,9 @@ pub struct WindowBounds {
 }
 
 /// One tab.
+///
+/// Its `Deserialize` reads a URL longer than [`crate::MAX_URL_BYTES`] as empty (so sanitizing
+/// drops the tab) and cuts a title to [`MAX_TITLE_BYTES`] at a character boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TabSnapshot {
@@ -121,8 +135,10 @@ impl SessionSnapshot {
     /// - Tabs are kept only if their URL is `http`, `https`, `file` or `about` and at most
     ///   [`crate::MAX_URL_BYTES`] long before and after parsing; `javascript:`, `data:`, `blob:`,
     ///   other schemes and unparsable URLs are dropped. The URL kept is the parsed URL's text,
-    ///   with any user name and password removed: a session file never holds a password. Titles are cut to [`MAX_TITLE_BYTES`] and zoom clamped to
-    ///   [`MIN_ZOOM_PERCENT`]..=[`MAX_ZOOM_PERCENT`].
+    ///   with any user name and password removed. That is all that is removed: a token in the
+    ///   query string or the fragment (`?token=…`, `#access_token=…`) is kept, so a session
+    ///   file can still hold secrets a site put in its URLs. Titles are cut to
+    ///   [`MAX_TITLE_BYTES`] and zoom clamped to [`MIN_ZOOM_PERCENT`]..=[`MAX_ZOOM_PERCENT`].
     /// - Windows left without tabs are dropped. `active_tab` is clamped into range; if the
     ///   active tab itself was dropped, the nearest surviving tab to its right becomes active,
     ///   or failing that the nearest to its left.

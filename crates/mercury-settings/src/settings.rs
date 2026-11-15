@@ -25,6 +25,10 @@ pub const MAX_ORIGIN_BYTES: usize = 300;
 
 /// Everything the user can set. Every field has a default, so a file that lacks some of them,
 /// or is empty, still loads.
+///
+/// Its `Deserialize` is bounded: the custom engines and the "never save" list keep at most their
+/// limits and skip the rest unread, for any caller. Decoding never validates: call
+/// [`validated`](Self::validated) (as [`crate::SettingsStore::load`] does).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -67,8 +71,9 @@ pub enum StartupBehavior {
 pub struct SearchSettings {
     /// The id of the engine used for address-bar searches.
     pub default_engine: String,
-    /// Engines the user added, after the built-in ones. At most [`MAX_CUSTOM_ENGINES`](crate::MAX_CUSTOM_ENGINES) are read
-    /// from a file.
+    /// Engines the user added, after the built-in ones. Its `Deserialize` keeps at most
+    /// [`MAX_CUSTOM_ENGINES`](crate::MAX_CUSTOM_ENGINES) and skips the rest unread, for any
+    /// caller.
     #[serde(deserialize_with = "bounded::custom_engines")]
     pub custom_engines: Vec<SearchEngine>,
     /// Whether to fetch search suggestions while typing. Off by default because it sends every
@@ -185,8 +190,9 @@ pub struct ClearOnExit {
 pub struct PasswordSettings {
     /// Offer to save passwords.
     pub offer_to_save: bool,
-    /// Origins (`scheme://host[:port]`) for which saving was declined for good. At most
-    /// [`MAX_NEVER_SAVE_ORIGINS`] are read from a file.
+    /// Origins (`scheme://host[:port]`) for which saving was declined for good. Its
+    /// `Deserialize` keeps at most [`MAX_NEVER_SAVE_ORIGINS`] and skips the rest unread, for
+    /// any caller.
     #[serde(deserialize_with = "bounded::never_save_origins")]
     pub never_save_origins: Vec<String>,
 }
@@ -378,7 +384,8 @@ pub fn homepage_url(input: &str) -> Option<String> {
 
 /// The parsed text of `url` if a session may hold it for a tab: an `http`, `https`, `file` or
 /// `about` URL of at most [`MAX_URL_BYTES`] before and after parsing, with any user name and
-/// password removed, so a session file never holds a password.
+/// password removed. Only the user-info part is removed: tokens in the query string or the
+/// fragment are kept.
 pub(crate) fn session_url(url: &str) -> Option<String> {
     if url.len() > MAX_URL_BYTES {
         return None;

@@ -91,7 +91,11 @@ fn the_built_in_templates_are_the_published_ones() {
             "https://www.ecosia.org/search?q={searchTerms}",
             Some("https://ac.ecosia.org/autocomplete?q={searchTerms}&type=list"),
         ),
-        ("google", "https://www.google.com/search?q={searchTerms}", None),
+        (
+            "google",
+            "https://www.google.com/search?q={searchTerms}",
+            None,
+        ),
         (
             "startpage",
             "https://www.startpage.com/sp/search?query={searchTerms}",
@@ -100,9 +104,10 @@ fn the_built_in_templates_are_the_published_ones() {
         (
             "wikipedia",
             "https://en.wikipedia.org/w/index.php?title=Special:Search&search={searchTerms}",
-            Some(
-                "https://en.wikipedia.org/w/api.php?action=opensearch&search={searchTerms}&namespace=0",
-            ),
+            Some(concat!(
+                "https://en.wikipedia.org/w/api.php",
+                "?action=opensearch&search={searchTerms}&namespace=0"
+            )),
         ),
     ]
     .map(|(id, url, suggest)| (id.to_owned(), url.to_owned(), suggest.map(str::to_owned)))

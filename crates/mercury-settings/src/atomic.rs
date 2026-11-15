@@ -1,5 +1,6 @@
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy
-// of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// of the MPL was not distributed with this file, You can obtain one at
+// https://mozilla.org/MPL/2.0/.
 //
 // Adapted from Goddv/Zervo (https://github.com/Goddv/Zervo) at commit `86cb7126`,
 // `zervo-core/src/store.rs` (`write_private`, lines 80-123), MPL-2.0. Changes: the directory is
