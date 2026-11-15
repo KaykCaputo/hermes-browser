@@ -1,20 +1,17 @@
 // Adapted from Servo's servoshell, https://github.com/servo/servo, tag `v0.8.0`,
 // path `ports/servoshell/desktop/keyutils.rs`, licensed under MPL-2.0.
-// Changes: the conversions take winit's `Key`, `PhysicalKey` and `KeyLocation` instead of a
-// whole `KeyEvent` (so they can be unit-tested), dead keys map to `NamedKey::Dead` instead of
-// `Unidentified`, and the Servo `KeyboardEvent` constructor, modifier conversion and the
-// `CMD_OR_*` constants are left out because Mercury builds its own engine-neutral event.
+// Changes: the conversions take winit's `Key` and `PhysicalKey` instead of a whole `KeyEvent`
+// (so they can be unit-tested), dead keys map to `NamedKey::Dead` instead of `Unidentified`,
+// and the location mapping, the Servo `KeyboardEvent` constructor, the modifier conversion and
+// the `CMD_OR_*` constants are left out because Mercury builds its own engine-neutral event.
 
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use servo::{Code, Key, Location, NamedKey};
+use servo::{Code, Key, NamedKey};
 use slint::winit_030::winit;
-use winit::keyboard::{
-    Key as WinitKey, KeyCode, KeyLocation as WinitKeyLocation, NamedKey as WinitNamedKey,
-    PhysicalKey,
-};
+use winit::keyboard::{Key as WinitKey, KeyCode, NamedKey as WinitNamedKey, PhysicalKey};
 
 /// The W3C `KeyboardEvent.key` value of a winit logical key.
 #[expect(deprecated)]
@@ -334,16 +331,6 @@ pub(crate) fn key_from_winit(logical_key: &WinitKey) -> Key {
         WinitNamedKey::ZoomOut => Key::Named(NamedKey::ZoomOut),
         WinitNamedKey::ZoomToggle => Key::Named(NamedKey::ZoomToggle),
         _ => Key::Named(NamedKey::Unidentified),
-    }
-}
-
-/// The W3C `KeyboardEvent.location` of a winit key location.
-pub(crate) fn location_from_winit(location: WinitKeyLocation) -> Location {
-    match location {
-        WinitKeyLocation::Left => Location::Left,
-        WinitKeyLocation::Numpad => Location::Numpad,
-        WinitKeyLocation::Right => Location::Right,
-        WinitKeyLocation::Standard => Location::Standard,
     }
 }
 

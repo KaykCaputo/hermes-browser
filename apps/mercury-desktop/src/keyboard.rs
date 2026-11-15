@@ -2,7 +2,6 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use mercury_ui::MainWindow;
-use servo::Location;
 use slint::ComponentHandle;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use talaria_core::{
@@ -10,13 +9,11 @@ use talaria_core::{
     KeyState, KeyboardInput, KeyboardModifiers, TabId,
 };
 use winit::event::{ElementState, Ime, WindowEvent};
-use winit::keyboard::{
-    Key, KeyLocation as WinitKeyLocation, ModifiersState, NamedKey, PhysicalKey,
-};
+use winit::keyboard::{Key, KeyLocation as WinitKeyLocation, ModifiersState, PhysicalKey};
 use winit::window::Theme;
 
 use crate::keyutils;
-use crate::shortcuts::{exits_fullscreen, handle_browser_shortcut};
+use crate::shortcuts::{ShortcutKeys, handle_browser_shortcut};
 
 pub(crate) fn connect_native_keyboard_input(
     window: &MainWindow,
@@ -26,7 +23,7 @@ pub(crate) fn connect_native_keyboard_input(
     let weak_window = window.as_weak();
     let mut modifiers = ModifiersState::empty();
     let mut composition_tab_id: Option<TabId> = None;
-    let mut escape_exited_fullscreen = false;
+    let mut shortcut_keys = ShortcutKeys::default();
 
     window
         .window()
@@ -40,29 +37,11 @@ pub(crate) fn connect_native_keyboard_input(
                     modifiers = changed.state();
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
-                    let page_fullscreen = controller.borrow().active_state().is_fullscreen();
-                    if event.state == ElementState::Pressed
-                        && exits_fullscreen(&event.logical_key, page_fullscreen)
-                    {
-                        controller
-                            .borrow_mut()
-                            .queue_command(BrowserCommand::ExitFullscreen);
-                        escape_exited_fullscreen = true;
-                        window.window().request_redraw();
-                        return EventResult::PreventDefault;
-                    }
-                    if event.state == ElementState::Released
-                        && escape_exited_fullscreen
-                        && matches!(event.logical_key, Key::Named(NamedKey::Escape))
-                    {
-                        escape_exited_fullscreen = false;
-                        return EventResult::PreventDefault;
-                    }
-
                     if handle_browser_shortcut(
                         &window,
                         &controller,
                         &web_view_focused,
+                        &mut shortcut_keys,
                         event,
                         modifiers,
                     ) {
@@ -104,6 +83,8 @@ pub(crate) fn connect_native_keyboard_input(
                     window.window().request_redraw();
                 }
                 WindowEvent::Focused(false) => {
+                    // Key-ups that happen while another window has focus never arrive.
+                    shortcut_keys.clear();
                     dismiss_composition(&controller, &mut composition_tab_id);
                 }
                 _ => {}
@@ -163,11 +144,11 @@ pub(crate) fn logical_key_string(key: &Key) -> String {
 }
 
 fn key_location(location: WinitKeyLocation) -> KeyLocation {
-    match keyutils::location_from_winit(location) {
-        Location::Left => KeyLocation::Left,
-        Location::Right => KeyLocation::Right,
-        Location::Numpad => KeyLocation::Numpad,
-        Location::Standard => KeyLocation::Standard,
+    match location {
+        WinitKeyLocation::Standard => KeyLocation::Standard,
+        WinitKeyLocation::Left => KeyLocation::Left,
+        WinitKeyLocation::Right => KeyLocation::Right,
+        WinitKeyLocation::Numpad => KeyLocation::Numpad,
     }
 }
 
@@ -276,7 +257,7 @@ mod tests {
 
     #[test]
     fn arrow_keys_and_function_keys_map_to_w3c_names() {
-        use winit::keyboard::KeyCode;
+        use winit::keyboard::{KeyCode, NamedKey};
 
         assert_eq!(
             logical_key_string(&Key::Named(NamedKey::ArrowLeft)),
@@ -327,9 +308,14 @@ mod tests {
     }
 
     #[test]
-    fn key_locations_map_through_the_w3c_location() {
-        assert_eq!(key_location(WinitKeyLocation::Numpad), KeyLocation::Numpad);
+    fn every_key_location_maps_to_its_core_location() {
+        assert_eq!(
+            key_location(WinitKeyLocation::Standard),
+            KeyLocation::Standard
+        );
+        assert_eq!(key_location(WinitKeyLocation::Left), KeyLocation::Left);
         assert_eq!(key_location(WinitKeyLocation::Right), KeyLocation::Right);
+        assert_eq!(key_location(WinitKeyLocation::Numpad), KeyLocation::Numpad);
     }
 
     #[test]

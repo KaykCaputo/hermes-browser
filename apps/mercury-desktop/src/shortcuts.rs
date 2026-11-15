@@ -1,11 +1,12 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 
 use mercury_ui::MainWindow;
 use slint::ComponentHandle;
 use slint::winit_030::winit;
 use talaria_core::{BrowserCommand, BrowserController};
 use winit::event::ElementState;
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 
 use crate::ui_sync::sync_ui;
 
@@ -42,6 +43,82 @@ pub(crate) enum ShortcutAction {
     ZoomOut,
     ZoomReset,
     Quit,
+    /// Escape while the active tab's page is fullscreen.
+    ExitFullscreen,
+}
+
+impl ShortcutAction {
+    /// Whether holding the keys down repeats the action. Repeats of other shortcuts are still
+    /// consumed, so the page never sees them, but do nothing.
+    pub(crate) const fn repeats(self) -> bool {
+        matches!(
+            self,
+            Self::ZoomIn | Self::ZoomOut | Self::NextTab | Self::PreviousTab
+        )
+    }
+}
+
+/// What to do with one key event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyDisposition {
+    /// Not a browser shortcut: give it to whoever has focus.
+    Forward,
+    /// Part of a shortcut that has already run: swallow it.
+    Consume,
+    /// Run this shortcut and swallow the event.
+    Run(ShortcutAction),
+}
+
+/// Pairs key releases (and auto-repeats) with presses: a release is swallowed exactly when its
+/// press ran a shortcut, whatever modifiers are held by then, and every other release is
+/// forwarded. Shortcuts only start on a first press, never on a repeat.
+#[derive(Debug, Default)]
+pub(crate) struct ShortcutKeys {
+    consumed: HashSet<PhysicalKey>,
+}
+
+impl ShortcutKeys {
+    /// `action` is the shortcut the key would trigger with the modifiers held right now.
+    pub(crate) fn press(
+        &mut self,
+        key: PhysicalKey,
+        repeat: bool,
+        action: Option<ShortcutAction>,
+    ) -> KeyDisposition {
+        if repeat {
+            if !self.consumed.contains(&key) {
+                return KeyDisposition::Forward;
+            }
+            return match action {
+                Some(action) if action.repeats() => KeyDisposition::Run(action),
+                _ => KeyDisposition::Consume,
+            };
+        }
+
+        match action {
+            Some(action) => {
+                self.consumed.insert(key);
+                KeyDisposition::Run(action)
+            }
+            None => {
+                self.consumed.remove(&key);
+                KeyDisposition::Forward
+            }
+        }
+    }
+
+    pub(crate) fn release(&mut self, key: PhysicalKey) -> KeyDisposition {
+        if self.consumed.remove(&key) {
+            KeyDisposition::Consume
+        } else {
+            KeyDisposition::Forward
+        }
+    }
+
+    /// Forgets every pressed shortcut key, for when key-ups can no longer be relied on.
+    pub(crate) fn clear(&mut self) {
+        self.consumed.clear();
+    }
 }
 
 /// Maps a key press to a browser shortcut. "Primary" is Cmd on macOS and Ctrl elsewhere; the
@@ -135,28 +212,51 @@ pub(crate) fn exits_fullscreen(key: &Key, page_fullscreen: bool) -> bool {
     page_fullscreen && matches!(key, Key::Named(NamedKey::Escape))
 }
 
+/// The browser action for a key press, including Escape while a page is fullscreen.
+pub(crate) fn browser_action(
+    key: &Key,
+    modifiers: ModifiersState,
+    platform: Platform,
+    page_fullscreen: bool,
+) -> Option<ShortcutAction> {
+    if exits_fullscreen(key, page_fullscreen) {
+        return Some(ShortcutAction::ExitFullscreen);
+    }
+    shortcut_action(key, modifiers, platform)
+}
+
+/// Returns true if the event belongs to a browser shortcut and must not reach the page.
 pub(crate) fn handle_browser_shortcut(
     window: &MainWindow,
     controller: &RefCell<BrowserController>,
     web_view_focused: &Cell<bool>,
+    shortcut_keys: &mut ShortcutKeys,
     event: &winit::event::KeyEvent,
     modifiers: ModifiersState,
 ) -> bool {
-    let platform = Platform::current();
-    let Some(action) = shortcut_action(&event.logical_key, modifiers, platform) else {
-        return false;
+    let disposition = match event.state {
+        ElementState::Released => shortcut_keys.release(event.physical_key),
+        ElementState::Pressed => {
+            let platform = Platform::current();
+            let page_fullscreen = controller.borrow().active_state().is_fullscreen();
+            let action = browser_action(&event.logical_key, modifiers, platform, page_fullscreen)
+                .filter(|_| {
+                    !(yields_to_focused_text(&event.logical_key, platform)
+                        && (web_view_focused.get() || window.get_text_input_focused()))
+                });
+            shortcut_keys.press(event.physical_key, event.repeat, action)
+        }
     };
-    if yields_to_focused_text(&event.logical_key, platform)
-        && (web_view_focused.get() || window.get_text_input_focused())
-    {
-        return false;
-    }
 
-    if event.state == ElementState::Pressed {
-        run_shortcut(window, controller, web_view_focused, action);
-        window.window().request_redraw();
+    match disposition {
+        KeyDisposition::Forward => false,
+        KeyDisposition::Consume => true,
+        KeyDisposition::Run(action) => {
+            run_shortcut(window, controller, web_view_focused, action);
+            window.window().request_redraw();
+            true
+        }
     }
-    true
 }
 
 fn run_shortcut(
@@ -221,6 +321,9 @@ fn run_shortcut(
                 log::warn!("could not quit: {error}");
             }
         }
+        ShortcutAction::ExitFullscreen => controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::ExitFullscreen),
     }
 }
 
@@ -236,6 +339,7 @@ fn unfocus_web_view(controller: &RefCell<BrowserController>, web_view_focused: &
 mod tests {
     use super::*;
     use ShortcutAction::*;
+    use winit::keyboard::KeyCode;
 
     const NONE: ModifiersState = ModifiersState::empty();
     const CMD: ModifiersState = ModifiersState::SUPER;
@@ -431,6 +535,134 @@ mod tests {
         assert!(exits_fullscreen(&named(NamedKey::Escape), true));
         assert!(!exits_fullscreen(&named(NamedKey::Escape), false));
         assert!(!exits_fullscreen(&character("q"), true));
+        assert_eq!(
+            browser_action(&named(NamedKey::Escape), NONE, Platform::MacOs, true),
+            Some(ExitFullscreen)
+        );
+        assert_eq!(
+            browser_action(&named(NamedKey::Escape), NONE, Platform::MacOs, false),
+            None
+        );
+        assert_eq!(
+            browser_action(&character("t"), CMD, Platform::MacOs, true),
+            Some(NewTab)
+        );
+    }
+
+    #[test]
+    fn only_zoom_and_tab_cycling_repeat() {
+        let expectations = [
+            (NewTab, false),
+            (CloseTab, false),
+            (NextTab, true),
+            (PreviousTab, true),
+            (SelectTab(0), false),
+            (SelectTab(7), false),
+            (SelectLastTab, false),
+            (Back, false),
+            (Forward, false),
+            (Reload, false),
+            (FocusAddressBar, false),
+            (ZoomIn, true),
+            (ZoomOut, true),
+            (ZoomReset, false),
+            (Quit, false),
+            (ExitFullscreen, false),
+        ];
+        for (action, repeats) in expectations {
+            // Exhaustive, so a new variant cannot be added without deciding here.
+            match action {
+                NewTab | CloseTab | NextTab | PreviousTab | SelectTab(_) | SelectLastTab | Back
+                | Forward | Reload | FocusAddressBar | ZoomIn | ZoomOut | ZoomReset | Quit
+                | ExitFullscreen => {}
+            }
+            assert_eq!(action.repeats(), repeats, "{action:?}");
+        }
+    }
+
+    const KEY_R: PhysicalKey = PhysicalKey::Code(KeyCode::KeyR);
+    const KEY_T: PhysicalKey = PhysicalKey::Code(KeyCode::KeyT);
+    const KEY_EQUAL: PhysicalKey = PhysicalKey::Code(KeyCode::Equal);
+    const COMMAND: PhysicalKey = PhysicalKey::Code(KeyCode::SuperLeft);
+
+    #[test]
+    fn a_shortcut_key_released_after_its_modifier_is_still_swallowed() {
+        let mut keys = ShortcutKeys::default();
+
+        assert_eq!(keys.press(COMMAND, false, None), KeyDisposition::Forward);
+        assert_eq!(
+            keys.press(KEY_R, false, Some(Reload)),
+            KeyDisposition::Run(Reload)
+        );
+        assert_eq!(keys.release(COMMAND), KeyDisposition::Forward);
+        assert_eq!(keys.release(KEY_R), KeyDisposition::Consume);
+    }
+
+    #[test]
+    fn a_key_pressed_before_its_modifier_gets_its_release() {
+        let mut keys = ShortcutKeys::default();
+
+        assert_eq!(keys.press(KEY_R, false, None), KeyDisposition::Forward);
+        assert_eq!(keys.press(COMMAND, false, None), KeyDisposition::Forward);
+        assert_eq!(keys.release(KEY_R), KeyDisposition::Forward);
+        assert_eq!(keys.release(COMMAND), KeyDisposition::Forward);
+    }
+
+    #[test]
+    fn a_release_is_swallowed_only_once() {
+        let mut keys = ShortcutKeys::default();
+        keys.press(KEY_R, false, Some(Reload));
+
+        assert_eq!(keys.release(KEY_R), KeyDisposition::Consume);
+        assert_eq!(keys.press(KEY_R, false, None), KeyDisposition::Forward);
+        assert_eq!(keys.release(KEY_R), KeyDisposition::Forward);
+    }
+
+    #[test]
+    fn repeats_run_only_repeating_actions() {
+        let mut keys = ShortcutKeys::default();
+        keys.press(KEY_T, false, Some(NewTab));
+        keys.press(KEY_EQUAL, false, Some(ZoomIn));
+
+        assert_eq!(
+            keys.press(KEY_T, true, Some(NewTab)),
+            KeyDisposition::Consume
+        );
+        assert_eq!(
+            keys.press(KEY_EQUAL, true, Some(ZoomIn)),
+            KeyDisposition::Run(ZoomIn)
+        );
+    }
+
+    #[test]
+    fn repeats_of_a_shortcut_stay_swallowed_after_the_modifier_is_released() {
+        let mut keys = ShortcutKeys::default();
+        keys.press(KEY_EQUAL, false, Some(ZoomIn));
+
+        assert_eq!(keys.press(KEY_EQUAL, true, None), KeyDisposition::Consume);
+        assert_eq!(keys.release(KEY_EQUAL), KeyDisposition::Consume);
+    }
+
+    #[test]
+    fn a_repeat_never_starts_a_shortcut() {
+        let mut keys = ShortcutKeys::default();
+        keys.press(KEY_R, false, None);
+
+        assert_eq!(
+            keys.press(KEY_R, true, Some(Reload)),
+            KeyDisposition::Forward
+        );
+        assert_eq!(keys.release(KEY_R), KeyDisposition::Forward);
+    }
+
+    #[test]
+    fn clearing_forwards_later_releases() {
+        let mut keys = ShortcutKeys::default();
+        keys.press(KEY_R, false, Some(Reload));
+
+        keys.clear();
+
+        assert_eq!(keys.release(KEY_R), KeyDisposition::Forward);
     }
 
     #[test]

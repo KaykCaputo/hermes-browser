@@ -132,12 +132,7 @@ impl TalariaWebView for ServoWebView {
     }
 
     fn scroll(&mut self, delta_x: f32, delta_y: f32, x: f32, y: f32) -> Result<(), Self::Error> {
-        let delta = WheelDelta {
-            x: f64::from(delta_x),
-            y: f64::from(delta_y),
-            z: 0.0,
-            mode: WheelMode::DeltaPixel,
-        };
+        let delta = wheel_delta(delta_x, delta_y, self.scale_factor.get());
         let _event_id = self
             .inner
             .notify_input_event(InputEvent::Wheel(WheelEvent::new(
@@ -270,6 +265,18 @@ fn device_point(x: f32, y: f32, scale_factor: f32) -> DevicePoint {
     Point2D::new(x * scale_factor, y * scale_factor)
 }
 
+/// Slint reports wheel deltas in logical pixels (trackpad pixel deltas are converted to
+/// logical, mouse-wheel lines become 60 logical pixels each); Servo scrolls by the delta as
+/// device pixels.
+fn wheel_delta(delta_x: f32, delta_y: f32, scale_factor: f32) -> WheelDelta {
+    WheelDelta {
+        x: f64::from(delta_x * scale_factor),
+        y: f64::from(delta_y * scale_factor),
+        z: 0.0,
+        mode: WheelMode::DeltaPixel,
+    }
+}
+
 fn web_view_point(x: f32, y: f32, scale_factor: f32) -> WebViewPoint {
     WebViewPoint::Device(device_point(x, y, scale_factor))
 }
@@ -299,6 +306,19 @@ mod tests {
         assert_eq!(
             web_view_point(12.5, 24.0, 2.0),
             WebViewPoint::Device(Point2D::new(25.0, 48.0))
+        );
+    }
+
+    #[test]
+    fn logical_wheel_deltas_become_device_pixel_deltas() {
+        assert_eq!(
+            wheel_delta(-2.0, 18.0, 2.0),
+            WheelDelta {
+                x: -4.0,
+                y: 36.0,
+                z: 0.0,
+                mode: WheelMode::DeltaPixel,
+            }
         );
     }
 
