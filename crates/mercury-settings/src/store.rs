@@ -148,17 +148,27 @@ fn move_aside_with(
     ))
 }
 
-/// Mode 0600 for a backup, whatever the damaged file's own mode was. Only a regular file is
-/// changed: a symlink's target is not the profile's to change.
+/// Mode 0600 for a backup, whatever the damaged file's own mode was. The backup is opened
+/// without following a symlink and without blocking, checked to be a regular file, and its mode
+/// is set on the open handle (`fchmod`), so nothing outside the profile can be changed.
 fn make_private(path: &Path) {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt as _;
-        let is_file = std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file());
-        if is_file
-            && let Err(error) =
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        let made = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)
+            .and_then(|file| {
+                if !file.metadata()?.is_file() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "not a regular file",
+                    ));
+                }
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            });
+        if let Err(error) = made {
             log::warn!("could not make {} private: {error}", path.display());
         }
     }
@@ -699,15 +709,30 @@ enum Read {
 /// `settings.json`, `session.json`, `session.previous.json` and `session.recovery.json`
 /// (`.<file>.<pid>-<n>.tmp`) are removed, and not those of the current process.
 ///
+/// An entry that cannot be read or removed does not stop the sweep: every other entry is still
+/// tried, and only then is the first error returned (with the number removed logged, since the
+/// error replaces the count).
+///
 /// **Call it only while holding the profile's single-instance lock.** A temporary file of
 /// another process that is still running is a write in progress: removing it makes that
 /// write fail. A process id cannot tell a live process from a dead one (ids are reused), so
 /// only the lock guarantees that no other process is writing in this profile.
 pub fn sweep_stale_temporaries(profile_dir: &Path) -> io::Result<u64> {
+    sweep_with(profile_dir, |path| std::fs::remove_file(path))
+}
+
+fn sweep_with(profile_dir: &Path, remove: impl Fn(&Path) -> io::Result<()>) -> io::Result<u64> {
     let own = std::process::id();
     let mut removed = 0;
+    let mut first_error = None;
     for entry in std::fs::read_dir(profile_dir)? {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                first_error.get_or_insert(error);
+                continue;
+            }
+        };
         let name = entry.file_name();
         let Some((target, pid)) = name.to_str().and_then(parse_temporary_name) else {
             continue;
@@ -719,13 +744,24 @@ pub fn sweep_stale_temporaries(profile_dir: &Path) -> io::Result<u64> {
         if !std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
             continue;
         }
-        match std::fs::remove_file(&path) {
+        match remove(&path) {
             Ok(()) => removed += 1,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
         }
     }
-    Ok(removed)
+    match first_error {
+        None => Ok(removed),
+        Some(error) => {
+            log::warn!(
+                "removed {removed} stale temporary files in {}, but not all: {error}",
+                profile_dir.display()
+            );
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -841,6 +877,52 @@ mod tests {
             crate::MAX_CUSTOM_ENGINES
         );
         assert_eq!(unread.get(bounded::CUSTOM_ENGINES), 7);
+    }
+
+    #[test]
+    fn the_sweep_goes_on_past_a_file_it_cannot_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = std::process::id().wrapping_add(1);
+        let names = [
+            format!(".settings.json.{other}-0.tmp"),
+            format!(".session.json.{other}-1.tmp"),
+            format!(".session.previous.json.{other}-2.tmp"),
+        ];
+        for name in &names {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let stuck = dir.path().join(&names[1]);
+
+        let result = sweep_with(dir.path(), |path| {
+            if path == stuck {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "stuck"))
+            } else {
+                std::fs::remove_file(path)
+            }
+        });
+
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(stuck.exists());
+        assert!(!dir.path().join(&names[0]).exists());
+        assert!(!dir.path().join(&names[2]).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn making_a_backup_private_never_follows_a_symlink() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::write(&outside, b"not ours").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let backup = dir.path().join("settings.json.damaged-1");
+        std::os::unix::fs::symlink(&outside, &backup).unwrap();
+
+        make_private(&backup);
+
+        let mode = std::fs::metadata(&outside).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
     }
 
     #[test]

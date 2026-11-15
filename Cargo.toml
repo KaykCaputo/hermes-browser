@@ -23,6 +23,7 @@ euclid = "0.22"
 gleam = "0.15"
 glow = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }
+libc = "0.2.191"
 log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 serde = "1"

@@ -5332,6 +5332,7 @@ dependencies = [
 name = "mercury-settings"
 version = "0.2.0"
 dependencies = [
+ "libc",
  "log",
  "serde",
  "serde_json",

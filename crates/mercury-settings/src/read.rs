@@ -79,39 +79,6 @@ pub(crate) fn short_reason(reason: impl Into<String>) -> String {
     }
 }
 
-/// `O_NONBLOCK` where its value is known: opening a FIFO for reading then returns at once
-/// instead of waiting for a writer. Elsewhere the type check before opening is all there is.
-#[cfg(unix)]
-fn nonblocking_flag() -> Option<i32> {
-    if cfg!(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd",
-        target_os = "dragonfly"
-    )) {
-        Some(0x0004)
-    } else if cfg!(all(
-        any(target_os = "linux", target_os = "android"),
-        any(
-            target_arch = "x86",
-            target_arch = "x86_64",
-            target_arch = "arm",
-            target_arch = "aarch64",
-            target_arch = "riscv64",
-            target_arch = "powerpc",
-            target_arch = "powerpc64",
-            target_arch = "s390x",
-            target_arch = "loongarch64"
-        )
-    )) {
-        Some(0o4000)
-    } else {
-        None
-    }
-}
-
 fn not_regular(path: &Path, metadata: &std::fs::Metadata) -> SettingsError {
     let kind = if metadata.is_dir() {
         io::ErrorKind::IsADirectory
@@ -121,28 +88,17 @@ fn not_regular(path: &Path, metadata: &std::fs::Metadata) -> SettingsError {
     SettingsError::io("read", path, io::Error::new(kind, "not a regular file"))
 }
 
-/// Opens `path` for reading without ever blocking, and checks that what was opened is a
-/// regular file. Returns the file and its length; `None` when there is nothing at the path.
+/// Opens `path` for reading without ever blocking (`O_NONBLOCK`, so a FIFO does not wait for
+/// a writer), then checks the type of the file actually opened: a directory, FIFO, socket or
+/// device is refused. Returns the file and its length; `None` when there is nothing at the
+/// path.
 pub(crate) fn open_regular(path: &Path) -> Result<Option<(File, u64)>, SettingsError> {
-    // A first check by path gives a clear error where non-blocking opens are not available.
-    match std::fs::metadata(path) {
-        Ok(metadata) if !metadata.is_file() => return Err(not_regular(path, &metadata)),
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(SettingsError::io("inspect", path, error)),
-    }
-    open_checked(path)
-}
-
-/// The open itself: non-blocking, then the type of the opened file checked, so a FIFO swapped
-/// in after the check by path is still refused rather than waited on.
-fn open_checked(path: &Path) -> Result<Option<(File, u64)>, SettingsError> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    if let Some(flag) = nonblocking_flag() {
+    {
         use std::os::unix::fs::OpenOptionsExt as _;
-        options.custom_flags(flag);
+        options.custom_flags(libc::O_NONBLOCK);
     }
     let file = match options.open(path) {
         Ok(file) => file,
@@ -445,9 +401,7 @@ mod tests {
                 .success()
         );
 
-        // The check by path is skipped here: this is the open that follows it, as if a FIFO
-        // had been swapped in between.
-        let opened = open_checked(&path);
+        let opened = open_regular(&path);
 
         assert!(
             matches!(opened, Err(SettingsError::Io { .. })),
