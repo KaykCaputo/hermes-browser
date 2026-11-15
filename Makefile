@@ -33,6 +33,7 @@ CI_TOOLS_PATH = PATH="$(abspath $(CI_TOOLS_DIR))/bin:$$PATH"
 	qa-fast \
 	ci-tools \
 	lint-scripts \
+	deny \
 	build \
 	build-release \
 	package-linux \
@@ -63,6 +64,7 @@ help:
 		'qa-fast' 'Check formatting, lint and test the crates that need no engine.' \
 		'ci-tools' 'Download the pinned shellcheck, actionlint and cargo-deny.' \
 		'lint-scripts' 'Run shellcheck on scripts/ and actionlint on the workflows.' \
+		'deny' 'Check dependencies against the policy in deny.toml.' \
 		'build' 'Build the complete workspace in debug mode.' \
 		'build-release' 'Build the complete workspace in release mode.' \
 		'package-linux' 'Build and package the Linux x86-64 release.' \
@@ -192,6 +194,18 @@ lint-scripts:
 	find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck -x && \
 	actionlint && \
 	printf '%s\n' 'scripts and workflows: no findings'
+
+deny:
+	@$(CI_TOOLS_PATH); export PATH; \
+	if ! command -v cargo-deny >/dev/null 2>&1; then \
+		printf '%s\n' \
+			'error: cargo-deny not found.' \
+			'Run "make ci-tools" to download the pinned version into $(CI_TOOLS_DIR)/bin' \
+			'(its checksum is verified), or install cargo-deny yourself at the version in' \
+			'scripts/ci/install-tools.sh.' >&2; \
+		exit 1; \
+	fi; \
+	cargo-deny --locked check --show-stats
 
 build:
 	"$(CARGO)" build --workspace

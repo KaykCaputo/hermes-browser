@@ -1,0 +1,153 @@
+# Adapted from Zervo, https://github.com/Goddv/Zervo, commit 86cb7126,
+# deny.toml, MPL-2.0.
+#
+# Mercury Browser's dependency policy, checked by cargo-deny (`make deny`, and
+# the "Dependency policy" job in .github/workflows/ci.yml). It reads Cargo.lock
+# and compiles nothing. See docs/developer-guide/continuous-integration.md.
+#
+# Nearly all of the graph is Servo's and Slint's; Mercury's own manifests name
+# a few dozen crates out of well over a thousand. The rules separate what this
+# repository chooses, where a problem should stop a change, from what it
+# inherits, where a problem should be visible without blocking work nobody here
+# can do.
+
+# No `[graph] targets`: the whole graph, for every platform, is checked, since
+# a licence or advisory on a Linux-only crate matters as much as one on a
+# macOS-only crate.
+
+[advisories]
+# The RustSec database is cloned to cargo-deny's default, $CARGO_HOME/advisory-dbs.
+# A vulnerability fails the check wherever it is in the graph (cargo-deny
+# always treats vulnerabilities as errors); the exceptions below each say why.
+yanked = "deny"
+# Unmaintained crates fail the check only when this workspace depends on them
+# directly; the engine's own unmaintained dependencies are not ours to replace.
+unmaintained = "workspace"
+unsound = "workspace"
+# An exception that no longer matches anything should be removed; it warns
+# rather than fails, so an engine upgrade that fixes one does not block itself.
+unused-ignored-advisory = "warn"
+# Each exception names the advisory, the path that brings the crate in, and why
+# it cannot be fixed here. Revisit all of them on every Servo upgrade.
+ignore = [
+    # The Marvin Attack: a timing side channel in RSA private-key operations.
+    # rsa 0.10.0-rc.19 <- servo-script-webcrypto 0.8.0 <- servo-script <- servo.
+    # Servo pins `rsa = "=0.10.0-rc.19"` exactly for WebCrypto (the
+    # `subtlecrypto` feature), so the fixed 0.10.0 cannot be selected. Reached
+    # only by pages that do RSA decryption or signing through crypto.subtle;
+    # Mercury does no RSA itself and its TLS is rustls with aws-lc-rs.
+    { id = "RUSTSEC-2023-0071", reason = "rsa =0.10.0-rc.19 pinned by servo-script-webcrypto 0.8.0 (Servo's WebCrypto); no fixed version is selectable" },
+    # SQLite before 3.54.0 can return uninitialised page-cache memory for a
+    # database opened with a crafted -wal file. libsqlite3-sys 0.36.0 (bundled
+    # SQLite) <- rusqlite 0.38 <- servo-net / servo-storage / sea-query-rusqlite
+    # 0.8.0 <- servo. Servo requires rusqlite 0.38; the fix is in
+    # libsqlite3-sys 0.39 (rusqlite 0.41), which that requirement excludes.
+    # Exposure is local: a process must open a database and -wal pair that a
+    # less trusted party wrote. Servo's databases live in the user's own profile.
+    { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.36 via rusqlite 0.38, required by servo-net and servo-storage 0.8.0; the fix needs rusqlite 0.41" },
+]
+
+[bans]
+# Servo's and Slint's graphs carry many duplicate versions (two wgpu majors,
+# for one); that is expected, not news.
+multiple-versions = "allow"
+# A `*` version requirement in our own manifests is. The intended level is
+# "deny", but cargo-deny treats the workspace's own path dependencies
+# (`talaria-core = { path = … }`) as wildcards unless the crate that declares
+# them has `publish = false`, which no crate's manifest says yet. Until every
+# workspace crate carries `publish = false` (none is published to crates.io),
+# this warns; change it to "deny" in the same commit that adds those lines.
+wildcards = "warn"
+# Path dependencies in crates with `publish = false` are not wildcards.
+allow-wildcard-paths = true
+
+[sources]
+# Everything comes from crates.io. The three crates under third_party/ are
+# path dependencies through [patch.crates-io] and are not "sources" at all.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[licenses]
+# Mercury Browser is MPL-2.0. This is the list of licences the dependency
+# graph actually needs, each permissive and compatible with shipping under
+# MPL-2.0; anything new is a decision for a person, not for this file.
+# No copyleft licence (GPL, LGPL, AGPL) is allowed globally: crates that offer
+# one as an alternative (`r-efi`: "MIT OR Apache-2.0 OR LGPL-2.1-or-later")
+# pass on their permissive terms. Every entry, with the crates that need it,
+# is listed in docs/developer-guide/continuous-integration.md.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    # The Community Data License Agreement, on Mozilla's CA root certificates
+    # as shipped by `webpki-roots`: a data licence for the certificate set.
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    # The University of Illinois/NCSA licence, BSD-like; on `libfuzzer-sys`
+    # (LLVM's libFuzzer), which `rav1e` → `ravif` → `image` brings in.
+    "NCSA",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.9
+# A licence on the list that nothing needs any more should come off it; it
+# warns rather than fails, so removing a dependency does not need a policy edit.
+unused-allowed-license = "warn"
+
+# Slint is offered as "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR
+# LicenseRef-Slint-Software-3.0". Mercury Browser uses it under the Slint
+# Royalty-free Desktop, Mobile and Web Applications License 2.0, which is
+# allowed for exactly these crates and nowhere else. That licence requires an
+# application to show Slint's attribution (the AboutSlint widget in an About
+# dialog, or the "Made with Slint" badge on the download page); see
+# docs/developer-guide/continuous-integration.md.
+[[licenses.exceptions]]
+crate = "slint"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "slint-build"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "slint-macros"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "i-slint-backend-selector"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "i-slint-backend-winit"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "i-slint-common"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "i-slint-compiler"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "i-slint-core"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "i-slint-core-macros"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "i-slint-renderer-femtovg"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+[[licenses.exceptions]]
+crate = "i-slint-renderer-skia"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]

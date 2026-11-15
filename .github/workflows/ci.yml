@@ -450,3 +450,27 @@ jobs:
       - name: actionlint
         run: actionlint -color
 
+  deny:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    # Reads Cargo.lock and compiles nothing.
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain and cargo-deny
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # cargo-deny asks cargo for the dependency graph.
+          rustup toolchain install
+          scripts/ci/install-tools.sh --dir "${RUNNER_TEMP}/ci-tools" cargo-deny
+          echo "${RUNNER_TEMP}/ci-tools/bin" >> "${GITHUB_PATH}"
+
+      - name: cargo deny check
+        run: cargo-deny --locked check --show-stats
