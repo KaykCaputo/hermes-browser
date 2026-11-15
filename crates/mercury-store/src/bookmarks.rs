@@ -5,9 +5,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::Store;
 use crate::error::{Result, StoreError};
 use crate::frecency;
-use crate::history::refresh_place;
-use crate::limits::{MAX_TITLE_CHARS, check_url, cut};
-use crate::search::url_key;
+use crate::history::{ensure_place, refresh_place};
+use crate::limits::{MAX_TITLE_CHARS, cut};
 
 pub(crate) const KIND_BOOKMARK: i64 = 1;
 pub(crate) const KIND_FOLDER: i64 = 2;
@@ -382,18 +381,6 @@ fn close_gap(conn: &Connection, parent: i64, position: i64) -> Result<()> {
     )?
     .execute(params![parent, position])?;
     Ok(())
-}
-
-/// The id of the page for `url`, creating an unvisited page if needed.
-pub(crate) fn ensure_place(conn: &Connection, url: &str) -> Result<i64> {
-    check_url(url)?;
-    conn.prepare_cached(
-        "INSERT INTO places (url, url_key) VALUES (?1, ?2) ON CONFLICT (url) DO NOTHING",
-    )?
-    .execute([url, &url_key(url, true)])?;
-    Ok(conn
-        .prepare_cached("SELECT id FROM places WHERE url = ?1")?
-        .query_row([url], |row| row.get(0))?)
 }
 
 fn node_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BookmarkNode> {

@@ -86,9 +86,91 @@ fn importing_visits_to_known_pages_adds_to_them() {
     let place = f.place("https://a.example/").unwrap();
     assert_eq!((place.visit_count, place.typed_count), (3, 1));
     assert_eq!(place.last_visit_at, Some(NOW));
-    // A title in the import replaces the stored one, as a later record_visit would.
-    assert_eq!(place.title.as_deref(), Some("Older title"));
+    // The stored title came from a newer visit than any titled visit in the import.
+    assert_eq!(place.title.as_deref(), Some("A"));
     assert_eq!(f.store.import_visits(&[], NOW).unwrap(), 0);
+}
+
+// ---- titles: the most recent titled visit wins, whatever the slice order ----
+
+fn titled<'a>(url: &'a str, title: Option<&'a str>, days_ago: i64) -> VisitImport<'a> {
+    VisitImport {
+        url,
+        title,
+        visited_at_ms: NOW - days_ago * DAY_MS,
+        transition: VisitTransition::Link,
+    }
+}
+
+fn title_after(visits: &[VisitImport<'_>]) -> Option<String> {
+    let mut store = Store::open_in_memory().unwrap();
+    store.import_visits(visits, NOW).unwrap();
+    store
+        .history(None, None, 1)
+        .unwrap()
+        .into_iter()
+        .next()
+        .and_then(|e| e.title)
+}
+
+#[test]
+fn the_newest_titled_visit_gives_the_title_in_any_order() {
+    const U: &str = "https://t.example/";
+    let newest_first = [
+        titled(U, None, 0),
+        titled(U, Some("Newest"), 1),
+        titled(U, Some("Middle"), 5),
+        titled(U, Some("Oldest"), 9),
+    ];
+    let mut oldest_first = newest_first;
+    oldest_first.reverse();
+    let shuffled = [
+        newest_first[2],
+        newest_first[0],
+        newest_first[3],
+        newest_first[1],
+    ];
+    for (name, visits) in [
+        ("newest first", &newest_first),
+        ("oldest first", &oldest_first),
+        ("shuffled", &shuffled),
+    ] {
+        assert_eq!(title_after(visits).as_deref(), Some("Newest"), "{name}");
+    }
+}
+
+#[test]
+fn an_import_older_than_the_stored_title_leaves_it() {
+    let mut f = Fixture::new("import-older-title");
+    f.store
+        .record_visit(
+            "https://t.example/",
+            Some("Seen today"),
+            VisitTransition::Link,
+            NOW,
+        )
+        .unwrap();
+    f.store
+        .import_visits(
+            &[
+                titled("https://t.example/", Some("Last year"), 365),
+                titled("https://t.example/", Some("Last month"), 30),
+            ],
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        f.place("https://t.example/").unwrap().title.as_deref(),
+        Some("Seen today")
+    );
+    // A newer titled visit in an import does replace it.
+    f.store
+        .import_visits(&[titled("https://t.example/", Some("Tomorrow"), -1)], NOW)
+        .unwrap();
+    assert_eq!(
+        f.place("https://t.example/").unwrap().title.as_deref(),
+        Some("Tomorrow")
+    );
 }
 
 #[test]

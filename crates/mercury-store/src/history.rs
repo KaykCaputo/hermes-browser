@@ -102,8 +102,9 @@ const HISTORY_SEARCH_SQL: &str = "
     LIMIT ?3";
 
 impl Store {
-    /// Records a visit to `url` at `now_ms`, creating the page if needed. A `title` replaces the
-    /// stored one; `None` leaves it unchanged.
+    /// Records a visit to `url` at `now_ms`, creating the page if needed. A page's title is that
+    /// of its most recent titled visit: `title` replaces the stored one unless that came from a
+    /// newer visit, and `None` leaves it unchanged.
     ///
     /// Titles are cut to [`MAX_TITLE_CHARS`] characters; a URL longer
     /// than [`MAX_URL_BYTES`](crate::MAX_URL_BYTES) is refused with
@@ -116,7 +117,10 @@ impl Store {
         now_ms: i64,
     ) -> Result<VisitId> {
         let tx = self.conn.transaction()?;
-        let place_id = upsert_place(&tx, url, title)?;
+        let place_id = ensure_place(&tx, url)?;
+        if let Some(title) = title {
+            offer_title(&tx, place_id, title, now_ms)?;
+        }
         let visit_id = insert_visit(&tx, place_id, now_ms, transition)?;
         tx.prepare_cached(
             "UPDATE places SET visit_count = visit_count + 1,
@@ -134,12 +138,16 @@ impl Store {
         Ok(VisitId(visit_id))
     }
 
-    /// Sets the title of a known page, cut to [`MAX_TITLE_CHARS`]
-    /// characters. Returns `false` if the URL is unknown.
+    /// Sets the title of a known page, cut to [`MAX_TITLE_CHARS`] characters, as the title of its
+    /// most recent visit (the page currently shown). Returns `false` if the URL is unknown.
     pub fn set_page_title(&mut self, url: &str, title: &str) -> Result<bool> {
         let changed = self
             .conn
-            .prepare_cached("UPDATE places SET title = ?2 WHERE url = ?1")?
+            .prepare_cached(
+                "UPDATE places SET title = ?2,
+                     title_at = coalesce(max(title_at, last_visit_at), title_at, last_visit_at)
+                 WHERE url = ?1",
+            )?
             .execute(params![url, cut(title, MAX_TITLE_CHARS)])?;
         Ok(changed > 0)
     }
@@ -257,21 +265,42 @@ fn transition_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<
     })
 }
 
-/// The id of the page for `url`, created if needed. A `title` replaces the stored one; `None`
-/// leaves it unchanged. Refuses a URL longer than `MAX_URL_BYTES` and cuts the title to
-/// `MAX_TITLE_CHARS`.
-pub(crate) fn upsert_place(conn: &Connection, url: &str, title: Option<&str>) -> Result<i64> {
+/// The id of the page for `url`, created without a title if needed. Refuses a URL longer than
+/// `MAX_URL_BYTES`.
+pub(crate) fn ensure_place(conn: &Connection, url: &str) -> Result<i64> {
     check_url(url)?;
-    let title = title.map(|t| cut(t, MAX_TITLE_CHARS));
     conn.prepare_cached(
-        "INSERT INTO places (url, title, url_key) VALUES (?1, ?2, ?3)
-         ON CONFLICT (url) DO UPDATE SET title = excluded.title
-         WHERE excluded.title IS NOT NULL AND excluded.title IS NOT places.title",
+        "INSERT INTO places (url, url_key) VALUES (?1, ?2) ON CONFLICT (url) DO NOTHING",
     )?
-    .execute(params![url, title, url_key(url, true)])?;
+    .execute([url, &url_key(url, true)])?;
     Ok(conn
         .prepare_cached("SELECT id FROM places WHERE url = ?1")?
         .query_row([url], |row| row.get(0))?)
+}
+
+/// Offers a page the `title` seen on a visit at `seen_at_ms`. It becomes the page's title
+/// unless the stored title comes from a newer visit: a page's title is that of its most
+/// recent titled visit. The title is cut to `MAX_TITLE_CHARS`.
+pub(crate) fn offer_title(
+    conn: &Connection,
+    place_id: i64,
+    title: &str,
+    seen_at_ms: i64,
+) -> Result<()> {
+    let title = cut(title, MAX_TITLE_CHARS);
+    // Two statements, so that the full-text trigger (on `title`) fires only when the title
+    // actually changes.
+    conn.prepare_cached(
+        "UPDATE places SET title = ?2, title_at = ?3
+         WHERE id = ?1 AND (title_at IS NULL OR title_at <= ?3) AND title IS NOT ?2",
+    )?
+    .execute(params![place_id, title, seen_at_ms])?;
+    conn.prepare_cached(
+        "UPDATE places SET title_at = ?3
+         WHERE id = ?1 AND title IS ?2 AND (title_at IS NULL OR title_at < ?3)",
+    )?
+    .execute(params![place_id, title, seen_at_ms])?;
+    Ok(())
 }
 
 /// Adds a visit row; the page's counters are not touched.

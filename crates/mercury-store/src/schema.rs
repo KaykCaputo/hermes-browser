@@ -21,7 +21,8 @@ const MIGRATIONS: &[&str] = &[
         frecency      INTEGER NOT NULL DEFAULT -1,
         hidden        INTEGER NOT NULL DEFAULT 0,
         url_key       TEXT NOT NULL,             -- lower-case URL without scheme and www.
-        frecency_at   INTEGER                    -- when `frecency` was computed
+        frecency_at   INTEGER,                   -- when `frecency` was computed
+        title_at      INTEGER                    -- when the visit that gave `title` happened
     ) STRICT;
     CREATE INDEX places_by_url_key  ON places(url_key, frecency);
     CREATE INDEX places_by_frecency ON places(frecency);

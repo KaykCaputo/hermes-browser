@@ -88,6 +88,27 @@ fn a_later_title_replaces_and_none_never_erases() {
 }
 
 #[test]
+fn a_title_from_an_older_visit_does_not_replace_a_newer_one() {
+    let mut f = Fixture::new("older-title");
+    f.store
+        .record_visit(A, Some("Today"), VisitTransition::Link, NOW)
+        .unwrap();
+    f.store
+        .record_visit(
+            A,
+            Some("Last week"),
+            VisitTransition::Link,
+            NOW - 7 * DAY_MS,
+        )
+        .unwrap();
+    assert_eq!(f.place(A).unwrap().title.as_deref(), Some("Today"));
+    f.store
+        .record_visit(A, Some("Later today"), VisitTransition::Link, NOW + 1)
+        .unwrap();
+    assert_eq!(f.place(A).unwrap().title.as_deref(), Some("Later today"));
+}
+
+#[test]
 fn set_page_title_updates_known_pages_only() {
     let mut store = Store::open_in_memory().unwrap();
     store

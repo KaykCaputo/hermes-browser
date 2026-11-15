@@ -1,16 +1,14 @@
 //! Bulk import of visits and bookmarks from another browser.
 
-use std::collections::HashSet;
+use std::collections::BTreeMap;
 
 use rusqlite::params;
 
 use crate::Store;
-use crate::bookmarks::{
-    BookmarkId, KIND_BOOKMARK, KIND_FOLDER, KIND_SEPARATOR, ensure_place, require_folder,
-};
+use crate::bookmarks::{BookmarkId, KIND_BOOKMARK, KIND_FOLDER, KIND_SEPARATOR, require_folder};
 use crate::error::{Result, StoreError};
 use crate::frecency;
-use crate::history::{VisitTransition, insert_visit, refresh_place, upsert_place};
+use crate::history::{VisitTransition, ensure_place, insert_visit, offer_title, refresh_place};
 use crate::limits::{MAX_TITLE_CHARS, cut};
 
 /// The deepest bookmark tree [`Store::import_bookmarks`] accepts; the nodes passed directly are
@@ -66,21 +64,30 @@ impl Store {
     /// Adds many visits in one transaction; frecency is recomputed once per affected page, as of
     /// `now_ms`. All or nothing. Returns the number of visits added.
     ///
-    /// Titles are applied in slice order, as by [`record_visit`](Store::record_visit): the last
-    /// non-`None` title given for a URL wins. Visit counts, typed counts and last-visit times are
-    /// computed from the visit rows, so the order of `visits` does not matter for them.
+    /// A page's title is that of its most recent titled visit, across the visits already stored
+    /// and those imported; the order of `visits` does not matter (for titled visits at the same
+    /// millisecond, the greater title wins). Visit counts, typed counts and last-visit times are
+    /// computed from the visit rows.
     pub fn import_visits(&mut self, visits: &[VisitImport<'_>], now_ms: i64) -> Result<u64> {
         let tx = self.conn.transaction()?;
-        let mut places = Vec::new();
-        let mut seen = HashSet::new();
+        // Per page: its newest titled visit in the import (ties: the greater title, so that
+        // the slice order never matters).
+        let mut pages: BTreeMap<i64, Option<(i64, &str)>> = BTreeMap::new();
         for visit in visits {
-            let place_id = upsert_place(&tx, visit.url, visit.title)?;
+            let place_id = ensure_place(&tx, visit.url)?;
             insert_visit(&tx, place_id, visit.visited_at_ms, visit.transition)?;
-            if seen.insert(place_id) {
-                places.push(place_id);
+            let newest = pages.entry(place_id).or_default();
+            if let Some(title) = visit.title {
+                let offered = (visit.visited_at_ms, title);
+                if newest.is_none_or(|current| offered > current) {
+                    *newest = Some(offered);
+                }
             }
         }
-        for place_id in places {
+        for (place_id, newest) in pages {
+            if let Some((seen_at, title)) = newest {
+                offer_title(&tx, place_id, title, seen_at)?;
+            }
             refresh_place(&tx, place_id, now_ms)?;
         }
         tx.commit()?;
