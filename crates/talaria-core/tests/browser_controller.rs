@@ -14,6 +14,13 @@ fn mark_engine_ready(controller: &mut BrowserController, tab_id: TabId) {
     assert!(handled);
 }
 
+fn tab_is_engine_ready(controller: &BrowserController, tab_id: TabId) -> bool {
+    controller
+        .tabs()
+        .find(|tab| tab.id() == tab_id)
+        .is_some_and(|tab| tab.is_engine_ready())
+}
+
 fn controller_with_ready_tab() -> BrowserController {
     let mut controller = BrowserController::default();
     let tab_id = controller.active_tab_id();
@@ -461,13 +468,11 @@ fn set_initial_address_reports_unknown_tabs_and_invalid_addresses() {
 }
 
 #[test]
-fn navigation_for_a_tab_that_is_not_engine_ready_is_held() {
+fn commands_for_a_tab_that_is_not_engine_ready_are_held() {
     let mut controller = BrowserController::default();
     let tab_id = controller.open_tab();
 
-    controller
-        .queue_navigation("example.com")
-        .expect("navigation should be valid");
+    controller.queue_command(BrowserCommand::Reload);
 
     assert_eq!(command(controller.next_command()), None);
     assert!(!controller.has_pending_commands());
@@ -479,13 +484,158 @@ fn navigation_for_a_tab_that_is_not_engine_ready_is_held() {
     assert!(controller.has_pending_commands());
     let queued = controller
         .next_command()
-        .expect("the held navigation should be released");
+        .expect("the held command should be released");
     assert_eq!(queued.tab_id(), tab_id);
+    assert_eq!(queued.command(), &BrowserCommand::Reload);
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn navigation_on_a_tab_that_is_not_engine_ready_replaces_its_initial_url() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller
+        .open_tab_with(Some("https://slow.test"), TabActivation::Foreground)
+        .expect("the address should resolve");
     assert_eq!(
-        queued.command(),
-        &BrowserCommand::Navigate {
-            url: "https://example.com/".to_owned(),
-        }
+        controller.take_initial_url(tab_id).as_deref(),
+        Some("https://slow.test/")
+    );
+
+    controller
+        .queue_navigation("https://other.test")
+        .expect("navigation should be valid");
+
+    assert_eq!(command(controller.next_command()), None);
+    assert!(!controller.has_pending_commands());
+    assert_eq!(controller.state().url(), "https://other.test/");
+    assert_eq!(controller.state().load_state(), &LoadState::Loading);
+    assert_eq!(
+        controller.take_initial_url(tab_id).as_deref(),
+        Some("https://other.test/")
+    );
+    assert_eq!(controller.take_initial_url(tab_id), None);
+    assert_eq!(controller.state().url(), "https://other.test/");
+    assert_eq!(controller.state().load_state(), &LoadState::Loading);
+}
+
+#[test]
+fn late_events_from_a_replaced_page_do_not_leave_the_tab_ready() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller
+        .open_tab_with(Some("https://slow.test"), TabActivation::Foreground)
+        .expect("the address should resolve");
+    controller.take_initial_url(tab_id);
+    controller
+        .queue_navigation("https://other.test")
+        .expect("navigation should be valid");
+
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::AddressChanged {
+            url: "https://slow.test/".to_owned(),
+        },
+    );
+    assert!(!tab_is_engine_ready(&controller, tab_id));
+    assert_eq!(
+        controller.take_initial_url(tab_id).as_deref(),
+        Some("https://other.test/")
+    );
+
+    assert!(!tab_is_engine_ready(&controller, tab_id));
+    assert_eq!(controller.state().url(), "https://other.test/");
+    assert_eq!(controller.state().load_state(), &LoadState::Loading);
+}
+
+#[test]
+fn held_history_commands_are_dropped_when_the_initial_page_is_replaced() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller
+        .open_tab_with(Some("https://slow.test"), TabActivation::Foreground)
+        .expect("the address should resolve");
+    controller.take_initial_url(tab_id);
+    controller.queue_command(BrowserCommand::Reload);
+    controller.queue_command(BrowserCommand::GoBack);
+    controller.queue_command(BrowserCommand::GoForward);
+
+    controller
+        .queue_navigation("https://other.test")
+        .expect("navigation should be valid");
+    controller.take_initial_url(tab_id);
+    mark_engine_ready(&mut controller, tab_id);
+
+    assert!(!controller.has_pending_commands());
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn replacing_the_initial_page_keeps_other_held_commands() {
+    let mut controller = BrowserController::default();
+    let first_tab_id = controller.active_tab_id();
+    controller.queue_command(BrowserCommand::Reload);
+    let tab_id = controller
+        .open_tab_with(Some("https://slow.test"), TabActivation::Foreground)
+        .expect("the address should resolve");
+    controller.take_initial_url(tab_id);
+    controller.queue_command(BrowserCommand::FocusChanged { focused: true });
+
+    controller
+        .queue_navigation("https://other.test")
+        .expect("navigation should be valid");
+    controller.take_initial_url(tab_id);
+    mark_engine_ready(&mut controller, tab_id);
+    mark_engine_ready(&mut controller, first_tab_id);
+
+    let remaining = std::iter::from_fn(|| controller.next_command()).collect::<Vec<_>>();
+    assert_eq!(
+        remaining,
+        vec![
+            TabCommand::new(first_tab_id, BrowserCommand::Reload),
+            TabCommand::new(tab_id, BrowserCommand::FocusChanged { focused: true }),
+        ]
+    );
+}
+
+#[test]
+fn navigation_on_a_ready_tab_still_queues_a_navigate_command() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller
+        .open_tab_with(Some("https://slow.test"), TabActivation::Foreground)
+        .expect("the address should resolve");
+    controller.take_initial_url(tab_id);
+    mark_engine_ready(&mut controller, tab_id);
+
+    controller
+        .queue_navigation("https://other.test")
+        .expect("navigation should be valid");
+
+    assert_eq!(controller.take_initial_url(tab_id), None);
+    assert!(tab_is_engine_ready(&controller, tab_id));
+    assert_eq!(controller.state().url(), "https://other.test/");
+    assert_eq!(
+        controller.next_command(),
+        Some(TabCommand::new(
+            tab_id,
+            BrowserCommand::Navigate {
+                url: "https://other.test/".to_owned(),
+            }
+        ))
+    );
+    assert_eq!(command(controller.next_command()), None);
+}
+
+#[test]
+fn focus_requested_before_readiness_is_delivered_when_the_tab_becomes_ready() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    controller.queue_command(BrowserCommand::FocusChanged { focused: true });
+    assert_eq!(command(controller.next_command()), None);
+
+    mark_engine_ready(&mut controller, tab_id);
+
+    assert_eq!(
+        command(controller.next_command()),
+        Some(BrowserCommand::FocusChanged { focused: true })
     );
     assert_eq!(command(controller.next_command()), None);
 }
@@ -582,7 +732,6 @@ fn pointer_commands_for_a_not_ready_tab_are_discarded() {
         x: 1.0,
         y: 2.0,
     });
-    controller.queue_command(BrowserCommand::FocusChanged { focused: true });
     controller.queue_command(BrowserCommand::Reload);
 
     mark_engine_ready(&mut controller, tab_id);

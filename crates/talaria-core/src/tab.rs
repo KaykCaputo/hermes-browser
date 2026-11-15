@@ -54,9 +54,10 @@ impl Tab {
     }
 
     /// True once the engine has reported the tab's first address or history change, which
-    /// means its browsing context exists and commands for it can be dispatched.
+    /// means its browsing context exists and commands for it can be dispatched. A tab whose
+    /// web view is about to be (re)created with a pending initial URL is never ready.
     pub const fn is_engine_ready(&self) -> bool {
-        self.engine_ready
+        self.engine_ready && !matches!(self.initial_url, InitialUrl::Pending(Some(_)))
     }
 
     pub(crate) fn state_mut(&mut self) -> &mut BrowserState {
@@ -78,11 +79,21 @@ impl Tab {
         }
     }
 
+    /// Makes `url` the pending initial URL even if the previous one was taken, so the engine
+    /// replaces the tab's web view with a new one.
+    pub(crate) fn replace_initial_url(&mut self, url: String) {
+        self.initial_url = InitialUrl::Pending(Some(url));
+    }
+
+    /// Hands the initial URL to the engine, which creates a fresh web view for it; that web
+    /// view has reported nothing yet, so the tab is no longer engine-ready.
     pub(crate) fn take_initial_url(&mut self) -> Option<String> {
-        match std::mem::replace(&mut self.initial_url, InitialUrl::Taken) {
+        let initial_url = match std::mem::replace(&mut self.initial_url, InitialUrl::Taken) {
             InitialUrl::Pending(initial_url) => initial_url,
             InitialUrl::Taken => None,
-        }
+        }?;
+        self.engine_ready = false;
+        Some(initial_url)
     }
 }
 

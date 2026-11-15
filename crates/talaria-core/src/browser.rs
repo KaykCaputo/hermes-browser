@@ -57,15 +57,21 @@ pub enum BrowserCommand {
 }
 
 impl BrowserCommand {
-    /// Input that only makes sense for the document the user currently sees. It is discarded,
-    /// rather than held, while the tab's browsing context does not exist yet.
+    /// Pointer input only makes sense for the document the user currently sees. It is
+    /// discarded, rather than held, while the tab's browsing context does not exist yet.
     pub(crate) const fn is_discarded_before_engine_ready(&self) -> bool {
         matches!(
             self,
-            Self::PointerMoved { .. }
-                | Self::PointerButton { .. }
-                | Self::Scrolled { .. }
-                | Self::FocusChanged { .. }
+            Self::PointerMoved { .. } | Self::PointerButton { .. } | Self::Scrolled { .. }
+        )
+    }
+
+    /// Commands that act on the tab's current page; they are meaningless once that page is
+    /// replaced before it ever committed.
+    pub(crate) const fn targets_the_current_page(&self) -> bool {
+        matches!(
+            self,
+            Self::Navigate { .. } | Self::Reload | Self::GoBack | Self::GoForward
         )
     }
 }

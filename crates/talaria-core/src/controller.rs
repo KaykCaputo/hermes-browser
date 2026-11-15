@@ -25,11 +25,27 @@ impl BrowserController {
         }
     }
 
+    /// Navigates the active tab. If the tab's first page has not committed yet, the engine
+    /// cannot navigate it, so the pending page is replaced instead: the URL becomes the tab's
+    /// initial URL again and the engine recreates the tab's web view with it.
     pub fn queue_navigation(&mut self, input: &str) -> Result<(), AddressResolutionError> {
         let url = resolve_address(input)?.to_string();
-        self.active_state_mut()
-            .apply(BrowserEvent::AddressChanged { url: url.clone() });
-        self.queue_command(BrowserCommand::Navigate { url });
+        let tab_id = self.active_tab_id;
+        let tab = self
+            .tab_mut(tab_id)
+            .expect("the controller always owns an active tab");
+
+        if tab.is_engine_ready() {
+            tab.state_mut()
+                .apply(BrowserEvent::AddressChanged { url: url.clone() });
+            self.queue_command(BrowserCommand::Navigate { url });
+        } else {
+            tab.replace_initial_url(url.clone());
+            show_loading(tab, url);
+            self.command_queue.retain(|queued| {
+                queued.tab_id() != tab_id || !queued.command().targets_the_current_page()
+            });
+        }
         Ok(())
     }
 
@@ -90,9 +106,14 @@ impl BrowserController {
             .is_some_and(|tab| set_tab_initial_url(tab, url)))
     }
 
-    /// Returns the tab's initial URL exactly once (None afterwards, and None for a blank tab).
+    /// Returns the tab's initial URL exactly once (None afterwards, and None for a blank tab),
+    /// unless a navigation before the first commit made a new one pending. When it returns a
+    /// URL the tab is no longer engine-ready and shows that URL as loading.
     pub fn take_initial_url(&mut self, tab_id: TabId) -> Option<String> {
-        self.tab_mut(tab_id)?.take_initial_url()
+        let tab = self.tab_mut(tab_id)?;
+        let url = tab.take_initial_url()?;
+        show_loading(tab, url.clone());
+        Some(url)
     }
 
     pub fn select_tab(&mut self, tab_id: TabId) -> bool {
@@ -282,15 +303,6 @@ impl BrowserController {
     fn active_tab(&self) -> Option<&Tab> {
         self.tabs.iter().find(|tab| tab.id() == self.active_tab_id)
     }
-
-    fn active_state_mut(&mut self) -> &mut BrowserState {
-        let active_tab_id = self.active_tab_id;
-        self.tabs
-            .iter_mut()
-            .find(|tab| tab.id() == active_tab_id)
-            .expect("the controller always owns an active tab")
-            .state_mut()
-    }
 }
 
 fn set_tab_initial_url(tab: &mut Tab, url: String) -> bool {
@@ -298,12 +310,16 @@ fn set_tab_initial_url(tab: &mut Tab, url: String) -> bool {
         return false;
     }
 
+    show_loading(tab, url);
+    true
+}
+
+fn show_loading(tab: &mut Tab, url: String) {
     let state = tab.state_mut();
     state.apply(BrowserEvent::AddressChanged { url });
     state.apply(BrowserEvent::LoadStateChanged {
         state: LoadState::Loading,
     });
-    true
 }
 
 impl Default for BrowserController {
