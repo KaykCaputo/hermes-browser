@@ -44,9 +44,44 @@ pub(crate) fn fts_query(query: &str) -> Option<String> {
     }
 }
 
+/// The form of a URL, or of what the user typed, that host-prefix matching compares: ASCII
+/// lower case, without a leading `scheme://`. For a stored URL a leading `www.` is dropped as
+/// well, so `exam` finds `https://www.example.com/`; typed input keeps its `www.`, which the
+/// full-text match handles.
+pub(crate) fn url_key(url: &str, strip_www: bool) -> String {
+    let lower = url.trim().to_ascii_lowercase();
+    let rest = match lower.find("://") {
+        Some(end)
+            if end > 0
+                && lower[..end]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
+        {
+            &lower[end + 3..]
+        }
+        _ => lower.as_str(),
+    };
+    let rest = if strip_www {
+        rest.strip_prefix("www.").unwrap_or(rest)
+    } else {
+        rest
+    };
+    rest.to_owned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::fts_query;
+    use super::{fts_query, url_key};
+
+    #[test]
+    fn url_keys_drop_scheme_and_www() {
+        assert_eq!(url_key("https://www.Example.com/A", true), "example.com/a");
+        assert_eq!(url_key("http://example.org", true), "example.org");
+        assert_eq!(url_key("about:blank", true), "about:blank");
+        assert_eq!(url_key("HTTPS://www.exa", false), "www.exa");
+        assert_eq!(url_key("exam", false), "exam");
+        assert_eq!(url_key("://x", true), "://x");
+    }
 
     #[test]
     fn words_are_quoted_and_only_the_last_is_a_prefix() {

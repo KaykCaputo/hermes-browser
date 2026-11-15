@@ -18,6 +18,7 @@ mod frecency;
 mod history;
 mod schema;
 mod search;
+mod suggest;
 
 use std::path::Path;
 
@@ -26,7 +27,10 @@ use rusqlite::Connection;
 pub use bookmarks::{BookmarkId, BookmarkKind, BookmarkNode, BookmarkRoot};
 pub use downloads::{DownloadRecord, DownloadRecordId, DownloadState, NewDownload};
 pub use error::{Result, StoreError};
-pub use history::{ClearRange, HistoryCursor, HistoryEntry, Suggestion, VisitId, VisitTransition};
+pub use history::{ClearRange, HistoryCursor, HistoryEntry, VisitId, VisitTransition};
+pub use suggest::{
+    CANDIDATES_PER_RESULT, FRECENCY_REFRESH_AGE_MS, SUBSTRING_SCAN_ROWS, Suggestion,
+};
 
 /// The profile database. Owns one SQLite connection.
 #[derive(Debug)]

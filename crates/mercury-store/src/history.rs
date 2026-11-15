@@ -4,8 +4,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::Store;
 use crate::error::Result;
-use crate::frecency::{self, DEFAULT_FRECENCY_SETTINGS};
-use crate::search::fts_query;
+use crate::frecency;
+use crate::search::{fts_query, url_key};
 
 /// How the user reached a page. Uses Firefox's numbering (`nsINavHistoryService.idl`).
 #[repr(u8)]
@@ -85,19 +85,6 @@ pub enum ClearRange {
     },
 }
 
-/// One address-bar suggestion.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Suggestion {
-    /// The page's URL.
-    pub url: String,
-    /// The page's title or, if it has none, its bookmark's title.
-    pub title: Option<String>,
-    /// Whether the page is bookmarked.
-    pub is_bookmark: bool,
-    /// The page's frecency as of the `now_ms` given to [`Store::suggest`]; higher ranks first.
-    pub frecency: i64,
-}
-
 const HISTORY_SQL: &str = "
     SELECT v.id, p.url, p.title, v.visited_at, v.transition
     FROM visits v JOIN places p ON p.id = v.place_id
@@ -113,28 +100,6 @@ const HISTORY_SEARCH_SQL: &str = "
     ORDER BY v.visited_at DESC, v.id DESC
     LIMIT ?3";
 
-const SUGGEST_URL_SQL: &str = "
-    SELECT p.id, p.url,
-           COALESCE(p.title, (SELECT NULLIF(b.title, '') FROM bookmarks b
-                              WHERE b.place_id = p.id ORDER BY b.id LIMIT 1)),
-           EXISTS (SELECT 1 FROM bookmarks b WHERE b.place_id = p.id),
-           p.frecency, p.last_visit_at
-    FROM places p
-    WHERE p.hidden = 0 AND instr(lower(p.url), ?1) > 0
-    ORDER BY p.frecency DESC, p.id";
-
-const SUGGEST_URL_OR_TEXT_SQL: &str = "
-    SELECT p.id, p.url,
-           COALESCE(p.title, (SELECT NULLIF(b.title, '') FROM bookmarks b
-                              WHERE b.place_id = p.id ORDER BY b.id LIMIT 1)),
-           EXISTS (SELECT 1 FROM bookmarks b WHERE b.place_id = p.id),
-           p.frecency, p.last_visit_at
-    FROM places p
-    WHERE p.hidden = 0
-      AND (instr(lower(p.url), ?1) > 0
-           OR p.id IN (SELECT rowid FROM places_fts WHERE places_fts MATCH ?2))
-    ORDER BY p.frecency DESC, p.id";
-
 impl Store {
     /// Records a visit to `url` at `now_ms`, creating the page if needed. A `title` replaces the
     /// stored one; `None` leaves it unchanged.
@@ -147,11 +112,11 @@ impl Store {
     ) -> Result<VisitId> {
         let tx = self.conn.transaction()?;
         tx.prepare_cached(
-            "INSERT INTO places (url, title) VALUES (?1, ?2)
+            "INSERT INTO places (url, title, url_key) VALUES (?1, ?2, ?3)
              ON CONFLICT (url) DO UPDATE SET title = excluded.title
              WHERE excluded.title IS NOT NULL AND excluded.title IS NOT places.title",
         )?
-        .execute(params![url, title])?;
+        .execute(params![url, title, url_key(url, true)])?;
         let place_id: i64 = tx
             .prepare_cached("SELECT id FROM places WHERE url = ?1")?
             .query_row([url], |row| row.get(0))?;
@@ -283,87 +248,6 @@ impl Store {
         }
         tx.commit()?;
         Ok(removed as u64)
-    }
-
-    /// Address-bar suggestions from history and bookmarks, best first.
-    ///
-    /// A page matches if its URL contains `input` (case-insensitively for ASCII, so `exam`
-    /// finds `https://www.example.com/`), or if its URL and title contain every word of `input`
-    /// (the last word as a prefix). Pages are ranked by their frecency as of `now_ms`, then by
-    /// their latest visit, then by URL.
-    ///
-    /// Ranking reads only as many pages as it needs: the stored frecency is computed at the last
-    /// change to a page and can only fall as time passes, so it bounds the score as of `now_ms`.
-    /// This assumes `now_ms` is not earlier than the times given to earlier calls.
-    pub fn suggest(&self, input: &str, limit: u32, now_ms: i64) -> Result<Vec<Suggestion>> {
-        let input = input.trim();
-        if input.is_empty() || limit == 0 {
-            return Ok(Vec::new());
-        }
-        let needle = input.to_ascii_lowercase();
-        let limit = limit as usize;
-        let mut stmt;
-        let mut rows = match fts_query(input) {
-            None => {
-                stmt = self.conn.prepare_cached(SUGGEST_URL_SQL)?;
-                stmt.query(params![needle])?
-            }
-            Some(fts) => {
-                stmt = self.conn.prepare_cached(SUGGEST_URL_OR_TEXT_SQL)?;
-                stmt.query(params![needle, fts])?
-            }
-        };
-
-        let mut best: Vec<Ranked> = Vec::with_capacity(limit + 1);
-        while let Some(row) = rows.next()? {
-            let stored: i64 = row.get(4)?;
-            if best.len() == limit && best.last().is_some_and(|last| stored < last.frecency) {
-                break;
-            }
-            let place_id: i64 = row.get(0)?;
-            let ranked = Ranked {
-                frecency: frecency::calculate_frecency(
-                    &self.conn,
-                    &DEFAULT_FRECENCY_SETTINGS,
-                    place_id,
-                    now_ms,
-                )?,
-                last_visit_at: row.get(5)?,
-                url: row.get(1)?,
-                title: row.get(2)?,
-                is_bookmark: row.get(3)?,
-            };
-            let at = best.partition_point(|other| other.ranks_before(&ranked));
-            if at < limit {
-                best.insert(at, ranked);
-                best.truncate(limit);
-            }
-        }
-        Ok(best
-            .into_iter()
-            .map(|r| Suggestion {
-                url: r.url,
-                title: r.title,
-                is_bookmark: r.is_bookmark,
-                frecency: r.frecency,
-            })
-            .collect())
-    }
-}
-
-/// A suggestion candidate with the fields it is ranked by.
-struct Ranked {
-    frecency: i64,
-    last_visit_at: Option<i64>,
-    url: String,
-    title: Option<String>,
-    is_bookmark: bool,
-}
-
-impl Ranked {
-    fn ranks_before(&self, other: &Ranked) -> bool {
-        (other.frecency, other.last_visit_at, &self.url)
-            < (self.frecency, self.last_visit_at, &other.url)
     }
 }
 

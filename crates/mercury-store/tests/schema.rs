@@ -26,7 +26,14 @@ fn opening_creates_tables_indexes_triggers_and_roots() {
 
     let conn = rusqlite::Connection::open(dir.db()).unwrap();
     let tables = names(&conn, "table");
-    for table in ["places", "visits", "bookmarks", "downloads", "places_fts"] {
+    for table in [
+        "places",
+        "visits",
+        "bookmarks",
+        "downloads",
+        "places_fts",
+        "bookmarks_fts",
+    ] {
         assert!(tables.iter().any(|t| t == table), "missing table {table}");
     }
     let indexes = names(&conn, "index");
@@ -35,12 +42,21 @@ fn opening_creates_tables_indexes_triggers_and_roots() {
         "visits_by_date",
         "bookmarks_by_parent",
         "bookmarks_by_place",
+        "places_by_url_key",
+        "places_by_frecency",
     ] {
         assert!(indexes.iter().any(|i| i == index), "missing index {index}");
     }
     assert_eq!(
         names(&conn, "trigger"),
-        ["places_fts_ad", "places_fts_ai", "places_fts_au"]
+        [
+            "bookmarks_fts_ad",
+            "bookmarks_fts_ai",
+            "bookmarks_fts_au",
+            "places_fts_ad",
+            "places_fts_ai",
+            "places_fts_au",
+        ]
     );
 
     let roots: Vec<(String, String, i64, Option<i64>)> = conn

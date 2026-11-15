@@ -227,11 +227,11 @@ pub(crate) fn calculate_frecency(
     }))
 }
 
-/// Recomputes a page's stored frecency as of `now_ms`.
+/// Recomputes a page's stored frecency as of `now_ms`, and records that time.
 pub(crate) fn update_frecency(conn: &Connection, page_id: i64, now_ms: i64) -> Result<()> {
     let frecency = calculate_frecency(conn, &DEFAULT_FRECENCY_SETTINGS, page_id, now_ms)?;
-    conn.prepare_cached("UPDATE places SET frecency = ?1 WHERE id = ?2")?
-        .execute(params![frecency, page_id])?;
+    conn.prepare_cached("UPDATE places SET frecency = ?1, frecency_at = ?3 WHERE id = ?2")?
+        .execute(params![frecency, page_id, now_ms])?;
     Ok(())
 }
 

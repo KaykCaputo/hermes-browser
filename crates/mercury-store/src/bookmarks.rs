@@ -6,6 +6,7 @@ use crate::Store;
 use crate::error::{Result, StoreError};
 use crate::frecency;
 use crate::history::refresh_place;
+use crate::search::url_key;
 
 const KIND_BOOKMARK: i64 = 1;
 const KIND_FOLDER: i64 = 2;
@@ -372,8 +373,10 @@ fn close_gap(conn: &Connection, parent: i64, position: i64) -> Result<()> {
 
 /// The id of the page for `url`, creating an unvisited page if needed.
 fn ensure_place(conn: &Connection, url: &str) -> Result<i64> {
-    conn.prepare_cached("INSERT INTO places (url) VALUES (?1) ON CONFLICT (url) DO NOTHING")?
-        .execute([url])?;
+    conn.prepare_cached(
+        "INSERT INTO places (url, url_key) VALUES (?1, ?2) ON CONFLICT (url) DO NOTHING",
+    )?
+    .execute([url, &url_key(url, true)])?;
     Ok(conn
         .prepare_cached("SELECT id FROM places WHERE url = ?1")?
         .query_row([url], |row| row.get(0))?)

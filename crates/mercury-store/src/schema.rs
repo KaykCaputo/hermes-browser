@@ -19,8 +19,12 @@ const MIGRATIONS: &[&str] = &[
         typed_count   INTEGER NOT NULL DEFAULT 0,
         last_visit_at INTEGER,
         frecency      INTEGER NOT NULL DEFAULT -1,
-        hidden        INTEGER NOT NULL DEFAULT 0
+        hidden        INTEGER NOT NULL DEFAULT 0,
+        url_key       TEXT NOT NULL,             -- lower-case URL without scheme and www.
+        frecency_at   INTEGER                    -- when `frecency` was computed
     ) STRICT;
+    CREATE INDEX places_by_url_key  ON places(url_key, frecency);
+    CREATE INDEX places_by_frecency ON places(frecency);
 
     CREATE TABLE visits (
         id         INTEGER PRIMARY KEY,
@@ -44,10 +48,6 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX bookmarks_by_parent ON bookmarks(parent_id, position);
     CREATE INDEX bookmarks_by_place  ON bookmarks(place_id);
-
-    INSERT INTO bookmarks (guid, kind, parent_id, position, title, place_id, added_at, modified_at)
-    VALUES ('toolbar_____', 2, NULL, 0, 'Bookmarks Bar', NULL, 0, 0),
-           ('menu________', 2, NULL, 1, 'Other Bookmarks', NULL, 0, 0);
 
     CREATE TABLE downloads (
         id             INTEGER PRIMARY KEY,
@@ -80,7 +80,24 @@ const MIGRATIONS: &[&str] = &[
         INSERT INTO places_fts(places_fts, rowid, url, title)
         VALUES ('delete', old.id, old.url, old.title);
         INSERT INTO places_fts(rowid, url, title) VALUES (new.id, new.url, new.title);
-    END;",
+    END;
+
+    CREATE VIRTUAL TABLE bookmarks_fts USING fts5(title, content='bookmarks', content_rowid='id');
+    CREATE TRIGGER bookmarks_fts_ai AFTER INSERT ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(rowid, title) VALUES (new.id, new.title);
+    END;
+    CREATE TRIGGER bookmarks_fts_ad AFTER DELETE ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title) VALUES ('delete', old.id, old.title);
+    END;
+    CREATE TRIGGER bookmarks_fts_au AFTER UPDATE OF title ON bookmarks BEGIN
+        INSERT INTO bookmarks_fts(bookmarks_fts, rowid, title) VALUES ('delete', old.id, old.title);
+        INSERT INTO bookmarks_fts(rowid, title) VALUES (new.id, new.title);
+    END;
+
+    -- The roots, after the triggers so that the full-text mirror includes them.
+    INSERT INTO bookmarks (guid, kind, parent_id, position, title, place_id, added_at, modified_at)
+    VALUES ('toolbar_____', 2, NULL, 0, 'Bookmarks Bar', NULL, 0, 0),
+           ('menu________', 2, NULL, 1, 'Other Bookmarks', NULL, 0, 0);",
 ];
 
 /// The newest schema version this build understands.
