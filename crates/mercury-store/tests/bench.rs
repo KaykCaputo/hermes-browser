@@ -126,7 +126,7 @@ fn generate() -> Data {
         .map(|i| {
             let site = &sites[rng.skewed(sites.len())];
             let url = match rng.below(4) {
-                0 => format!("{site}/index.html"),
+                0 => format!("{site}/{i}/index.html"),
                 _ => format!(
                     "{site}/{}/{}-{i}",
                     PATH_WORDS[rng.skewed(PATH_WORDS.len())],
@@ -297,6 +297,10 @@ fn bench_suggest_record_and_refresh() {
         start.elapsed().as_secs_f64()
     );
     let raw = rusqlite::Connection::open(&path).unwrap();
+    let places: i64 = raw
+        .query_row("SELECT count(*) FROM places", [], |row| row.get(0))
+        .unwrap();
+    println!("distinct pages stored: {places}");
     raw.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
         .unwrap();
     println!(

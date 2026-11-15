@@ -76,8 +76,8 @@ impl Store {
 /// How long a statement waits for another connection's lock before failing with "busy".
 const BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Prepared statements kept for reuse; above the number of distinct statements in the crate
-/// (checked by a test).
+/// Prepared statements kept for reuse: more than the crate's `prepare_cached` call sites, each
+/// of which prepares one fixed statement (both checked by a test).
 const STATEMENT_CACHE_CAPACITY: usize = 128;
 
 #[cfg(test)]
@@ -102,19 +102,31 @@ mod tests {
             include_str!("frecency.rs"),
             include_str!("history.rs"),
             include_str!("import.rs"),
-            include_str!("lib.rs"),
             include_str!("schema.rs"),
+            include_str!("search.rs"),
             include_str!("suggest.rs"),
         ];
-        // Every call site is counted, so this over-counts statements used in several places.
-        let call_sites: usize = sources
-            .iter()
-            .map(|s| s.matches(".prepare_cached(").count())
-            .sum();
-        assert!(call_sites > 40, "counted {call_sites}");
+        let call = concat!(".prepare_", "cached(");
+        let mut call_sites = 0;
+        for source in sources {
+            for (at, _) in source.match_indices(call) {
+                call_sites += 1;
+                // Each call site prepares one fixed statement (a literal, a constant or a
+                // `concat!` of literals), so call sites bound the distinct statements.
+                let argument = source[at + call.len()..].trim_start();
+                assert!(
+                    argument.starts_with('"')
+                        || argument.starts_with("concat!")
+                        || argument.starts_with(|c: char| c.is_ascii_uppercase()),
+                    "a call site prepares a statement that is not fixed: {}",
+                    &argument[..argument.len().min(40)]
+                );
+            }
+        }
+        assert!(call_sites > 0);
         assert!(
             call_sites < STATEMENT_CACHE_CAPACITY,
-            "counted {call_sites}"
+            "{call_sites} call sites"
         );
     }
 }

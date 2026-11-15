@@ -13,6 +13,20 @@ use crate::limits::{
 pub struct DownloadRecordId(pub i64);
 
 /// The state of a download. Uses Chromium's numbering (`download_constants.h`).
+///
+/// Transitions (anything else fails with [`StoreError::InvalidState`] and changes nothing):
+///
+/// | From | To | By |
+/// | --- | --- | --- |
+/// | (new) | `InProgress` | [`Store::insert_download`] |
+/// | `InProgress` | `InProgress` (bytes) | [`Store::update_download_progress`] |
+/// | `InProgress` | `Complete`, `Cancelled`, `Interrupted` | [`Store::finish_download`] |
+/// | `InProgress` | `Interrupted` | [`Store::mark_unfinished_downloads_interrupted`] |
+/// | `Interrupted` | `InProgress` | [`Store::resume_download`] |
+/// | `Interrupted` | `Cancelled` | [`Store::finish_download`] |
+///
+/// `Complete` and `Cancelled` are final. [`Store::set_download_validators`] is allowed in
+/// every state.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DownloadState {
@@ -145,13 +159,14 @@ impl Store {
         received_bytes: i64,
         total_bytes: Option<i64>,
     ) -> Result<()> {
-        self.update_one(
-            id,
-            "UPDATE downloads SET received_bytes = ?2, total_bytes = coalesce(?3, total_bytes)
-             WHERE id = ?1 AND state = 0",
-            params![id.0, received_bytes, total_bytes],
-            "the download is not in progress",
-        )
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE downloads SET received_bytes = ?2, total_bytes = coalesce(?3, total_bytes)
+                 WHERE id = ?1 AND state = 0",
+            )?
+            .execute(params![id.0, received_bytes, total_bytes])?;
+        self.check_transition(id, changed, "the download is not in progress")
     }
 
     /// Stores the final URL and the validators needed to resume, in any state. `None` clears a
@@ -166,22 +181,27 @@ impl Store {
     ) -> Result<()> {
         final_url.map(check_url).transpose()?;
         let fits = |v: &&str| v.len() <= MAX_VALIDATOR_BYTES;
-        self.update_one(
-            id,
-            "UPDATE downloads SET final_url = ?2, etag = ?3, last_modified = ?4 WHERE id = ?1",
-            params![
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE downloads SET final_url = ?2, etag = ?3, last_modified = ?4 WHERE id = ?1",
+            )?
+            .execute(params![
                 id.0,
                 final_url,
                 etag.filter(fits),
                 last_modified.filter(fits)
-            ],
-            "unreachable: any state is allowed",
-        )
+            ])?;
+        if changed == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
     }
 
-    /// Marks a download in progress complete, cancelled or interrupted. `state` must not be
-    /// [`DownloadState::InProgress`]. A download that is not in progress is left unchanged and
-    /// this fails with [`StoreError::InvalidState`], so a late cancel cannot rewrite a completed
+    /// Marks a download in progress complete, cancelled or interrupted, or cancels an
+    /// interrupted one (see the table on [`DownloadState`]). `state` must not be
+    /// [`DownloadState::InProgress`]. Any other transition leaves the record unchanged and
+    /// fails with [`StoreError::InvalidState`], so a late cancel cannot rewrite a completed
     /// record. `error` is cut to [`MAX_ERROR_CHARS`].
     pub fn finish_download(
         &mut self,
@@ -195,34 +215,37 @@ impl Store {
                 "a download cannot be finished as in progress",
             ));
         }
-        self.update_one(
-            id,
-            "UPDATE downloads SET state = ?2, error = ?3, ended_at = ?4 WHERE id = ?1 AND state = 0",
-            params![
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE downloads SET state = ?2, error = ?3, ended_at = ?4
+                 WHERE id = ?1 AND (state = 0 OR (state = 4 AND ?2 = 2))",
+            )?
+            .execute(params![
                 id.0,
                 state as u8,
                 error.map(|e| cut(e, MAX_ERROR_CHARS)),
                 ended_at_ms
-            ],
-            "the download is not in progress",
+            ])?;
+        self.check_transition(
+            id,
+            changed,
+            "only a download in progress can finish; an interrupted one can only be cancelled",
         )
     }
 
     /// Puts an interrupted download back in progress, clearing its end time and error, so that
     /// a resumed transfer can be tracked. Bytes received, validators and start time are kept.
     /// Any other state fails with [`StoreError::InvalidState`] and changes nothing.
-    ///
-    /// `now_ms` is not stored today (the table has no column for a resume time); it is part of
-    /// the signature so that one can be added without changing callers.
-    pub fn resume_download(&mut self, id: DownloadRecordId, now_ms: i64) -> Result<()> {
-        let _ = now_ms;
-        self.update_one(
-            id,
-            "UPDATE downloads SET state = 0, ended_at = NULL, error = NULL
-             WHERE id = ?1 AND state = 4",
-            params![id.0],
-            "only an interrupted download can be resumed",
-        )
+    pub fn resume_download(&mut self, id: DownloadRecordId) -> Result<()> {
+        let changed = self
+            .conn
+            .prepare_cached(
+                "UPDATE downloads SET state = 0, ended_at = NULL, error = NULL
+                 WHERE id = ?1 AND state = 4",
+            )?
+            .execute([id.0])?;
+        self.check_transition(id, changed, "only an interrupted download can be resumed")
     }
 
     /// Download records, newest first.
@@ -297,17 +320,15 @@ impl Store {
         Ok(changed as u64)
     }
 
-    /// Runs a single-row update. If no row matched, fails with [`StoreError::NotFound`] when
-    /// the record does not exist and with [`StoreError::InvalidState`]`(state_error)` when the
-    /// update's state condition excluded it.
-    fn update_one(
-        &mut self,
+    /// After an update guarded by a state condition that changed `changed` rows: success if it
+    /// changed the record, [`StoreError::NotFound`] if the record does not exist, otherwise
+    /// [`StoreError::InvalidState`]`(refusal)`.
+    fn check_transition(
+        &self,
         id: DownloadRecordId,
-        sql: &'static str,
-        params: impl rusqlite::Params,
-        state_error: &'static str,
+        changed: usize,
+        refusal: &'static str,
     ) -> Result<()> {
-        let changed = self.conn.prepare_cached(sql)?.execute(params)?;
         if changed > 0 {
             return Ok(());
         }
@@ -316,7 +337,7 @@ impl Store {
             .prepare_cached("SELECT EXISTS (SELECT 1 FROM downloads WHERE id = ?1)")?
             .query_row([id.0], |row| row.get(0))?;
         Err(if exists {
-            StoreError::InvalidState(state_error)
+            StoreError::InvalidState(refusal)
         } else {
             StoreError::NotFound
         })

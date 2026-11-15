@@ -254,7 +254,7 @@ fn an_interrupted_download_can_be_resumed() {
         .finish_download(id, DownloadState::Interrupted, Some("reset"), NOW + 1)
         .unwrap();
 
-    store.resume_download(id, NOW + 2).unwrap();
+    store.resume_download(id).unwrap();
     let record = find(&store, id);
     assert_eq!(record.state, DownloadState::InProgress);
     assert_eq!((record.ended_at_ms, record.error), (None, None));
@@ -283,13 +283,13 @@ fn only_an_interrupted_download_can_be_resumed() {
     for id in [running, complete, cancelled] {
         let before = find(&store, id);
         assert!(matches!(
-            store.resume_download(id, NOW + 1),
+            store.resume_download(id),
             Err(StoreError::InvalidState(_))
         ));
         assert_eq!(find(&store, id), before);
     }
     assert!(matches!(
-        store.resume_download(DownloadRecordId(999), NOW),
+        store.resume_download(DownloadRecordId(999)),
         Err(StoreError::NotFound)
     ));
 }
@@ -376,4 +376,31 @@ fn web_supplied_text_is_bounded() {
         MAX_ERROR_CHARS
     );
     assert_eq!(store.downloads(10).unwrap().len(), 1);
+}
+
+#[test]
+fn an_interrupted_download_can_be_cancelled_but_not_completed() {
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.insert_download(&new("d-1", NOW)).unwrap();
+    store
+        .finish_download(id, DownloadState::Interrupted, Some("reset"), NOW + 1)
+        .unwrap();
+    for state in [DownloadState::Complete, DownloadState::Interrupted] {
+        let before = find(&store, id);
+        assert!(matches!(
+            store.finish_download(id, state, None, NOW + 2),
+            Err(StoreError::InvalidState(_))
+        ));
+        assert_eq!(find(&store, id), before);
+    }
+    store
+        .finish_download(id, DownloadState::Cancelled, None, NOW + 3)
+        .unwrap();
+    let record = find(&store, id);
+    assert_eq!(record.state, DownloadState::Cancelled);
+    assert_eq!((record.ended_at_ms, record.error), (Some(NOW + 3), None));
+    assert!(matches!(
+        store.resume_download(id),
+        Err(StoreError::InvalidState(_))
+    ));
 }
