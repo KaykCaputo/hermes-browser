@@ -1,0 +1,384 @@
+//! Browsing history: pages, visits, full-text search and address-bar suggestions.
+
+use rusqlite::{Connection, OptionalExtension, params};
+
+use crate::Store;
+use crate::error::Result;
+use crate::frecency::{self, DEFAULT_FRECENCY_SETTINGS};
+use crate::search::fts_query;
+
+/// How the user reached a page. Uses Firefox's numbering (`nsINavHistoryService.idl`).
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VisitTransition {
+    /// Followed a link.
+    Link = 1,
+    /// Typed into the address bar.
+    Typed = 2,
+    /// Opened from a bookmark.
+    Bookmark = 3,
+    /// Reloaded.
+    Reload = 9,
+}
+
+impl VisitTransition {
+    /// The transition stored as `value`, if it is one Mercury records.
+    pub(crate) fn from_i64(value: i64) -> Option<Self> {
+        match value {
+            1 => Some(Self::Link),
+            2 => Some(Self::Typed),
+            3 => Some(Self::Bookmark),
+            9 => Some(Self::Reload),
+            _ => None,
+        }
+    }
+}
+
+/// Identifies one visit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct VisitId(pub i64);
+
+/// One visit, as listed in the history panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    /// The visit.
+    pub visit_id: VisitId,
+    /// The page's URL.
+    pub url: String,
+    /// The page's current title, if known.
+    pub title: Option<String>,
+    /// When the visit happened, in milliseconds since the Unix epoch.
+    pub visited_at_ms: i64,
+    /// How the page was reached.
+    pub transition: VisitTransition,
+}
+
+/// Which visits [`Store::clear_history`] removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClearRange {
+    /// Every visit.
+    All,
+    /// Visits at or after `from_ms` (milliseconds since the Unix epoch).
+    Since {
+        /// The start of the range, inclusive.
+        from_ms: i64,
+    },
+}
+
+/// One address-bar suggestion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Suggestion {
+    /// The page's URL.
+    pub url: String,
+    /// The page's title or, if it has none, its bookmark's title.
+    pub title: Option<String>,
+    /// Whether the page is bookmarked.
+    pub is_bookmark: bool,
+    /// The page's frecency as of the `now_ms` given to [`Store::suggest`]; higher ranks first.
+    pub frecency: i64,
+}
+
+const HISTORY_SQL: &str = "
+    SELECT v.id, p.url, p.title, v.visited_at, v.transition
+    FROM visits v JOIN places p ON p.id = v.place_id
+    WHERE v.visited_at < ?1
+    ORDER BY v.visited_at DESC, v.id DESC
+    LIMIT ?2";
+
+const HISTORY_SEARCH_SQL: &str = "
+    SELECT v.id, p.url, p.title, v.visited_at, v.transition
+    FROM visits v JOIN places p ON p.id = v.place_id
+    WHERE v.visited_at < ?1
+      AND v.place_id IN (SELECT rowid FROM places_fts WHERE places_fts MATCH ?3)
+    ORDER BY v.visited_at DESC, v.id DESC
+    LIMIT ?2";
+
+const SUGGEST_URL_SQL: &str = "
+    SELECT p.id, p.url,
+           COALESCE(p.title, (SELECT NULLIF(b.title, '') FROM bookmarks b
+                              WHERE b.place_id = p.id ORDER BY b.id LIMIT 1)),
+           EXISTS (SELECT 1 FROM bookmarks b WHERE b.place_id = p.id),
+           p.frecency, p.last_visit_at
+    FROM places p
+    WHERE p.hidden = 0 AND instr(lower(p.url), ?1) > 0
+    ORDER BY p.frecency DESC, p.id";
+
+const SUGGEST_URL_OR_TEXT_SQL: &str = "
+    SELECT p.id, p.url,
+           COALESCE(p.title, (SELECT NULLIF(b.title, '') FROM bookmarks b
+                              WHERE b.place_id = p.id ORDER BY b.id LIMIT 1)),
+           EXISTS (SELECT 1 FROM bookmarks b WHERE b.place_id = p.id),
+           p.frecency, p.last_visit_at
+    FROM places p
+    WHERE p.hidden = 0
+      AND (instr(lower(p.url), ?1) > 0
+           OR p.id IN (SELECT rowid FROM places_fts WHERE places_fts MATCH ?2))
+    ORDER BY p.frecency DESC, p.id";
+
+impl Store {
+    /// Records a visit to `url` at `now_ms`, creating the page if needed. A `title` replaces the
+    /// stored one; `None` leaves it unchanged.
+    pub fn record_visit(
+        &mut self,
+        url: &str,
+        title: Option<&str>,
+        transition: VisitTransition,
+        now_ms: i64,
+    ) -> Result<VisitId> {
+        let tx = self.conn.transaction()?;
+        tx.prepare_cached(
+            "INSERT INTO places (url, title) VALUES (?1, ?2)
+             ON CONFLICT (url) DO UPDATE SET title = excluded.title
+             WHERE excluded.title IS NOT NULL AND excluded.title IS NOT places.title",
+        )?
+        .execute(params![url, title])?;
+        let place_id: i64 = tx
+            .prepare_cached("SELECT id FROM places WHERE url = ?1")?
+            .query_row([url], |row| row.get(0))?;
+        tx.prepare_cached(
+            "INSERT INTO visits (place_id, visited_at, transition) VALUES (?1, ?2, ?3)",
+        )?
+        .execute(params![place_id, now_ms, transition as u8])?;
+        let visit_id = tx.last_insert_rowid();
+        tx.prepare_cached(
+            "UPDATE places SET visit_count = visit_count + 1,
+                               typed_count = typed_count + ?2,
+                               last_visit_at = max(coalesce(last_visit_at, ?3), ?3)
+             WHERE id = ?1",
+        )?
+        .execute(params![
+            place_id,
+            i64::from(transition == VisitTransition::Typed),
+            now_ms
+        ])?;
+        frecency::update_frecency(&tx, place_id, now_ms)?;
+        tx.commit()?;
+        Ok(VisitId(visit_id))
+    }
+
+    /// Sets the title of a known page. Returns `false` if the URL is unknown.
+    pub fn set_page_title(&mut self, url: &str, title: &str) -> Result<bool> {
+        let changed = self
+            .conn
+            .prepare_cached("UPDATE places SET title = ?2 WHERE url = ?1")?
+            .execute(params![url, title])?;
+        Ok(changed > 0)
+    }
+
+    /// Newest first. `query` filters by URL or title (full-text, prefix match on the last word).
+    ///
+    /// Only visits strictly before `before_ms` are listed, if given. An empty or blank `query`
+    /// lists everything; one with no searchable words matches nothing. Characters with a meaning
+    /// in FTS5 query syntax are never interpreted.
+    pub fn history(
+        &self,
+        query: Option<&str>,
+        before_ms: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<HistoryEntry>> {
+        let before = before_ms.unwrap_or(i64::MAX);
+        let query = query.filter(|q| !q.trim().is_empty());
+        let mut stmt;
+        let rows = match query {
+            None => {
+                stmt = self.conn.prepare_cached(HISTORY_SQL)?;
+                stmt.query(params![before, limit])?
+            }
+            Some(query) => {
+                let Some(fts) = fts_query(query) else {
+                    return Ok(Vec::new());
+                };
+                stmt = self.conn.prepare_cached(HISTORY_SEARCH_SQL)?;
+                stmt.query(params![before, limit, fts])?
+            }
+        };
+        rows.mapped(|row| {
+            Ok(HistoryEntry {
+                visit_id: VisitId(row.get(0)?),
+                url: row.get(1)?,
+                title: row.get(2)?,
+                visited_at_ms: row.get(3)?,
+                transition: transition_column(row, 4)?,
+            })
+        })
+        .collect::<rusqlite::Result<_>>()
+        .map_err(Into::into)
+    }
+
+    /// Deletes one visit. Returns `false` if it did not exist.
+    pub fn delete_visit(&mut self, id: VisitId, now_ms: i64) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let place_id: Option<i64> = tx
+            .prepare_cached("SELECT place_id FROM visits WHERE id = ?1")?
+            .query_row([id.0], |row| row.get(0))
+            .optional()?;
+        let Some(place_id) = place_id else {
+            return Ok(false);
+        };
+        tx.prepare_cached("DELETE FROM visits WHERE id = ?1")?
+            .execute([id.0])?;
+        refresh_place(&tx, place_id, now_ms)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Deletes all visits of one URL. Returns `false` if there were none. A bookmarked page is
+    /// kept, with no visits.
+    pub fn delete_page(&mut self, url: &str, now_ms: i64) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        let place_id: Option<i64> = tx
+            .prepare_cached("SELECT id FROM places WHERE url = ?1")?
+            .query_row([url], |row| row.get(0))
+            .optional()?;
+        let Some(place_id) = place_id else {
+            return Ok(false);
+        };
+        let removed = tx
+            .prepare_cached("DELETE FROM visits WHERE place_id = ?1")?
+            .execute([place_id])?;
+        refresh_place(&tx, place_id, now_ms)?;
+        tx.commit()?;
+        Ok(removed > 0)
+    }
+
+    /// Deletes the visits in `range` and returns how many were removed. Pages left with no
+    /// visits are removed unless bookmarked.
+    pub fn clear_history(&mut self, range: ClearRange, now_ms: i64) -> Result<u64> {
+        let from = match range {
+            ClearRange::All => i64::MIN,
+            ClearRange::Since { from_ms } => from_ms,
+        };
+        let tx = self.conn.transaction()?;
+        let places: Vec<i64> = tx
+            .prepare_cached("SELECT DISTINCT place_id FROM visits WHERE visited_at >= ?1")?
+            .query_map([from], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let removed = tx
+            .prepare_cached("DELETE FROM visits WHERE visited_at >= ?1")?
+            .execute([from])?;
+        for place_id in places {
+            refresh_place(&tx, place_id, now_ms)?;
+        }
+        tx.commit()?;
+        Ok(removed as u64)
+    }
+
+    /// Address-bar suggestions from history and bookmarks, best first.
+    ///
+    /// A page matches if its URL contains `input` (case-insensitively for ASCII, so `exam`
+    /// finds `https://www.example.com/`), or if its URL and title contain every word of `input`
+    /// (the last word as a prefix). Pages are ranked by their frecency as of `now_ms`, then by
+    /// their latest visit, then by URL.
+    ///
+    /// Ranking reads only as many pages as it needs: the stored frecency is computed at the last
+    /// change to a page and can only fall as time passes, so it bounds the score as of `now_ms`.
+    /// This assumes `now_ms` is not earlier than the times given to earlier calls.
+    pub fn suggest(&self, input: &str, limit: u32, now_ms: i64) -> Result<Vec<Suggestion>> {
+        let input = input.trim();
+        if input.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let needle = input.to_ascii_lowercase();
+        let limit = limit as usize;
+        let mut stmt;
+        let mut rows = match fts_query(input) {
+            None => {
+                stmt = self.conn.prepare_cached(SUGGEST_URL_SQL)?;
+                stmt.query(params![needle])?
+            }
+            Some(fts) => {
+                stmt = self.conn.prepare_cached(SUGGEST_URL_OR_TEXT_SQL)?;
+                stmt.query(params![needle, fts])?
+            }
+        };
+
+        let mut best: Vec<Ranked> = Vec::with_capacity(limit + 1);
+        while let Some(row) = rows.next()? {
+            let stored: i64 = row.get(4)?;
+            if best.len() == limit && best.last().is_some_and(|last| stored < last.frecency) {
+                break;
+            }
+            let place_id: i64 = row.get(0)?;
+            let ranked = Ranked {
+                frecency: frecency::calculate_frecency(
+                    &self.conn,
+                    &DEFAULT_FRECENCY_SETTINGS,
+                    place_id,
+                    now_ms,
+                )?,
+                last_visit_at: row.get(5)?,
+                url: row.get(1)?,
+                title: row.get(2)?,
+                is_bookmark: row.get(3)?,
+            };
+            let at = best.partition_point(|other| other.ranks_before(&ranked));
+            if at < limit {
+                best.insert(at, ranked);
+                best.truncate(limit);
+            }
+        }
+        Ok(best
+            .into_iter()
+            .map(|r| Suggestion {
+                url: r.url,
+                title: r.title,
+                is_bookmark: r.is_bookmark,
+                frecency: r.frecency,
+            })
+            .collect())
+    }
+}
+
+/// A suggestion candidate with the fields it is ranked by.
+struct Ranked {
+    frecency: i64,
+    last_visit_at: Option<i64>,
+    url: String,
+    title: Option<String>,
+    is_bookmark: bool,
+}
+
+impl Ranked {
+    fn ranks_before(&self, other: &Ranked) -> bool {
+        (other.frecency, other.last_visit_at, &self.url)
+            < (self.frecency, self.last_visit_at, &other.url)
+    }
+}
+
+/// Reads a visit transition column.
+fn transition_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<VisitTransition> {
+    let value: i64 = row.get(index)?;
+    VisitTransition::from_i64(value).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            format!("unknown visit transition {value}").into(),
+        )
+    })
+}
+
+/// Brings a page's counters, last-visit time and frecency in line with its remaining visits and
+/// bookmarks, and removes it if it has neither.
+pub(crate) fn refresh_place(conn: &Connection, place_id: i64, now_ms: i64) -> Result<()> {
+    let (visits, typed, last_visit_at): (i64, i64, Option<i64>) = conn
+        .prepare_cached(
+            "SELECT count(*), coalesce(sum(transition = 2), 0), max(visited_at)
+             FROM visits WHERE place_id = ?1",
+        )?
+        .query_row([place_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+    let bookmarks: i64 = conn
+        .prepare_cached("SELECT count(*) FROM bookmarks WHERE place_id = ?1")?
+        .query_row([place_id], |row| row.get(0))?;
+    if visits == 0 && bookmarks == 0 {
+        conn.prepare_cached("DELETE FROM places WHERE id = ?1")?
+            .execute([place_id])?;
+        return Ok(());
+    }
+    conn.prepare_cached(
+        "UPDATE places SET visit_count = ?2, typed_count = ?3, last_visit_at = ?4 WHERE id = ?1",
+    )?
+    .execute(params![place_id, visits, typed, last_visit_at])?;
+    frecency::update_frecency(conn, place_id, now_ms)
+}
