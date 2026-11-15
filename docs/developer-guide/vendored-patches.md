@@ -52,6 +52,8 @@ The vendored copy also makes the GPU backend robust:
 - **CPU fallback.** When a canvas cannot get a GPU adapter or device, or vello's renderer cannot be created, that canvas is drawn by the CPU backend (the one `--disable-gpu-canvas` selects). One warning, `GPU 2D canvas unavailable (<reason>); drawing 2D canvases on the CPU`, is logged per process, and later canvases go straight to the CPU backend without trying the GPU again.
 - **Failed renders** are logged once (`VELLO RENDER ERROR …`) instead of panicking Servo's Canvas thread, which would leave the session without any 2D canvas.
 - **Failed read-backs** unmap the buffer, so the next read-back on that canvas can succeed.
+- **Shared GPU resources.** All GPU canvases share one wgpu device and one vello renderer (whose buffers take about 175 MB); a canvas larger than 4096 pixels on a side gets a renderer of its own, and one larger than 8192 is drawn on the CPU. If the shared device is lost, canvases created afterwards are drawn on the CPU.
+- **Correctness fixes** found with `tests/pages/canvas-parity.html`: earlier drawing is kept when a canvas is drawn again, non-rectangular clips and `evenodd` clips are applied.
 
 `third_party/servo-canvas/MERCURY.md` lists each change, why it is needed and when it can be dropped. The first commit that added the directory holds the crate exactly as published, so `git diff 60ee59f -- third_party/servo-canvas` shows the whole patch.
 
@@ -65,6 +67,16 @@ Mercury draws 2D canvases on the GPU by default. `--disable-gpu-canvas` selects 
 ```
 
 To confirm which backend drew, run with `RUST_LOG=vello=debug,wgpu_core=trace`. When the GPU canvas draws, a page that creates a 2D canvas logs vello's labelled GPU resources and pipelines, for example `Device::create_buffer("vello.scene")`, `vello.flatten` and `vello.fine_area`. With `--disable-gpu-canvas` no `vello.` label appears. After the CPU fallback warning, no further `vello.` resources are created (a failed renderer creation may log some pipeline labels just before the warning). A secondary signal is the device id format: vello's wgpu 30 logs `Created Device DeviceId(…)`, while Slint's wgpu 29 logs `Created Device Id(…)`.
+
+`tests/pages/canvas-parity.html` draws one case per small canvas (paths, line styles, transforms, clips, compositing, gradients, patterns, shadows, text, `drawImage`, image data, drawing over time, serialisation, unusual sizes) and lists the pixels it reads back with the values the specification gives. It also puts the list on one line in the document title, which the window title log carries out of the browser:
+
+```bash
+RUST_LOG=warn,winit::window=debug ./target/release/mercury-browser --screenshot gpu.png \
+  --window-size 1400x1600 --screenshot-delay 2500 "file://$PWD/tests/pages/canvas-parity.html" 2>&1 \
+  | grep -o 'title="PARITY-BEGIN .* PARITY-END' | perl -pe 's/ ;; /\n/g'
+```
+
+Run it in both modes and compare line by line: `i` samples must be identical, `e` samples may differ by 2 per channel, `b` text boxes by 1 pixel. The differences known today are listed in `third_party/servo-canvas/MERCURY.md`.
 
 `tests/pages/canvas-many.html` creates 50 canvases (`?n=200` for more), reads a pixel back from each and prints the timings; use it to compare the two backends' cost of creating canvases.
 

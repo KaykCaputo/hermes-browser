@@ -163,8 +163,8 @@ non-zero rule, so `clip("evenodd")` clipped to the whole outer shape
 (`tests/pages/canvas-parity.html`, case `clip-evenodd`). Now the rule is
 converted with the crate's existing `FillRule` → `peniko::Fill` conversion,
 used for the clip layer and stored with the clip path, so that the layer is
-re-opened with the same rule after a render. (The CPU backend has the same
-defect in `vello_cpu`; this change does not touch it.)
+re-opened with the same rule after a render. (The CPU backend also clips
+`evenodd` paths with the non-zero rule; not investigated, not changed.)
 
 Drop it when Servo passes the fill rule itself.
 
@@ -191,6 +191,24 @@ Drop it when Servo checks the size itself.
   (premultiplied 8-bit storage, truncated when un-premultiplied); the GPU
   backend reads `[0,102,203,128]`. Both are within the ±1 tolerance of
   `tests/pages/canvas-readback.html`, the CPU one at its edge.
+
+## Known differences between the backends (`tests/pages/canvas-parity.html`)
+
+Left as they are; see the Task 4d report for details.
+
+- GPU: gradients are evaluated about half a pixel off the pixel centre
+  (`gradient-radial`: 255 and 127 where the specification gives 251 and
+  130); inside vello, cosmetic.
+- GPU: a canvas resized beyond 8192 pixels after creation stays blank
+  (`wide-10000-after-resize`).
+- CPU: `clearRect` ignores the clip (`clip-then-clear`), `putImageData`
+  blends instead of replacing (`putimagedata-over-drawing`), `evenodd` clips
+  use the non-zero rule (`clip-evenodd`).
+- Both: shapes drawn with a shadow are not drawn at all — neither backend
+  implements `draw_surface_with_shadow` (`shadow-offset`, `shadow-blur`).
+  Conic gradients and `OffscreenCanvas` are not available in this Servo
+  configuration, and an image loaded from a `toBlob` blob URL fails to decode
+  in both modes (an engine issue, not a canvas one).
 
 ## Removing this directory
 
