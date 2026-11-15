@@ -5,6 +5,7 @@ members = [
     "crates/mercury-downloads",
     "crates/mercury-import",
     "crates/mercury-passwords",
+    "crates/mercury-store",
     "crates/mercury-ui",
     "crates/talaria-core",
     "crates/talaria-servo",
