@@ -14,7 +14,7 @@ repository's MPL-2.0 `LICENSE` file applies to this directory.
 Mercury enables Servo's `vello` feature, the GPU 2D-canvas backend. The first
 commit that added this directory (`60ee59f`) holds the crate as published, so
 `git diff 60ee59f -- third_party/servo-canvas` shows every change below.
-Changes 2–6 are marked with `Mercury:` comments in the source.
+Changes 2–7 are marked with `Mercury:` comments in the source.
 
 ## 1. Build with wgpu 30 (`vello_backend.rs`, `VelloDrawTarget::map_read`)
 
@@ -134,6 +134,20 @@ loss is first seen while waiting for a read-back, wgpu panics instead (see
 
 Drop it when Servo shares the device itself.
 
+## 7. Apply non-rectangular clips (`vello_backend.rs`, `render_to_texture`)
+
+The backend keeps a clip as an open vello clip layer until the page restores
+it, and re-opens the active clips after every render. vello, however, applies
+a clip layer's shape only when the layer is closed; a layer that is still open
+when the scene is rendered clips to the shape's bounding box only. So any
+read-back or displayed frame taken while a clip was active showed drawing
+clipped to the bounding box: a circular clip came out square
+(`tests/pages/canvas-parity.html`, case `clip-path`). Rectangular clips were
+unaffected. Now the render runs inside `ignore_clips`, which closes the open
+clip layers and re-opens them afterwards.
+
+Drop it when Servo closes the clip layers itself.
+
 ## Known limitations (accepted)
 
 - A device lost while a read-back waits on the GPU panics inside
@@ -148,5 +162,5 @@ Drop it when Servo shares the device itself.
 ## Removing this directory
 
 Remove the `[patch.crates-io]` entry and this directory once a Servo release
-compiles with the `vello` feature and contains equivalents of changes 2–6, or
+compiles with the `vello` feature and contains equivalents of changes 2–7, or
 once Mercury no longer needs them.

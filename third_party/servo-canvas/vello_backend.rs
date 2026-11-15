@@ -755,21 +755,24 @@ impl VelloDrawTarget {
             return true;
         }
 
-        let result = self
-            .renderer
-            .borrow_mut()
-            .render_to_texture(
-                &self.device,
-                &self.queue,
-                &self.scene,
-                &self.render_texture_view,
+        // Mercury: vello applies a clip's shape only when its layer is closed
+        // (until then it clips to the shape's bounding box), so close the
+        // open clip layers for the render; `ignore_clips` reopens them.
+        let mut result = Ok(());
+        self.ignore_clips(|self_| {
+            result = self_.renderer.borrow_mut().render_to_texture(
+                &self_.device,
+                &self_.queue,
+                &self_.scene,
+                &self_.render_texture_view,
                 &vello::RenderParams {
                     base_color: peniko::color::AlphaColor::TRANSPARENT,
-                    width: self.size.width,
-                    height: self.size.height,
+                    width: self_.size.width,
+                    height: self_.size.height,
                     antialiasing_method: vello::AaConfig::Area,
                 },
             );
+        });
         // Mercury: on failure keep the scene for the next render and leave
         // the last rendered frame in place.
         if let Err(error) = result {
