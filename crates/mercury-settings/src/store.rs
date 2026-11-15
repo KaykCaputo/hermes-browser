@@ -19,7 +19,7 @@ use crate::atomic::{parse_temporary_name, write_private_atomic};
 use crate::bounded;
 use crate::error::SettingsError;
 use crate::read::{Format, Inspection, Migration, Peek, inspect, peek};
-use crate::session::{ClosedTab, SessionSnapshot, WindowSnapshot};
+use crate::session::{ClosedTab, MAX_RECOVERY_SESSIONS, SessionSnapshot, WindowSnapshot};
 use crate::settings::{Repair, Settings};
 
 /// The format version this crate writes into `settings.json`.
@@ -40,6 +40,7 @@ const OWN_FILES: [&str; 4] = [SETTINGS_FILE, SESSION_FILE, PREVIOUS_FILE, RECOVE
 
 /// The outcome of loading a file.
 #[derive(Clone, Debug, PartialEq)]
+#[must_use = "a damaged or newer file needs telling the user, and repairs need saving"]
 pub enum Loaded<T> {
     /// No file: first run. Defaults.
     Missing(T),
@@ -345,6 +346,66 @@ impl SessionDocument {
     }
 }
 
+/// The format of `session.recovery.json`: `{"format_version": 1, "sessions": [...]}`, each
+/// session in the layout of a session file without its clean-exit mark, newest first.
+const RECOVERY_MIGRATIONS: [Migration; 1] = [Migration::Unchanged];
+
+/// The largest recovery file that is read: room for [`MAX_RECOVERY_SESSIONS`] sessions of the
+/// largest size.
+const MAX_RECOVERY_FILE_BYTES: u64 = MAX_RECOVERY_SESSIONS as u64 * MAX_SESSION_FILE_BYTES;
+
+const RECOVERY_FORMAT: Format = Format {
+    what: "recovery list",
+    max_bytes: MAX_RECOVERY_FILE_BYTES,
+    migrations: &RECOVERY_MIGRATIONS,
+};
+
+/// The recovery file as decoded; at most [`MAX_RECOVERY_SESSIONS`] sessions are read, each with
+/// its own tab budget.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RecoveryDocument {
+    #[serde(deserialize_with = "bounded::recovery_sessions")]
+    sessions: Vec<SessionSnapshot>,
+}
+
+#[derive(Serialize)]
+struct RecoveryBody<'a> {
+    sessions: &'a [SessionSnapshot],
+}
+
+/// URLs of pages that only start something new; a session with nothing else is not worth
+/// keeping for recovery.
+const NEW_TAB_PAGES: [&str; 3] = ["about:blank", "about:newtab", "about:home"];
+
+/// Whether a sanitized session has anything worth restoring: a tab that is not a new-tab page.
+fn worth_recovering(snapshot: &SessionSnapshot) -> bool {
+    snapshot
+        .windows
+        .iter()
+        .flat_map(|window| &window.tabs)
+        .any(|tab| !NEW_TAB_PAGES.contains(&tab.url.as_str()))
+}
+
+/// Adds a crashed session to the recovery list, newest first. Returns whether the list
+/// changed.
+///
+/// Not added: a session with nothing worth restoring, or one whose windows equal those of an
+/// entry already held (when the closed tabs or the time saved differ, the restore would be the
+/// same). When the list is full, the oldest entry is always kept — it is usually the session
+/// the user most wants, from before a run of crashes — and the newest fill the rest, so the
+/// entry dropped is the oldest of the others.
+fn add_recovery(list: &mut Vec<SessionSnapshot>, crashed: &SessionSnapshot) -> bool {
+    if !worth_recovering(crashed) || list.iter().any(|held| held.windows == crashed.windows) {
+        return false;
+    }
+    list.insert(0, crashed.clone());
+    if list.len() > MAX_RECOVERY_SESSIONS {
+        list.remove(list.len() - 2);
+    }
+    true
+}
+
 /// A session found at start-up, as [`SessionStore::begin_run`] read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviousSession {
@@ -356,26 +417,30 @@ pub struct PreviousSession {
 
 /// What [`SessionStore::begin_run`] found.
 ///
-/// The two answer different questions. `recovery` is "restore after a crash": offer it
-/// whenever it is `Some`, whatever the start-up setting, until
-/// [`SessionStore::resolve_recovery`] is called. `last` is "continue where you left off": when
-/// `recovery` is `None` and `last` quit in order, restore it if the start-up setting asks for
-/// the previous session. If `last` did not quit in order, `recovery` is `Some` — either that
-/// session or an older one the user has not yet dealt with — unless that session had nothing
-/// restorable or the recovery file belongs to a newer version.
+/// The two fields answer different questions:
+///
+/// - `recovery` is "restore after a crash": every session from a run that did not quit in
+///   order and that the user has not yet restored or dismissed, newest first. Offer it
+///   whenever it is not empty, whatever the start-up setting, until
+///   [`SessionStore::resolve_recovery`] is called.
+/// - `last` is "continue where you left off". Act on it only when `exited_cleanly` is true:
+///   restore it if the start-up setting asks for the previous session, otherwise keep it for
+///   "restore previous session". When `last` did not quit in order it is already the first
+///   entry of `recovery` (or equal to an entry there, or had nothing worth restoring), and is
+///   returned for information only; the caller never needs to treat it separately.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[must_use = "offer the recovery list and decide whether to restore the last session"]
 pub struct StartupSessions {
     /// The session the last run saved, if one could be read.
     pub last: Option<PreviousSession>,
-    /// A session from a run that did not quit in order, kept until the user restores or
-    /// dismisses it, sanitized. Never empty.
-    pub recovery: Option<SessionSnapshot>,
+    /// Sessions from runs that did not quit in order, newest first, at most
+    /// [`MAX_RECOVERY_SESSIONS`], each sanitized and with something worth restoring.
+    pub recovery: Vec<SessionSnapshot>,
 }
 
-/// What the recovery slot holds.
+/// What the recovery file holds.
 enum Slot {
-    Empty,
-    Occupied(SessionSnapshot),
+    List(Vec<SessionSnapshot>),
     /// A file from a newer version: neither used nor replaced.
     Unusable,
 }
@@ -384,8 +449,8 @@ enum Slot {
 ///
 /// - `session.json`: the running session, saved by [`save`](Self::save);
 /// - `session.previous.json`: a copy of the last run's session, made by
-///   [`begin_run`](Self::begin_run), used if `session.json` turns out damaged;
-/// - `session.recovery.json`: the pending recovery — a session from a run that did not quit in
+///   [`begin_run`](Self::begin_run), used if `session.json` is damaged or missing;
+/// - `session.recovery.json`: the recovery list — sessions from runs that did not quit in
 ///   order, kept until [`resolve_recovery`](Self::resolve_recovery).
 #[derive(Clone, Debug)]
 pub struct SessionStore {
@@ -404,51 +469,62 @@ impl SessionStore {
         }
     }
 
-    /// Call once at start-up: returns the last run's session and any pending recovery, and
-    /// keeps copies so that both stay recoverable after this run starts saving.
+    /// Call once at start-up, before any session save: returns the last run's session and the
+    /// recovery list, and keeps copies so that both stay recoverable after this run starts
+    /// saving.
     ///
     /// In order:
     ///
-    /// 1. The recovery slot is read. A damaged slot is moved aside and counts as empty; one from
-    ///    a newer version is left alone, not offered and never replaced.
-    /// 2. `session.json` is read as `last`. If it is damaged, it is moved aside and
+    /// 1. The recovery file is read. A damaged one is moved aside and counts as an empty list;
+    ///    one from a newer version is left alone and never replaced.
+    /// 2. `session.json` is read as `last`. If it is damaged (moved aside),
     ///    `session.previous.json` is offered in its place, marked as not having quit in order.
     ///    If it is from a newer version, it is left alone and `last` is `None`.
-    /// 3. If `last` did not quit in order, has tabs, and the slot is empty, `last` fills the
-    ///    slot. An occupied slot is never replaced: the oldest unresolved crash wins.
+    /// 3. If `last` did not quit in order, it is added to the recovery list (see
+    ///    [`MAX_RECOVERY_SESSIONS`] for what is added and what is dropped when the list is
+    ///    full), and the list is written if it changed. With a newer-version recovery file, the
+    ///    list returned holds only this crash, which is not kept on disk.
     /// 4. If `last` came from `session.json`, it is copied to `session.previous.json`.
     /// 5. If `last` quit in order, `session.json` is marked as running, so that a crash of this
     ///    run before its first save is still reported as a crash next time.
     ///
     /// Sessions returned are [sanitized](SessionSnapshot::sanitized). Failing to write the
-    /// slot, the copy or the mark is logged, not returned, so the session is never lost to a
-    /// full disk. Saving the running session at any time afterwards is safe: it never touches
-    /// the slot. A directory or other non-file at a path, an unreadable file, or a damaged file
-    /// that cannot be moved aside is an error.
+    /// list, the copy or the mark is logged, not returned, so no session is lost to a full
+    /// disk. Saving the running session at any time afterwards is safe: it never touches the
+    /// recovery file. A directory or other non-file at a path, an unreadable file, or a damaged
+    /// file that cannot be moved aside is an error.
     pub fn begin_run(&self) -> Result<StartupSessions, SettingsError> {
         let slot = self.read_slot()?;
         let (last, from_current) = self.read_last()?;
+        let crashed = last
+            .as_ref()
+            .filter(|previous| !previous.exited_cleanly)
+            .map(|previous| &previous.snapshot);
 
         let recovery = match slot {
-            Slot::Occupied(snapshot) => Some(snapshot),
-            Slot::Unusable => None,
-            Slot::Empty => match &last {
-                Some(previous)
-                    if !previous.exited_cleanly && !previous.snapshot.windows.is_empty() =>
+            Slot::List(mut list) => {
+                if let Some(crashed) = crashed
+                    && add_recovery(&mut list, crashed)
                 {
                     let kept = write_document(
                         &self.recovery_path,
-                        &SESSION_FORMAT,
-                        Some(false),
-                        &previous.snapshot,
+                        &RECOVERY_FORMAT,
+                        None,
+                        &RecoveryBody { sessions: &list },
                     );
                     if let Err(error) = kept {
                         log::warn!("could not keep the crashed session for recovery: {error}");
                     }
-                    Some(previous.snapshot.clone())
                 }
-                _ => None,
-            },
+                list
+            }
+            Slot::Unusable => {
+                let mut list = Vec::new();
+                if let Some(crashed) = crashed {
+                    add_recovery(&mut list, crashed);
+                }
+                list
+            }
         };
 
         if let Some(previous) = last.as_ref().filter(|_| from_current) {
@@ -473,19 +549,19 @@ impl SessionStore {
         Ok(StartupSessions { last, recovery })
     }
 
-    /// Clears the pending recovery once the user has restored or dismissed it. Until then
+    /// Clears the whole recovery list once the user has restored or dismissed it. Until then
     /// every [`begin_run`](Self::begin_run) offers it again.
     ///
-    /// Nothing to clear is not an error. A slot from a newer version is not removed
+    /// Nothing to clear is not an error. A recovery file from a newer version is not removed
     /// ([`SettingsError::NewerVersion`]); a damaged one is moved aside rather than deleted.
     pub fn resolve_recovery(&self) -> Result<(), SettingsError> {
-        match peek(&self.recovery_path, &SESSION_FORMAT)? {
+        match peek(&self.recovery_path, &RECOVERY_FORMAT)? {
             Peek::Missing => Ok(()),
-            Peek::Version(found) if found > SESSION_FORMAT.current_version() => {
+            Peek::Version(found) if found > RECOVERY_FORMAT.current_version() => {
                 Err(SettingsError::NewerVersion {
                     path: self.recovery_path.clone(),
                     found,
-                    supported: SESSION_FORMAT.current_version(),
+                    supported: RECOVERY_FORMAT.current_version(),
                 })
             }
             Peek::Damaged(_) => move_aside(&self.recovery_path).map(|_| ()),
@@ -504,7 +580,7 @@ impl SessionStore {
     /// The snapshot is written [sanitized](SessionSnapshot::sanitized), privately and
     /// atomically. Refused with [`SettingsError::NewerVersion`], changing nothing, when the file
     /// on disk was written by a newer version; a file there whose start cannot be understood is
-    /// moved aside first. The recovery slot is never touched.
+    /// moved aside first. The recovery file is never touched.
     pub fn save(
         &self,
         snapshot: &SessionSnapshot,
@@ -519,13 +595,35 @@ impl SessionStore {
     }
 
     fn read_slot(&self) -> Result<Slot, SettingsError> {
-        Ok(match self.read(&self.recovery_path)? {
-            Read::Missing => Slot::Empty,
-            Read::Newer => Slot::Unusable,
-            Read::Damaged => Slot::Empty,
-            Read::Current(previous) if previous.snapshot.windows.is_empty() => Slot::Empty,
-            Read::Current(previous) => Slot::Occupied(previous.snapshot),
-        })
+        Ok(
+            match inspect::<RecoveryDocument>(&self.recovery_path, &RECOVERY_FORMAT)? {
+                Inspection::Missing => Slot::List(Vec::new()),
+                Inspection::Newer(found) => {
+                    log::warn!(
+                        "{} was written by a newer version (format {found}); leaving it alone",
+                        self.recovery_path.display()
+                    );
+                    Slot::Unusable
+                }
+                Inspection::Damaged(reason) => {
+                    let backup = move_aside(&self.recovery_path)?;
+                    log::warn!(
+                        "{} could not be understood ({reason}); moved to {}",
+                        self.recovery_path.display(),
+                        backup.display()
+                    );
+                    Slot::List(Vec::new())
+                }
+                Inspection::Current(document, _) => Slot::List(
+                    document
+                        .sessions
+                        .into_iter()
+                        .map(SessionSnapshot::sanitized)
+                        .filter(worth_recovering)
+                        .collect(),
+                ),
+            },
+        )
     }
 
     /// The last run's session and whether it came from `session.json` (rather than the
@@ -536,7 +634,7 @@ impl SessionStore {
             Read::Missing | Read::Newer => (None, false),
             Read::Damaged => match self.read(&self.previous_path)? {
                 Read::Current(previous) => {
-                    log::warn!("offering the copy of the session before the damaged one");
+                    log::warn!("offering the copy of the session made at the last start");
                     (
                         Some(PreviousSession {
                             exited_cleanly: false,
@@ -675,6 +773,7 @@ mod tests {
     fn the_ladders_have_one_step_per_version() {
         assert_eq!(SETTINGS_FORMAT.current_version(), SETTINGS_FORMAT_VERSION);
         assert_eq!(SESSION_FORMAT.current_version(), SESSION_FORMAT_VERSION);
+        assert_eq!(RECOVERY_FORMAT.current_version(), 1);
     }
 
     #[test]

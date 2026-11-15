@@ -3,8 +3,11 @@
 //!
 //! Lists read from disk keep at most their limit and skip the rest without building them
 //! (`IgnoredAny`); the number skipped is recorded per list for the duration of a [`scoped`]
-//! decode, so the caller can report one counted repair per list. Long URLs and titles are not
-//! copied whole. The tree used for migrations from an older version counts its nodes.
+//! decode, so the caller can report one counted repair per list. A long URL or title is not
+//! *kept* whole: the value kept is at most its limit. It is still read whole once: serde_json
+//! copies every string it reads from a file into a scratch buffer before the visitor sees it,
+//! so one enormous string costs its own length in memory while it is read (at most the file's
+//! size limit). The tree used for migrations from an older version counts its nodes.
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
@@ -16,7 +19,8 @@ use serde_json::{Map, Value};
 
 use crate::search::{MAX_CUSTOM_ENGINES, SearchEngine};
 use crate::session::{
-    ClosedTab, MAX_CLOSED_TABS, MAX_RESTORED_TABS, MAX_TITLE_BYTES, TabSnapshot, WindowSnapshot,
+    ClosedTab, MAX_CLOSED_TABS, MAX_RECOVERY_SESSIONS, MAX_RESTORED_TABS, MAX_TITLE_BYTES,
+    SessionSnapshot, TabSnapshot, WindowSnapshot,
 };
 use crate::settings::{MAX_NEVER_SAVE_ORIGINS, MAX_URL_BYTES, truncated};
 
@@ -30,6 +34,7 @@ pub(crate) const NEVER_SAVE_ORIGINS: &str = "passwords.never_save_origins";
 pub(crate) const WINDOWS: &str = "windows";
 pub(crate) const TABS: &str = "windows.tabs";
 pub(crate) const CLOSED_TABS: &str = "closed_tabs";
+pub(crate) const RECOVERY_SESSIONS: &str = "sessions";
 
 /// How many items each list had beyond its limit, skipped unread.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -102,9 +107,24 @@ where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
 {
+    bounded_vec_with(deserializer, max, list, || {})
+}
+
+/// [`bounded_vec`], calling `before_each` before each kept item is read.
+fn bounded_vec_with<'de, D, T>(
+    deserializer: D,
+    max: usize,
+    list: &'static str,
+    before_each: fn(),
+) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
     struct Bounded<T> {
         max: usize,
         list: &'static str,
+        before_each: fn(),
         item: PhantomData<T>,
     }
 
@@ -119,6 +139,7 @@ where
             // Grown as items arrive, never sized from a hint the file controls.
             let mut kept = Vec::new();
             while kept.len() < self.max {
+                (self.before_each)();
                 match items.next_element::<T>()? {
                     Some(item) => kept.push(item),
                     None => return Ok(kept),
@@ -136,6 +157,7 @@ where
     deserializer.deserialize_seq(Bounded {
         max,
         list,
+        before_each,
         item: PhantomData,
     })
 }
@@ -175,6 +197,25 @@ pub(crate) fn tabs<'de, D: Deserializer<'de>>(
         }
     });
     Ok(tabs)
+}
+
+/// The sessions of the recovery file: at most [`MAX_RECOVERY_SESSIONS`], each with a tab
+/// budget of its own.
+pub(crate) fn recovery_sessions<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<SessionSnapshot>, D::Error> {
+    bounded_vec_with(
+        deserializer,
+        MAX_RECOVERY_SESSIONS,
+        RECOVERY_SESSIONS,
+        || {
+            SCOPE.with(|scope| {
+                if let Some(scope) = scope.borrow_mut().as_mut() {
+                    scope.tabs_left = MAX_RESTORED_TABS;
+                }
+            });
+        },
+    )
 }
 
 pub(crate) fn closed_tabs<'de, D: Deserializer<'de>>(

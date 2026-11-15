@@ -8,6 +8,14 @@ use crate::settings::{MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, session_url, truncated
 
 /// How many recently closed tabs are remembered (as Chrome's and Firefox's defaults).
 pub const MAX_CLOSED_TABS: usize = 25;
+/// How many crashed sessions the recovery list keeps until the user deals with them.
+///
+/// A crashed session is added only if it has a tab other than a new-tab page (`about:blank`,
+/// `about:newtab`, `about:home`) and its windows differ from every entry already held. When
+/// the list is full, the oldest entry is kept — usually the session the user most wants, from
+/// before a run of crashes — and the newest fill the rest: the entry dropped is the oldest of
+/// the others.
+pub const MAX_RECOVERY_SESSIONS: usize = 3;
 /// How many tabs are restored, across all windows.
 pub const MAX_RESTORED_TABS: usize = 500;
 /// The longest tab title kept, in bytes.

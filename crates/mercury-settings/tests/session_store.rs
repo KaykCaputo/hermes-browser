@@ -162,7 +162,7 @@ fn the_files_are_private() {
     let dir = tempfile::tempdir().expect("a profile");
     let store = SessionStore::new(dir.path());
     store.save(&example(), true).expect("save");
-    store.begin_run().expect("begin_run");
+    let _ = store.begin_run().expect("begin_run");
 
     for path in [session_path(dir.path()), previous_path(dir.path())] {
         let mode = fs::metadata(&path).expect("the file").permissions().mode();
@@ -542,7 +542,7 @@ fn the_recovery_file_is_private() {
     let dir = tempfile::tempdir().expect("a profile");
     let store = SessionStore::new(dir.path());
     store.save(&example(), false).expect("a crashed run's save");
-    store.begin_run().expect("begin_run");
+    let _ = store.begin_run().expect("begin_run");
 
     let path = dir.path().join("session.recovery.json");
     let mode = fs::metadata(&path).expect("the slot").permissions().mode();
