@@ -27,6 +27,10 @@ const MAX_NAME_BYTES: usize = 255;
 /// Appended to a download's final name while it is in progress.
 pub(crate) const PART_SUFFIX: &str = ".part";
 
+/// The longest name `unique_path` returns, so that `<name>.part` still fits.
+/// Evaluated at compile time, so it cannot underflow.
+const MAX_UNIQUE_BYTES: usize = MAX_NAME_BYTES - PART_SUFFIX.len();
+
 /// The name used when nothing better is available.
 const FALLBACK_NAME: &str = "download";
 
@@ -81,7 +85,7 @@ pub fn sanitize_file_name(name: &str) -> String {
 /// `.part` file also fits the 255-byte limit. If every numbered name up to 10,000 is taken the
 /// last one is returned; the caller's exclusive create then fails rather than overwriting.
 pub fn unique_path(dir: &Path, file_name: &str, exists: impl Fn(&Path) -> bool) -> PathBuf {
-    let budget = MAX_NAME_BYTES - PART_SUFFIX.len();
+    let budget = MAX_UNIQUE_BYTES;
     let base = fit(&sanitize_file_name(file_name), budget);
     let is_free =
         |name: &str| !exists(&dir.join(name)) && !exists(&dir.join(format!("{name}{PART_SUFFIX}")));
@@ -89,13 +93,17 @@ pub fn unique_path(dir: &Path, file_name: &str, exists: impl Fn(&Path) -> bool) 
         return dir.join(base);
     }
 
-    let (stem, extension) = split_for_numbering(&base);
+    // An "extension" too long to keep when fitting is not kept when numbering either, so the
+    // suffix is at most ` (10000)` plus a quarter of the budget and the stem always has room.
+    let (stem, extension) = split_for_numbering(&base, budget);
     let mut candidate = base.clone();
     for index in 1..=MAX_NUMBERED {
         let suffix = format!(" ({index}){extension}");
-        let stem = trim_end_dots_and_spaces(truncate_bytes(stem, budget - suffix.len()));
+        let stem =
+            trim_end_dots_and_spaces(truncate_bytes(stem, budget.saturating_sub(suffix.len())));
         let stem = if stem.is_empty() { FALLBACK_NAME } else { stem };
-        candidate = format!("{stem}{suffix}");
+        // Cannot be over budget given the limits above; `fit` makes that hold regardless.
+        candidate = fit(&format!("{stem}{suffix}"), budget);
         if is_free(&candidate) {
             break;
         }
@@ -134,7 +142,8 @@ fn clean(name: &str) -> Option<String> {
         .collect();
 
     let without_leading = cleaned.trim_start_matches(is_dot_or_space);
-    let had_leading_dot = cleaned[..cleaned.len() - without_leading.len()].contains('.');
+    let leading = cleaned.len().saturating_sub(without_leading.len());
+    let had_leading_dot = cleaned[..leading].contains('.');
     let core = trim_end_dots_and_spaces(without_leading);
     if core.is_empty() {
         return None;
@@ -223,10 +232,10 @@ fn fit(name: &str, max: usize) -> String {
         return name.to_owned();
     }
     let (stem, extension) = match split_extension(name) {
-        (stem, extension) if extension.len() <= max / 4 => (stem, extension),
+        (stem, extension) if keeps_extension(extension, max) => (stem, extension),
         _ => (name, ""),
     };
-    let stem = trim_end_dots_and_spaces(truncate_bytes(stem, max - extension.len()));
+    let stem = trim_end_dots_and_spaces(truncate_bytes(stem, max.saturating_sub(extension.len())));
     let stem = if stem.is_empty() { FALLBACK_NAME } else { stem };
     format!("{stem}{extension}")
 }
@@ -236,10 +245,10 @@ fn truncate_bytes(text: &str, max: usize) -> &str {
     if text.len() <= max {
         return text;
     }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = (0..=max)
+        .rev()
+        .find(|index| text.is_char_boundary(*index))
+        .unwrap_or(0);
     &text[..end]
 }
 
@@ -251,16 +260,25 @@ fn split_extension(name: &str) -> (&str, &str) {
     }
 }
 
+/// Whether an extension is short enough to be kept whole when a name is cut to `max` bytes.
+fn keeps_extension(extension: &str, max: usize) -> bool {
+    extension.len() <= max / 4
+}
+
 /// Like `split_extension`, but keeps `.tar.gz` and friends together so numbering gives
-/// `archive (1).tar.gz`.
-fn split_for_numbering(name: &str) -> (&str, &str) {
+/// `archive (1).tar.gz`, and, like `fit`, does not treat an over-long tail as an extension.
+fn split_for_numbering(name: &str, max: usize) -> (&str, &str) {
     let (stem, extension) = split_extension(name);
+    if !keeps_extension(extension, max) {
+        return (name, "");
+    }
     if extension.is_empty() {
         return (stem, extension);
     }
     let (inner_stem, inner_extension) = split_extension(stem);
-    if inner_extension.eq_ignore_ascii_case(".tar") {
-        name.split_at(inner_stem.len())
+    let (compound_stem, compound) = name.split_at(inner_stem.len());
+    if inner_extension.eq_ignore_ascii_case(".tar") && keeps_extension(compound, max) {
+        (compound_stem, compound)
     } else {
         (stem, extension)
     }

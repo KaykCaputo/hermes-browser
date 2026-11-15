@@ -253,6 +253,26 @@ fn a_name_taken_during_the_download_is_not_replaced_when_publishing() {
 }
 
 #[test]
+fn a_server_name_with_a_huge_extension_can_be_downloaded_twice() {
+    let server = TestServer::start();
+    let dir = TempDir::new("long-extension");
+    let (manager, events) = manager();
+    let mut paths = Vec::new();
+    for _ in 0..2 {
+        let id = manager.start(request(server.url("/long-extension"), &dir.path));
+        let done = events_until_done(&events, id);
+        paths.push(finished_path(terminal(&done)));
+    }
+    assert_ne!(paths[0], paths[1]);
+    for path in &paths {
+        assert_eq!(std::fs::read(path).unwrap(), b"long");
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert!(name.len() + ".part".len() <= 255, "{} bytes", name.len());
+    }
+    assert_eq!(TempDir::list(&dir.path).len(), 2);
+}
+
+#[test]
 fn concurrent_downloads_of_one_name_get_different_files() {
     let server = TestServer::start();
     let dir = TempDir::new("concurrent");

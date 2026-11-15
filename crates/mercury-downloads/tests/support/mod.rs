@@ -168,6 +168,11 @@ async fn respond(stream: &mut TcpStream, port: u16, request: &Recorded) -> std::
             )];
             send(stream, "200 OK", &headers, b"escaped?").await
         }
+        "/long-extension" => {
+            let disposition = format!("attachment; filename=\"a.{}\"", "x".repeat(300));
+            let headers = [("Content-Disposition", disposition.as_str())];
+            send(stream, "200 OK", &headers, b"long").await
+        }
         "/typed" => {
             let headers = [("Content-Type", "text/plain; charset=utf-8")];
             send(stream, "200 OK", &headers, b"hello").await

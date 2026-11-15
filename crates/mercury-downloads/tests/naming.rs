@@ -403,6 +403,63 @@ fn numbered_names_still_fit_with_the_partial_suffix() {
 }
 
 #[test]
+fn a_taken_name_with_a_huge_extension_is_numbered_without_overflow() {
+    // What a server gets with `filename="a.<300 × x>"`: the sanitiser keeps a 254-byte "extension".
+    let name = sanitize_file_name(&format!("a.{}", "x".repeat(300)));
+    let first = unique_path(Path::new("/dl"), &name, taken(&[]));
+    let first_name = first.file_name().unwrap().to_str().unwrap().to_owned();
+    assert!(first_name.len() + ".part".len() <= 255);
+
+    for extension_len in [246, 247, 248, 249, 250, 253] {
+        let name = format!("a.{}", "x".repeat(extension_len));
+        let free = unique_path(Path::new("/dl"), &name, taken(&[]));
+        let free = free.file_name().unwrap().to_str().unwrap().to_owned();
+        let numbered = unique_path(Path::new("/dl"), &name, taken(&[free.as_str()]));
+        let numbered = numbered.file_name().unwrap().to_str().unwrap();
+        assert_ne!(numbered, free);
+        assert!(
+            numbered.len() + ".part".len() <= 255,
+            "{extension_len}: {} bytes",
+            numbered.len()
+        );
+    }
+}
+
+#[test]
+fn numbered_names_and_their_partial_files_always_fit() {
+    let dir = Path::new("/dl");
+    for stem_len in [0, 1, 2, 100, 180, 240, 246, 250, 251, 255, 300] {
+        for extension_len in [
+            0, 1, 3, 10, 50, 62, 63, 64, 100, 200, 246, 249, 250, 254, 300,
+        ] {
+            let name = if extension_len == 0 {
+                "s".repeat(stem_len)
+            } else {
+                format!("{}.{}", "s".repeat(stem_len), "e".repeat(extension_len))
+            };
+            for taken_count in [0_usize, 1, 2, 11] {
+                let mut taken_names: Vec<String> = Vec::new();
+                for _ in 0..taken_count {
+                    let refs: Vec<&str> = taken_names.iter().map(String::as_str).collect();
+                    let next = unique_path(dir, &name, taken(&refs));
+                    taken_names.push(next.file_name().unwrap().to_str().unwrap().to_owned());
+                }
+                let refs: Vec<&str> = taken_names.iter().map(String::as_str).collect();
+                let path = unique_path(dir, &name, taken(&refs));
+                let result = path.file_name().unwrap().to_str().unwrap();
+                assert!(
+                    result.len() + ".part".len() <= 255,
+                    "stem {stem_len}, extension {extension_len}, taken {taken_count}: {} bytes",
+                    result.len()
+                );
+                assert!(!refs.contains(&result), "{result} was taken");
+                assert_eq!(path.parent(), Some(dir));
+            }
+        }
+    }
+}
+
+#[test]
 fn a_directory_where_everything_is_taken_still_terminates() {
     let path = unique_path(Path::new("/dl"), "report.pdf", |_: &Path| true);
     assert_ne!(path, PathBuf::from("/dl/report.pdf"));
