@@ -15,10 +15,12 @@
 
 use std::collections::VecDeque;
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use reqwest::header::{self, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Response, StatusCode};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt, BufWriter};
@@ -39,6 +41,9 @@ const WRITE_BUFFER_BYTES: usize = 256 * 1024;
 /// Attempts at claiming a free name before giving up.
 const MAX_CLAIM_ATTEMPTS: usize = 100;
 
+/// The error text of a transfer whose task panicked.
+const INTERNAL_FAILURE: &str = "the transfer failed internally";
+
 pub(crate) enum Outcome {
     Finished {
         target_path: PathBuf,
@@ -49,6 +54,15 @@ pub(crate) enum Outcome {
         resumable: bool,
     },
     Cancelled,
+}
+
+impl Outcome {
+    pub(crate) fn internal_failure() -> Self {
+        Self::Failed {
+            error: INTERNAL_FAILURE.to_owned(),
+            resumable: false,
+        }
+    }
 }
 
 pub(crate) struct Transfer {
@@ -90,19 +104,30 @@ struct ResumePlan {
 }
 
 impl Transfer {
+    /// Runs the transfer to its outcome. A panic anywhere in it (including in `on_event` while
+    /// `Started` or `Progress` is delivered) becomes an internal failure, after the partial file
+    /// is removed.
     pub(crate) async fn run(self, mut cancelled: watch::Receiver<bool>) -> Outcome {
         let mut on_disk = OnDisk::default();
-        let fetched = tokio::select! {
-            biased;
-            () = wait_for_cancel(&mut cancelled) => None,
-            result = self.fetch(&mut on_disk) => Some(result),
-        };
+        let fetched = AssertUnwindSafe(async {
+            tokio::select! {
+                biased;
+                () = wait_for_cancel(&mut cancelled) => None,
+                result = self.fetch(&mut on_disk) => Some(result),
+            }
+        })
+        .catch_unwind()
+        .await;
         match fetched {
-            None => {
+            Err(_) => {
+                remove_partial(on_disk.part.as_deref());
+                Outcome::internal_failure()
+            }
+            Ok(None) => {
                 remove_partial(on_disk.part.as_deref());
                 Outcome::Cancelled
             }
-            Some(Err(error)) => {
+            Ok(Some(Err(error))) => {
                 let keep = on_disk.resumable
                     && error.is_transient()
                     && on_disk.part.as_deref().is_some_and(is_regular_file);
@@ -115,26 +140,34 @@ impl Transfer {
                 }
             }
             // From here the download is complete: a late cancel no longer applies.
-            Some(Ok(complete)) => match publish(&complete) {
-                Ok(target_path) => {
-                    quarantine::mark_downloaded(
-                        &target_path,
-                        &complete.final_url,
-                        self.request.referrer.as_ref(),
-                    );
-                    Outcome::Finished {
+            Ok(Some(Ok(complete))) => {
+                let finished = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    publish(&complete).inspect(|target_path| {
+                        quarantine::mark_downloaded(
+                            target_path,
+                            &complete.final_url,
+                            self.request.referrer.as_ref(),
+                        );
+                    })
+                }));
+                match finished {
+                    Ok(Ok(target_path)) => Outcome::Finished {
                         target_path,
                         received_bytes: complete.received,
+                    },
+                    Ok(Err(error)) => {
+                        remove_partial(Some(&complete.part));
+                        Outcome::Failed {
+                            error: TransferError::Io(error).to_string(),
+                            resumable: false,
+                        }
+                    }
+                    Err(_) => {
+                        remove_partial(Some(&complete.part));
+                        Outcome::internal_failure()
                     }
                 }
-                Err(error) => {
-                    remove_partial(Some(&complete.part));
-                    Outcome::Failed {
-                        error: TransferError::Io(error).to_string(),
-                        resumable: false,
-                    }
-                }
-            },
+            }
         }
     }
 

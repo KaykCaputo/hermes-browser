@@ -2,11 +2,13 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use tokio::sync::watch;
 
 use crate::transfer::{Outcome, Transfer};
@@ -149,14 +151,25 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Counts a task as gone when it returns or unwinds.
-struct AliveGuard(Arc<Shared>);
+/// A running task's bookkeeping, undone in `Drop` so that it holds even if the task unwinds:
+/// the id leaves the running set and the task stops counting as alive.
+struct TaskGuard {
+    shared: Arc<Shared>,
+    id: DownloadId,
+}
 
-impl Drop for AliveGuard {
+impl TaskGuard {
+    fn leave_running(&self) {
+        lock(&self.shared.running).remove(&self.id);
+    }
+}
+
+impl Drop for TaskGuard {
     fn drop(&mut self) {
-        let mut alive = lock(&self.0.alive);
+        self.leave_running();
+        let mut alive = lock(&self.shared.alive);
         *alive = alive.saturating_sub(1);
-        self.0.all_done.notify_all();
+        self.shared.all_done.notify_all();
     }
 }
 
@@ -228,15 +241,28 @@ impl DownloadManager {
             timeouts: self.timeouts,
             emit: Arc::clone(&self.shared.on_event),
         };
-        let guard = AliveGuard(Arc::clone(&self.shared));
+        let guard = TaskGuard {
+            shared: Arc::clone(&self.shared),
+            id,
+        };
         if let Some(runtime) = &self.runtime {
             runtime.spawn(async move {
-                let outcome = transfer.run(cancelled).await;
-                let shared = &guard.0;
+                // `Transfer::run` turns its own panics into an internal failure after removing
+                // the partial file; this is the last resort if that handling itself panics.
+                let outcome = AssertUnwindSafe(transfer.run(cancelled))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Outcome::internal_failure());
                 // Leave the running set before reporting, so `active()` is already right when
                 // the terminal event arrives.
-                lock(&shared.running).remove(&id);
-                (shared.on_event)(outcome.into_event(id));
+                guard.leave_running();
+                let event = outcome.into_event(id);
+                let on_event = &guard.shared.on_event;
+                if std::panic::catch_unwind(AssertUnwindSafe(|| on_event(event))).is_err() {
+                    // The download is over either way; a second terminal event would break the
+                    // "exactly one" promise, so the panic is only logged.
+                    log::error!("on_event panicked while delivering the terminal event of {id:?}");
+                }
                 drop(guard);
             });
         }
