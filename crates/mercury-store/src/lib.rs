@@ -16,6 +16,7 @@ mod downloads;
 mod error;
 mod frecency;
 mod history;
+mod import;
 mod schema;
 mod search;
 mod suggest;
@@ -28,6 +29,7 @@ pub use bookmarks::{BookmarkId, BookmarkKind, BookmarkNode, BookmarkRoot};
 pub use downloads::{DownloadRecord, DownloadRecordId, DownloadState, NewDownload};
 pub use error::{Result, StoreError};
 pub use history::{ClearRange, HistoryCursor, HistoryEntry, VisitId, VisitTransition};
+pub use import::{BOOKMARK_IMPORT_MAX_DEPTH, BookmarkImport, VisitImport};
 pub use suggest::{
     CANDIDATES_PER_RESULT, FRECENCY_REFRESH_AGE_MS, SUBSTRING_SCAN_ROWS, Suggestion,
 };

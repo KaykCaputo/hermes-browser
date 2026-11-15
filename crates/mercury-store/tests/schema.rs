@@ -44,6 +44,7 @@ fn opening_creates_tables_indexes_triggers_and_roots() {
         "bookmarks_by_place",
         "places_by_url_key",
         "places_by_frecency",
+        "places_frecency_by_id",
     ] {
         assert!(indexes.iter().any(|i| i == index), "missing index {index}");
     }

@@ -25,6 +25,7 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX places_by_url_key  ON places(url_key, frecency);
     CREATE INDEX places_by_frecency ON places(frecency);
+    CREATE INDEX places_frecency_by_id ON places(id, frecency);
 
     CREATE TABLE visits (
         id         INTEGER PRIMARY KEY,
@@ -68,7 +69,9 @@ const MIGRATIONS: &[&str] = &[
         ended_at       INTEGER
     ) STRICT;
 
-    CREATE VIRTUAL TABLE places_fts USING fts5(url, title, content='places', content_rowid='id');
+    CREATE VIRTUAL TABLE places_fts USING fts5(
+        url, title, content='places', content_rowid='id', prefix='1 2 3'
+    );
     CREATE TRIGGER places_fts_ai AFTER INSERT ON places BEGIN
         INSERT INTO places_fts(rowid, url, title) VALUES (new.id, new.url, new.title);
     END;
@@ -82,7 +85,9 @@ const MIGRATIONS: &[&str] = &[
         INSERT INTO places_fts(rowid, url, title) VALUES (new.id, new.url, new.title);
     END;
 
-    CREATE VIRTUAL TABLE bookmarks_fts USING fts5(title, content='bookmarks', content_rowid='id');
+    CREATE VIRTUAL TABLE bookmarks_fts USING fts5(
+        title, content='bookmarks', content_rowid='id', prefix='1 2 3'
+    );
     CREATE TRIGGER bookmarks_fts_ai AFTER INSERT ON bookmarks BEGIN
         INSERT INTO bookmarks_fts(rowid, title) VALUES (new.id, new.title);
     END;

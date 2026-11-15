@@ -111,20 +111,8 @@ impl Store {
         now_ms: i64,
     ) -> Result<VisitId> {
         let tx = self.conn.transaction()?;
-        tx.prepare_cached(
-            "INSERT INTO places (url, title, url_key) VALUES (?1, ?2, ?3)
-             ON CONFLICT (url) DO UPDATE SET title = excluded.title
-             WHERE excluded.title IS NOT NULL AND excluded.title IS NOT places.title",
-        )?
-        .execute(params![url, title, url_key(url, true)])?;
-        let place_id: i64 = tx
-            .prepare_cached("SELECT id FROM places WHERE url = ?1")?
-            .query_row([url], |row| row.get(0))?;
-        tx.prepare_cached(
-            "INSERT INTO visits (place_id, visited_at, transition) VALUES (?1, ?2, ?3)",
-        )?
-        .execute(params![place_id, now_ms, transition as u8])?;
-        let visit_id = tx.last_insert_rowid();
+        let place_id = upsert_place(&tx, url, title)?;
+        let visit_id = insert_visit(&tx, place_id, now_ms, transition)?;
         tx.prepare_cached(
             "UPDATE places SET visit_count = visit_count + 1,
                                typed_count = typed_count + ?2,
@@ -261,6 +249,34 @@ fn transition_column(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<
             format!("unknown visit transition {value}").into(),
         )
     })
+}
+
+/// The id of the page for `url`, created if needed. A `title` replaces the stored one; `None`
+/// leaves it unchanged.
+pub(crate) fn upsert_place(conn: &Connection, url: &str, title: Option<&str>) -> Result<i64> {
+    conn.prepare_cached(
+        "INSERT INTO places (url, title, url_key) VALUES (?1, ?2, ?3)
+         ON CONFLICT (url) DO UPDATE SET title = excluded.title
+         WHERE excluded.title IS NOT NULL AND excluded.title IS NOT places.title",
+    )?
+    .execute(params![url, title, url_key(url, true)])?;
+    Ok(conn
+        .prepare_cached("SELECT id FROM places WHERE url = ?1")?
+        .query_row([url], |row| row.get(0))?)
+}
+
+/// Adds a visit row; the page's counters are not touched.
+pub(crate) fn insert_visit(
+    conn: &Connection,
+    place_id: i64,
+    visited_at_ms: i64,
+    transition: VisitTransition,
+) -> Result<i64> {
+    conn.prepare_cached(
+        "INSERT INTO visits (place_id, visited_at, transition) VALUES (?1, ?2, ?3)",
+    )?
+    .execute(params![place_id, visited_at_ms, transition as u8])?;
+    Ok(conn.last_insert_rowid())
 }
 
 /// Brings a page's counters, last-visit time and frecency in line with its remaining visits and

@@ -42,7 +42,8 @@ const BY_URL_KEY_SQL: &str = "
 
 /// Pages whose URL or title contains every word, best stored score first.
 const BY_PAGE_TEXT_SQL: &str = "
-    SELECT p.id FROM places_fts JOIN places p ON p.id = places_fts.rowid
+    SELECT p.id FROM places_fts
+    JOIN places p INDEXED BY places_frecency_by_id ON p.id = places_fts.rowid
     WHERE places_fts MATCH ?1
     ORDER BY p.frecency DESC LIMIT ?2";
 

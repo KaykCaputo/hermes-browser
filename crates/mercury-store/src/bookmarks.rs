@@ -8,9 +8,9 @@ use crate::frecency;
 use crate::history::refresh_place;
 use crate::search::url_key;
 
-const KIND_BOOKMARK: i64 = 1;
-const KIND_FOLDER: i64 = 2;
-const KIND_SEPARATOR: i64 = 3;
+pub(crate) const KIND_BOOKMARK: i64 = 1;
+pub(crate) const KIND_FOLDER: i64 = 2;
+pub(crate) const KIND_SEPARATOR: i64 = 3;
 
 /// The node query, as a literal so it can be extended with `concat!` (SQL is never formatted).
 macro_rules! node_sql {
@@ -350,7 +350,7 @@ fn node_info(conn: &Connection, id: BookmarkId) -> Result<NodeInfo> {
         .ok_or(StoreError::NotFound)
 }
 
-fn require_folder(conn: &Connection, id: BookmarkId) -> Result<()> {
+pub(crate) fn require_folder(conn: &Connection, id: BookmarkId) -> Result<()> {
     let kind: Option<i64> = conn
         .prepare_cached("SELECT kind FROM bookmarks WHERE id = ?1")?
         .query_row([id.0], |row| row.get(0))
@@ -372,7 +372,7 @@ fn close_gap(conn: &Connection, parent: i64, position: i64) -> Result<()> {
 }
 
 /// The id of the page for `url`, creating an unvisited page if needed.
-fn ensure_place(conn: &Connection, url: &str) -> Result<i64> {
+pub(crate) fn ensure_place(conn: &Connection, url: &str) -> Result<i64> {
     conn.prepare_cached(
         "INSERT INTO places (url, url_key) VALUES (?1, ?2) ON CONFLICT (url) DO NOTHING",
     )?
