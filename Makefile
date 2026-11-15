@@ -15,11 +15,29 @@ PROJECT_VERSION ?= 0.2.0
 LINUX_PACKAGE_NAME := mercury-browser-v$(PROJECT_VERSION)-linux-x86_64
 LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 
+# macOS builds use a private, unpacked copy of the official GStreamer framework
+# (scripts/macos/gstreamer.sh; `make gstreamer-macos` prepares it). Recipes that
+# compile or run Servo load its environment first, the executables get their
+# GStreamer libraries copied into target/<profile>/lib, and test binaries, which
+# have no rpath to those libraries, find them through DYLD_FALLBACK_LIBRARY_PATH.
+# That variable is set on the cargo command line itself because macOS strips
+# DYLD_* variables when the SIP-protected make and /bin/sh start.
+ifeq ($(shell uname -s),Darwin)
+GSTREAMER_ENV = eval "$$(scripts/macos/gstreamer.sh env)" &&
+COLLECT_GSTREAMER = scripts/macos/collect-gstreamer.sh "$$MERCURY_GSTREAMER_ROOT"
+TEST_LIBRARY_PATH = DYLD_FALLBACK_LIBRARY_PATH="$$MERCURY_GSTREAMER_ROOT/lib"
+else
+GSTREAMER_ENV =
+COLLECT_GSTREAMER =
+TEST_LIBRARY_PATH =
+endif
+
 .PHONY: \
 	help \
 	doctor \
 	setup \
 	install-linux-deps \
+	gstreamer-macos \
 	fetch \
 	check \
 	fmt \
@@ -47,6 +65,7 @@ help:
 		'doctor' 'Check the required development tools.' \
 		'setup' 'Install Rust components and fetch dependencies.' \
 		'install-linux-deps' 'Install Linux dependencies for the current Slint backend.' \
+		'gstreamer-macos' 'Download and unpack GStreamer for macOS (no sudo).' \
 		'fetch' 'Download Cargo dependencies without building.' \
 		'check' 'Type-check every workspace target and feature.' \
 		'fmt' 'Format all Rust source files.' \
@@ -124,11 +143,16 @@ install-linux-deps:
 		pkg-config \
 		xinput
 
+gstreamer-macos:
+	scripts/macos/gstreamer.sh fetch
+	scripts/macos/gstreamer.sh unpack
+	scripts/macos/gstreamer.sh check
+
 fetch:
 	"$(CARGO)" fetch --locked
 
 check:
-	"$(CARGO)" check --workspace --all-targets --all-features
+	$(GSTREAMER_ENV) "$(CARGO)" check --workspace --all-targets --all-features
 
 fmt:
 	"$(CARGO)" fmt --all
@@ -137,7 +161,7 @@ fmt-check:
 	"$(CARGO)" fmt --all -- --check
 
 lint:
-	"$(CARGO)" clippy \
+	$(GSTREAMER_ENV) "$(CARGO)" clippy \
 		--workspace \
 		--all-targets \
 		--all-features \
@@ -145,7 +169,7 @@ lint:
 		-D warnings
 
 test:
-	"$(CARGO)" test --workspace
+	$(GSTREAMER_ENV) $(TEST_LIBRARY_PATH) "$(CARGO)" test --workspace
 	"$(CARGO)" test --target-dir target --manifest-path third_party/gaol/Cargo.toml --test shared-memory
 
 qa:
@@ -154,10 +178,12 @@ qa:
 	"$(MAKE)" test
 
 build:
-	"$(CARGO)" build --workspace
+	$(GSTREAMER_ENV) "$(CARGO)" build --workspace
+	$(if $(COLLECT_GSTREAMER),$(GSTREAMER_ENV) $(COLLECT_GSTREAMER) target/debug/lib)
 
 build-release:
-	"$(CARGO)" build --workspace --release
+	$(GSTREAMER_ENV) "$(CARGO)" build --workspace --release
+	$(if $(COLLECT_GSTREAMER),$(GSTREAMER_ENV) $(COLLECT_GSTREAMER) target/release/lib)
 
 package-linux: build-release
 	mkdir -p "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)"
@@ -169,10 +195,14 @@ package-linux: build-release
 	cd "$(DIST_DIR)" && sha256sum "$(LINUX_ARCHIVE)" > "$(LINUX_ARCHIVE).sha256"
 
 run:
-	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)
+	$(if $(COLLECT_GSTREAMER),$(GSTREAMER_ENV) "$(CARGO)" build --package "$(APP_PACKAGE)" --release)
+	$(if $(COLLECT_GSTREAMER),$(GSTREAMER_ENV) $(COLLECT_GSTREAMER) target/release/lib)
+	$(GSTREAMER_ENV) RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)
 
 run-debug:
-	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" -- $(ARGS)
+	$(if $(COLLECT_GSTREAMER),$(GSTREAMER_ENV) "$(CARGO)" build --package "$(APP_PACKAGE)")
+	$(if $(COLLECT_GSTREAMER),$(GSTREAMER_ENV) $(COLLECT_GSTREAMER) target/debug/lib)
+	$(GSTREAMER_ENV) RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" -- $(ARGS)
 
 run-release: run
 
@@ -186,10 +216,10 @@ docs-serve:
 	"$(MKDOCS)" serve
 
 rust-docs:
-	"$(CARGO)" doc --workspace --no-deps
+	$(GSTREAMER_ENV) "$(CARGO)" doc --workspace --no-deps
 
 rust-docs-open:
-	"$(CARGO)" doc --workspace --no-deps --open
+	$(GSTREAMER_ENV) "$(CARGO)" doc --workspace --no-deps --open
 
 tree:
 	"$(CARGO)" tree --workspace
