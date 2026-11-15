@@ -92,6 +92,69 @@ fn bidirectional_and_invisible_characters_are_removed() {
 }
 
 #[test]
+fn default_ignorable_characters_are_removed() {
+    // The reviewer's list, then one from each remaining Default_Ignorable_Code_Point range.
+    for mark in [
+        '\u{00ad}',
+        '\u{034f}',
+        '\u{180e}',
+        '\u{115f}',
+        '\u{1160}',
+        '\u{3164}',
+        '\u{ffa0}',
+        '\u{e0000}',
+        '\u{e0001}',
+        '\u{e0041}',
+        '\u{e007f}',
+        '\u{17b4}',
+        '\u{17b5}',
+        '\u{180b}',
+        '\u{180f}',
+        '\u{2064}',
+        '\u{2065}',
+        '\u{206f}',
+        '\u{fe00}',
+        '\u{fff0}',
+        '\u{1bca0}',
+        '\u{1bca3}',
+        '\u{1d173}',
+        '\u{1d17a}',
+        '\u{e0100}',
+        '\u{e0fff}',
+    ] {
+        assert_eq!(
+            sanitize_file_name(&format!("a{mark}b.txt")),
+            "ab.txt",
+            "U+{:04X} survived",
+            mark as u32
+        );
+    }
+    // A name made only of fillers is nothing.
+    assert_eq!(sanitize_file_name("\u{3164}\u{115f}.\u{ffa0}"), "download");
+}
+
+#[test]
+fn joiners_and_emoji_presentation_selectors_are_kept() {
+    // Default-ignorable, but part of real text: Persian words and emoji sequences need them.
+    for kept in [
+        "می\u{200c}خواهم.txt",
+        "👨\u{200d}👩\u{200d}👧.txt",
+        "❤\u{fe0f}.txt",
+        "☺\u{fe0e}.txt",
+    ] {
+        assert_eq!(sanitize_file_name(kept), kept);
+    }
+}
+
+#[test]
+fn console_and_clock_device_names_are_prefixed() {
+    assert_eq!(sanitize_file_name("CONIN$"), "_CONIN$");
+    assert_eq!(sanitize_file_name("conout$.txt"), "_conout$.txt");
+    assert_eq!(sanitize_file_name("CLOCK$.log"), "_CLOCK$.log");
+    assert_eq!(sanitize_file_name("CONIN$x.txt"), "CONIN$x.txt");
+}
+
+#[test]
 fn control_characters_are_removed() {
     assert_eq!(sanitize_file_name("re\nport.pdf"), "report.pdf");
     assert_eq!(sanitize_file_name("re\0port.pdf"), "report.pdf");

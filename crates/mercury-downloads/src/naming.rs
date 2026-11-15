@@ -3,9 +3,10 @@
 // `unique_path`, `format_bytes` and their tests), licensed MPL-2.0.
 //
 // Changes from Zervo: names are cut to 255 bytes on a character boundary keeping the extension;
-// a name that was only an extension keeps it (`.pdf` → `download.pdf`); more invisible and
-// bidirectional characters are removed (U+061C, U+200B, U+2028-U+2029, U+2060-U+206F, U+FEFF);
-// COM0/LPT0 and the superscript-digit device names are covered; `unique_path` also treats the
+// a name that was only an extension keeps it (`.pdf` → `download.pdf`); every Unicode
+// default-ignorable character (except joiners and presentation selectors) and the line, paragraph
+// and annotation separators are removed; COM0/LPT0, the superscript-digit device names and
+// CONIN$/CONOUT$/CLOCK$ are covered; `unique_path` also treats the
 // `.part` file of a name as taken, keeps the result short enough for that suffix, numbers
 // `.tar.gz` as `name (1).tar.gz`, and never reads the clock; URL segments are decoded with the
 // `percent-encoding` crate instead of a hand-written decoder.
@@ -169,25 +170,52 @@ fn trim_end_dots_and_spaces(text: &str) -> &str {
     text.trim_end_matches(is_dot_or_space)
 }
 
-/// Bidirectional controls and invisible formatting characters that are not `char::is_control`.
-/// U+200C and U+200D (zero-width non-joiner and joiner) are kept: real words and emoji need them.
+/// Unicode's `Default_Ignorable_Code_Point` property, from `DerivedCoreProperties.txt` of
+/// Unicode 16.0.0 (unchanged in 17.0.0): characters that render as nothing, including the
+/// bidirectional controls, soft hyphen, Hangul fillers, variation selectors and tag characters.
+const DEFAULT_IGNORABLE: [(char, char); 17] = [
+    ('\u{00ad}', '\u{00ad}'),
+    ('\u{034f}', '\u{034f}'),
+    ('\u{061c}', '\u{061c}'),
+    ('\u{115f}', '\u{1160}'),
+    ('\u{17b4}', '\u{17b5}'),
+    ('\u{180b}', '\u{180f}'),
+    ('\u{200b}', '\u{200f}'),
+    ('\u{202a}', '\u{202e}'),
+    ('\u{2060}', '\u{206f}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{fe00}', '\u{fe0f}'),
+    ('\u{feff}', '\u{feff}'),
+    ('\u{ffa0}', '\u{ffa0}'),
+    ('\u{fff0}', '\u{fff8}'),
+    ('\u{1bca0}', '\u{1bca3}'),
+    ('\u{1d173}', '\u{1d17a}'),
+    ('\u{e0000}', '\u{e0fff}'),
+];
+
+/// Default-ignorable characters that are kept because real text needs them: the zero-width
+/// non-joiner (Persian and other scripts) and joiner (emoji sequences), and the text/emoji
+/// presentation selectors. Each is only ever drawn as part of its neighbours.
+const KEPT_IGNORABLE: [char; 4] = ['\u{200c}', '\u{200d}', '\u{fe0e}', '\u{fe0f}'];
+
+/// Invisible characters to remove that are neither `char::is_control` nor default-ignorable:
+/// the line and paragraph separators and the interlinear annotation controls.
+const OTHER_INVISIBLE: [(char, char); 2] = [('\u{2028}', '\u{2029}'), ('\u{fff9}', '\u{fffb}')];
+
+/// Characters that hide, reorder or break up a name without being control characters.
 fn is_invisible_format(character: char) -> bool {
-    matches!(
-        character,
-        '\u{061c}'
-            | '\u{200b}'
-            | '\u{200e}'
-            | '\u{200f}'
-            | '\u{2028}'..='\u{202e}'
-            | '\u{2060}'..='\u{206f}'
-            | '\u{feff}'
-            | '\u{fff9}'..='\u{fffb}'
-    )
+    if KEPT_IGNORABLE.contains(&character) {
+        return false;
+    }
+    DEFAULT_IGNORABLE
+        .iter()
+        .chain(OTHER_INVISIBLE.iter())
+        .any(|(first, last)| (*first..=*last).contains(&character))
 }
 
 /// Opening `NUL` or `nul.txt` on Windows opens the device rather than creating a file.
 fn is_windows_device_name(name: &str) -> bool {
-    const DEVICES: [&str; 30] = [
+    const DEVICES: [&str; 33] = [
         "CON",
         "PRN",
         "AUX",
@@ -218,6 +246,9 @@ fn is_windows_device_name(name: &str) -> bool {
         "LPT\u{b9}",
         "LPT\u{b2}",
         "LPT\u{b3}",
+        "CONIN$",
+        "CONOUT$",
+        "CLOCK$",
     ];
     let stem = name.split('.').next().unwrap_or("").trim_end();
     DEVICES
