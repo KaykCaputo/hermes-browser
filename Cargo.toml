@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "apps/mercury-desktop",
+    "crates/mercury-downloads",
     "crates/mercury-import",
     "crates/mercury-ui",
     "crates/talaria-core",
@@ -20,10 +21,17 @@ ash = "0.38"
 content-security-policy = "0.9"
 dpi = "0.1"
 euclid = "0.22"
+futures-util = "0.3.34"
 gleam = "0.15"
 glow = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }
+libc = "0.2.191"
 log = "0.4"
+mime_guess = "2.0.5"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false }
+percent-encoding = "2.3"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2", "stream"] }
 rusqlite = { version = "0.38", features = ["bundled"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
 # The `vello` (GPU canvas) feature is on through the vendored fix in `third_party/servo-canvas`:
@@ -50,6 +58,7 @@ slint = { version = "~1.17.1", default-features = false, features = [
 slint-build = "~1.17.1"
 surfman = "0.14"
 thiserror = "2"
+tokio = "1.54.1"
 url = "2.5"
 
 [patch.crates-io]
