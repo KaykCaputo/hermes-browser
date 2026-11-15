@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Helpers shared by scripts/macos/bundle.sh and scripts/macos/test-bundle.sh.
 # Sourced, not run. The parsing helpers read the text they parse from standard
 # input and print a result, so they can be tested without a build.

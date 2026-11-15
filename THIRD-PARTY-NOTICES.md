@@ -64,7 +64,7 @@ and keep their own licences; the table below lists them.
 - **Licence texts.** The LGPL version 2.1 is in `LICENSES/LGPL-2.1.txt` (the LGPL 2.1 permits use
   under any later version, which covers the "LGPL-2.0-or-later" projects too). Each project's
   own licence files, as the packages ship them under `share/licenses/<project>/`, are copied into
-  `Contents/Resources/licenses/<project>/` of the application.
+  `Contents/Resources/gstreamer-licenses/<project>/` of the application.
 
 Bundled libraries by project (generated from the collected set; the collector fails if this
 table does not match what it collected):

@@ -218,15 +218,17 @@ REQUIRE_MACOS = @[ "$$(uname -s)" = Darwin ] || { \
 		exit 1; \
 	}
 
+# The bundle needs its media libraries (bundle.sh refuses to build without a GStreamer
+# prefix); both steps run with the GStreamer environment, and the prefix it names is passed on.
 app-macos:
 	$(REQUIRE_MACOS)
-	"$(CARGO)" build --release --package "$(APP_PACKAGE)"
-	scripts/macos/bundle.sh --out "$(DIST_DIR)"
+	$(GSTREAMER_ENV) "$(CARGO)" build --release --package "$(APP_PACKAGE)"
+	$(GSTREAMER_ENV) scripts/macos/bundle.sh --out "$(DIST_DIR)" --gstreamer-prefix "$$MERCURY_GSTREAMER_PREFIX"
 
 package-macos:
 	$(REQUIRE_MACOS)
-	"$(CARGO)" build --release --package "$(APP_PACKAGE)"
-	scripts/macos/bundle.sh --out "$(DIST_DIR)" --dmg
+	$(GSTREAMER_ENV) "$(CARGO)" build --release --package "$(APP_PACKAGE)"
+	$(GSTREAMER_ENV) scripts/macos/bundle.sh --out "$(DIST_DIR)" --gstreamer-prefix "$$MERCURY_GSTREAMER_PREFIX" --dmg
 
 test-bundle-macos:
 	$(REQUIRE_MACOS)
