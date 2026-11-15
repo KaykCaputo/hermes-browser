@@ -159,6 +159,17 @@ pub(crate) fn connect_ui_callbacks(
         }
     });
 
+    let pointer_left_controller = Rc::clone(&controller);
+    let pointer_left_window = window.as_weak();
+    window.on_web_view_pointer_left(move || {
+        pointer_left_controller
+            .borrow_mut()
+            .queue_command(BrowserCommand::PointerLeft);
+        if let Some(window) = pointer_left_window.upgrade() {
+            window.window().request_redraw();
+        }
+    });
+
     let focus_controller = controller;
     let focus_window = window.as_weak();
     window.on_web_view_focus_changed(move |focused| {

@@ -29,21 +29,32 @@ thiserror.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 ash.workspace = true
 
-# `NSScreen.visibleFrame`, the screen area outside the menu bar and Dock (`window.screen.avail*`),
-# and `deviceDescription` to find the monitor's screen.
+# The same objc2 generation as wgpu-hal 29's Metal backend (not winit's objc2 0.5 / objc2-metal 0.2).
+# `objc2-app-kit` and `objc2-foundation`: `NSScreen.visibleFrame`, the screen area outside the menu
+# bar and Dock (`window.screen.avail*`), and `deviceDescription` to find the monitor's screen.
 [target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSGraphics",
     "NSScreen",
 ] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = [
+objc2-foundation = { workspace = true, features = [
     "std",
     "NSArray",
     "NSDictionary",
     "NSEnumerator",
     "NSString",
     "NSValue",
+] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "MTLAllocation",
+    "MTLDevice",
+    "MTLPixelFormat",
+    "MTLResource",
+    "MTLTexture",
+    "objc2-io-surface",
 ] }
 
 # The crash handler is compiled on macOS and Linux only, as in servoshell.

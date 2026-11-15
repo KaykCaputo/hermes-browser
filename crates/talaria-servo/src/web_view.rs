@@ -1,14 +1,16 @@
+use std::cell::Cell;
+
 use dpi::PhysicalSize;
 use euclid::{Point2D, Scale};
 use servo::{
     Code, CompositionEvent as ServoCompositionEvent, CompositionState as ServoCompositionState,
-    ImeEvent as ServoImeEvent, InputEvent, Key, KeyState as ServoKeyState,
+    DevicePoint, ImeEvent as ServoImeEvent, InputEvent, Key, KeyState as ServoKeyState,
     KeyboardEvent as ServoKeyboardEvent, Location, Modifiers,
-    MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
-    WebViewPoint, WheelDelta, WheelEvent, WheelMode,
+    MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseLeftViewportEvent,
+    MouseMoveEvent, NamedKey, Theme, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use talaria_core::{
-    CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
+    ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
     PointerButtonAction, TabId, WebView as TalariaWebView,
 };
 use url::Url;
@@ -20,14 +22,22 @@ pub struct ServoWebView {
     inner: servo::WebView,
     frame_ready: FrameReadySignal,
     tab_id: TabId,
+    /// Device pixels per logical pixel; pointer positions arrive in logical pixels.
+    scale_factor: Cell<f32>,
 }
 
 impl ServoWebView {
-    pub(crate) fn new(inner: servo::WebView, frame_ready: FrameReadySignal, tab_id: TabId) -> Self {
+    pub(crate) fn new(
+        inner: servo::WebView,
+        frame_ready: FrameReadySignal,
+        tab_id: TabId,
+        scale_factor: f32,
+    ) -> Self {
         Self {
             inner,
             frame_ready,
             tab_id,
+            scale_factor: Cell::new(scale_factor),
         }
     }
 
@@ -37,7 +47,12 @@ impl ServoWebView {
     }
 
     pub fn set_scale_factor(&self, scale_factor: f32) {
+        self.scale_factor.set(scale_factor);
         self.inner.set_hidpi_scale_factor(Scale::new(scale_factor));
+    }
+
+    fn web_view_point(&self, x: f32, y: f32) -> WebViewPoint {
+        web_view_point(x, y, self.scale_factor.get())
     }
 
     pub fn paint_if_available(&self) -> bool {
@@ -91,9 +106,9 @@ impl TalariaWebView for ServoWebView {
     fn pointer_moved(&mut self, x: f32, y: f32) -> Result<(), Self::Error> {
         let _event_id = self
             .inner
-            .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(web_view_point(
-                x, y,
-            ))));
+            .notify_input_event(InputEvent::MouseMove(MouseMoveEvent::new(
+                self.web_view_point(x, y),
+            )));
 
         Ok(())
     }
@@ -110,24 +125,19 @@ impl TalariaWebView for ServoWebView {
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
                     servo_mouse_button_action(action),
                     servo_mouse_button(button),
-                    web_view_point(x, y),
+                    self.web_view_point(x, y),
                 )));
 
         Ok(())
     }
 
     fn scroll(&mut self, delta_x: f32, delta_y: f32, x: f32, y: f32) -> Result<(), Self::Error> {
-        let delta = WheelDelta {
-            x: f64::from(delta_x),
-            y: f64::from(delta_y),
-            z: 0.0,
-            mode: WheelMode::DeltaPixel,
-        };
+        let delta = wheel_delta(delta_x, delta_y, self.scale_factor.get());
         let _event_id = self
             .inner
             .notify_input_event(InputEvent::Wheel(WheelEvent::new(
                 delta,
-                web_view_point(x, y),
+                self.web_view_point(x, y),
             )));
 
         Ok(())
@@ -170,6 +180,46 @@ impl TalariaWebView for ServoWebView {
         let _event_id = self.inner.notify_input_event(InputEvent::Ime(event));
         Ok(())
     }
+
+    fn set_page_zoom(&mut self, percent: u16) -> Result<(), Self::Error> {
+        self.inner.set_page_zoom(page_zoom_factor(percent));
+        Ok(())
+    }
+
+    fn pinch_zoom(&mut self, delta: f32, x: f32, y: f32) -> Result<(), Self::Error> {
+        let scale_factor = self.scale_factor.get();
+        self.inner
+            .adjust_pinch_zoom(delta, device_point(x, y, scale_factor));
+        Ok(())
+    }
+
+    fn set_color_scheme(&mut self, scheme: ColorScheme) -> Result<(), Self::Error> {
+        self.inner.notify_theme_change(servo_theme(scheme));
+        Ok(())
+    }
+
+    fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
+        self.inner.exit_fullscreen();
+        Ok(())
+    }
+
+    fn pointer_left(&mut self) -> Result<(), Self::Error> {
+        let _event_id = self.inner.notify_input_event(InputEvent::MouseLeftViewport(
+            MouseLeftViewportEvent::default(),
+        ));
+        Ok(())
+    }
+}
+
+fn servo_theme(scheme: ColorScheme) -> Theme {
+    match scheme {
+        ColorScheme::Light => Theme::Light,
+        ColorScheme::Dark => Theme::Dark,
+    }
+}
+
+fn page_zoom_factor(percent: u16) -> f32 {
+    f32::from(percent) / 100.0
 }
 
 fn servo_key_state(state: KeyState) -> ServoKeyState {
@@ -215,8 +265,27 @@ fn servo_composition_state(state: CompositionState) -> ServoCompositionState {
     }
 }
 
-fn web_view_point(x: f32, y: f32) -> WebViewPoint {
-    WebViewPoint::Page(Point2D::new(x, y))
+/// Converts a logical-pixel position to device pixels. Servo multiplies `Page` points by a
+/// scale that includes page and pinch zoom, so `Device` points are the ones that stay under
+/// the pointer once a page is zoomed.
+fn device_point(x: f32, y: f32, scale_factor: f32) -> DevicePoint {
+    Point2D::new(x * scale_factor, y * scale_factor)
+}
+
+/// Slint reports wheel deltas in logical pixels (trackpad pixel deltas are converted to
+/// logical, mouse-wheel lines become 60 logical pixels each); Servo scrolls by the delta as
+/// device pixels.
+fn wheel_delta(delta_x: f32, delta_y: f32, scale_factor: f32) -> WheelDelta {
+    WheelDelta {
+        x: f64::from(delta_x * scale_factor),
+        y: f64::from(delta_y * scale_factor),
+        z: 0.0,
+        mode: WheelMode::DeltaPixel,
+    }
+}
+
+fn web_view_point(x: f32, y: f32, scale_factor: f32) -> WebViewPoint {
+    WebViewPoint::Device(device_point(x, y, scale_factor))
 }
 
 fn servo_mouse_button_action(action: PointerButtonAction) -> ServoMouseButtonAction {
@@ -240,11 +309,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn logical_coordinates_become_page_coordinates() {
+    fn logical_coordinates_become_device_coordinates() {
         assert_eq!(
-            web_view_point(12.5, 24.0),
-            WebViewPoint::Page(Point2D::new(12.5, 24.0))
+            web_view_point(12.5, 24.0, 2.0),
+            WebViewPoint::Device(Point2D::new(25.0, 48.0))
         );
+    }
+
+    #[test]
+    fn logical_wheel_deltas_become_device_pixel_deltas() {
+        assert_eq!(
+            wheel_delta(-2.0, 18.0, 2.0),
+            WheelDelta {
+                x: -4.0,
+                y: 36.0,
+                z: 0.0,
+                mode: WheelMode::DeltaPixel,
+            }
+        );
+    }
+
+    #[test]
+    fn zoom_percentages_become_servo_zoom_factors() {
+        assert_eq!(page_zoom_factor(100), 1.0);
+        assert_eq!(page_zoom_factor(30), 0.3);
+        assert_eq!(page_zoom_factor(500), 5.0);
+    }
+
+    #[test]
+    fn colour_schemes_map_to_servo_themes() {
+        assert_eq!(servo_theme(ColorScheme::Light), Theme::Light);
+        assert_eq!(servo_theme(ColorScheme::Dark), Theme::Dark);
     }
 
     #[test]

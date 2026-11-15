@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use callbacks::connect_ui_callbacks;
 use cli::{CliOutcome, LaunchOptions, parse_arguments, reject_non_utf8_paths};
-use engine::connect_servo_runtime;
+use engine::{connect_servo_runtime, shut_down_engine};
 use keyboard::connect_native_keyboard_input;
 use mercury_ui::MainWindow;
 use profile::{ActiveProfile, EXIT_PROFILE_IN_USE, ProfileInUse};
@@ -20,12 +20,16 @@ mod cli;
 mod crash_handler;
 mod engine;
 mod keyboard;
+mod keyutils;
 mod panic_hook;
+#[cfg(target_os = "macos")]
+mod platform_macos;
 mod profile;
 mod rendering;
 mod screen_metrics;
 mod screenshot;
 mod shortcuts;
+mod shutdown;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {
@@ -109,16 +113,27 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         )
     });
 
-    window.run()?;
+    let run_result = window.run();
 
-    if screenshot_timer.is_none() {
-        return Ok(ExitCode::SUCCESS);
-    }
-    let result = screenshot_result.get();
-    if result == ScreenshotResult::Pending {
-        eprintln!("mercury-browser: the browser closed before the screenshot was taken");
-    }
-    Ok(ExitCode::from(result.exit_code()))
+    let exit_code = match (&run_result, screenshot_timer.is_some()) {
+        (Err(_), _) => 1,
+        (Ok(()), false) => 0,
+        (Ok(()), true) => {
+            let result = screenshot_result.get();
+            if result == ScreenshotResult::Pending {
+                eprintln!("mercury-browser: the browser closed before the screenshot was taken");
+            }
+            result.exit_code()
+        }
+    };
+    // Nothing may capture, pump or render while the engine shuts down, and the engine must be
+    // gone before the window (and the renderer whose device Servo uses) is destroyed.
+    drop(screenshot_timer);
+    shut_down_engine(exit_code);
+    drop(window);
+
+    run_result?;
+    Ok(ExitCode::from(exit_code))
 }
 
 /// Engine settings for this run: the launch options and the profile's Servo directory.
