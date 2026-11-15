@@ -8,7 +8,7 @@ use cli::{CliOutcome, parse_arguments};
 use engine::connect_servo_runtime;
 use keyboard::connect_native_keyboard_input;
 use mercury_ui::MainWindow;
-use screenshot::{EXIT_SUCCESS, start_screenshot};
+use screenshot::{ScreenshotResult, start_screenshot};
 use slint::{BackendSelector, ComponentHandle, LogicalSize};
 use talaria_core::{BrowserController, TabActivation};
 use talaria_servo::run_content_process_if_requested;
@@ -70,13 +70,26 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     );
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
 
-    let exit_code = Rc::new(Cell::new(EXIT_SUCCESS));
-    let _screenshot_timer = options
-        .screenshot
-        .map(|screenshot| start_screenshot(&window, controller, screenshot, Rc::clone(&exit_code)));
+    let screenshot_result = Rc::new(Cell::new(ScreenshotResult::Pending));
+    let screenshot_timer = options.screenshot.map(|screenshot| {
+        start_screenshot(
+            &window,
+            controller,
+            screenshot,
+            Rc::clone(&screenshot_result),
+        )
+    });
 
     window.run()?;
-    Ok(ExitCode::from(exit_code.get()))
+
+    if screenshot_timer.is_none() {
+        return Ok(ExitCode::SUCCESS);
+    }
+    let result = screenshot_result.get();
+    if result == ScreenshotResult::Pending {
+        eprintln!("mercury-browser: the browser closed before the screenshot was taken");
+    }
+    Ok(ExitCode::from(result.exit_code()))
 }
 
 /// The first resolvable address becomes the initial URL of the first tab; each further one

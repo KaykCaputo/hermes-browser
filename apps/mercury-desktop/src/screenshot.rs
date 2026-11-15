@@ -12,8 +12,8 @@ use talaria_core::{BrowserController, LoadState};
 use crate::cli::ScreenshotOptions;
 
 pub(crate) const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
-pub(crate) const EXIT_SUCCESS: u8 = 0;
-const EXIT_CAPTURE_FAILED: u8 = 1;
+const EXIT_SUCCESS: u8 = 0;
+const EXIT_FAILURE: u8 = 1;
 const EXIT_LOAD_TIMEOUT: u8 = 3;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -24,6 +24,26 @@ pub(crate) enum ScreenshotStep {
     TimedOut,
     /// A capture or timeout was already reported; there is nothing left to do.
     Finished,
+}
+
+/// What a screenshot run achieved. Only a written PNG counts as success, so a run that ends
+/// for any other reason (the window was closed, the event loop stopped) exits non-zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScreenshotResult {
+    Pending,
+    Saved,
+    CaptureFailed,
+    TimedOut,
+}
+
+impl ScreenshotResult {
+    pub(crate) const fn exit_code(self) -> u8 {
+        match self {
+            Self::Saved => EXIT_SUCCESS,
+            Self::Pending | Self::CaptureFailed => EXIT_FAILURE,
+            Self::TimedOut => EXIT_LOAD_TIMEOUT,
+        }
+    }
 }
 
 /// Decides when the screenshot is taken: `delay` after the active tab has finished loading,
@@ -75,13 +95,14 @@ impl ScreenshotSchedule {
     }
 }
 
-/// Polls the active tab and, once the schedule says so, saves the window as a PNG and quits
-/// the event loop. The returned timer must be kept alive while the event loop runs.
+/// Polls the active tab and, once the schedule says so, saves the window as a PNG, records
+/// the outcome in `result` and quits the event loop. The returned timer must be kept alive
+/// while the event loop runs.
 pub(crate) fn start_screenshot(
     window: &MainWindow,
     controller: Rc<RefCell<BrowserController>>,
     options: ScreenshotOptions,
-    exit_code: Rc<Cell<u8>>,
+    result: Rc<Cell<ScreenshotResult>>,
 ) -> Timer {
     let weak_window = window.as_weak();
     let mut schedule = ScreenshotSchedule::new(Instant::now(), options.delay);
@@ -96,7 +117,7 @@ pub(crate) fn start_screenshot(
             LoadState::Loaded
         );
 
-        let code = match schedule.poll(Instant::now(), page_loaded) {
+        let outcome = match schedule.poll(Instant::now(), page_loaded) {
             ScreenshotStep::Wait | ScreenshotStep::Finished => return,
             ScreenshotStep::Capture => match save_window_png(&window, &options.path) {
                 Ok((width, height)) => {
@@ -104,14 +125,14 @@ pub(crate) fn start_screenshot(
                         "saved a {width}x{height} screenshot to {}",
                         options.path.display()
                     );
-                    EXIT_SUCCESS
+                    ScreenshotResult::Saved
                 }
                 Err(error) => {
                     eprintln!(
                         "mercury-browser: failed to save the screenshot to {}: {error}",
                         options.path.display()
                     );
-                    EXIT_CAPTURE_FAILED
+                    ScreenshotResult::CaptureFailed
                 }
             },
             ScreenshotStep::TimedOut => {
@@ -119,13 +140,16 @@ pub(crate) fn start_screenshot(
                     "mercury-browser: the page did not finish loading within {} seconds; no screenshot was taken",
                     LOAD_TIMEOUT.as_secs()
                 );
-                EXIT_LOAD_TIMEOUT
+                ScreenshotResult::TimedOut
             }
         };
 
-        exit_code.set(code);
+        result.set(outcome);
         if let Err(error) = slint::quit_event_loop() {
-            log::error!("failed to quit the event loop after the screenshot: {error}");
+            eprintln!(
+                "mercury-browser: failed to quit the event loop after the screenshot ({error}); exiting"
+            );
+            std::process::exit(i32::from(outcome.exit_code()));
         }
     });
 
@@ -149,6 +173,19 @@ fn save_window_png(window: &MainWindow, path: &Path) -> Result<(u32, u32), Box<d
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_that_never_captured_exits_with_a_failure() {
+        assert_ne!(ScreenshotResult::Pending.exit_code(), 0);
+        assert_eq!(ScreenshotResult::Pending.exit_code(), 1);
+    }
+
+    #[test]
+    fn only_a_saved_screenshot_exits_successfully() {
+        assert_eq!(ScreenshotResult::Saved.exit_code(), 0);
+        assert_eq!(ScreenshotResult::CaptureFailed.exit_code(), 1);
+        assert_eq!(ScreenshotResult::TimedOut.exit_code(), 3);
+    }
 
     const DELAY: Duration = Duration::from_millis(250);
 

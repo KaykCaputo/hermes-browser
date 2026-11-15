@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::{Rc, Weak};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
 use mercury_ui::MainWindow;
@@ -41,15 +41,21 @@ struct EngineState {
     runtime: ServoRuntime,
     controller: Rc<RefCell<BrowserController>>,
     web_view_focused: Rc<Cell<bool>>,
-    rendering_setup_seen: bool,
     rendering_context: Option<Rc<BrowserRenderingContext>>,
     wgpu_device: Option<slint::wgpu_29::wgpu::Device>,
     web_views: HashMap<TabId, ServoWebView>,
+    /// One channel per web view, so dropping a replaced web view also drops its late events.
+    event_receivers: HashMap<TabId, Receiver<TabEvent>>,
     visible_tab_id: Option<TabId>,
     current_viewport_size: Option<ViewportSize>,
     current_scale_factor: Option<f32>,
-    browser_event_sender: Sender<TabEvent>,
-    browser_event_receiver: Receiver<TabEvent>,
+}
+
+enum GraphicsStatus {
+    Ready,
+    Missing,
+    /// The engine state is borrowed; nothing can be concluded right now.
+    Busy,
 }
 
 pub(crate) fn connect_servo_runtime(
@@ -60,7 +66,6 @@ pub(crate) fn connect_servo_runtime(
     let event_loop_waker = EventLoopWaker::new(|| {
         let _queued = slint::invoke_from_event_loop(pump_after_wake);
     });
-    let (browser_event_sender, browser_event_receiver) = mpsc::channel::<TabEvent>();
 
     let engine = Rc::new(Engine {
         window: window.as_weak(),
@@ -68,15 +73,13 @@ pub(crate) fn connect_servo_runtime(
             runtime: ServoRuntime::new(event_loop_waker),
             controller,
             web_view_focused,
-            rendering_setup_seen: false,
             rendering_context: None,
             wgpu_device: None,
             web_views: HashMap::new(),
+            event_receivers: HashMap::new(),
             visible_tab_id: None,
             current_viewport_size: None,
             current_scale_factor: None,
-            browser_event_sender,
-            browser_event_receiver,
         }),
         bootstrap_failure_logged: Cell::new(false),
     });
@@ -111,8 +114,16 @@ fn schedule_graphics_bootstrap(engine: Weak<Engine>, delay: Duration) {
         let Some(strong_engine) = engine.upgrade() else {
             return;
         };
-        if strong_engine.rendering_setup_seen() {
-            return;
+        match strong_engine.graphics_status() {
+            GraphicsStatus::Ready => {
+                strong_engine.bootstrap_failure_logged.set(false);
+                return;
+            }
+            GraphicsStatus::Busy => {
+                schedule_graphics_bootstrap(engine, GRAPHICS_BOOTSTRAP_DELAY);
+                return;
+            }
+            GraphicsStatus::Missing => {}
         }
         let Some(window) = strong_engine.window.upgrade() else {
             return;
@@ -121,20 +132,25 @@ fn schedule_graphics_bootstrap(engine: Weak<Engine>, delay: Duration) {
         log::info!("the window has not rendered yet; forcing an offscreen render");
         // Never called while the engine state is borrowed: this re-enters the notifier.
         let snapshot_result = window.window().take_snapshot();
-        if strong_engine.rendering_setup_seen() {
-            return;
-        }
-
-        if !strong_engine.bootstrap_failure_logged.replace(true) {
-            match snapshot_result {
-                Ok(_) => log::warn!(
-                    "an offscreen render did not set up graphics; retrying every {} ms",
-                    GRAPHICS_BOOTSTRAP_RETRY_INTERVAL.as_millis()
-                ),
-                Err(error) => log::warn!(
-                    "an offscreen render failed ({error}); retrying every {} ms",
-                    GRAPHICS_BOOTSTRAP_RETRY_INTERVAL.as_millis()
-                ),
+        match strong_engine.graphics_status() {
+            GraphicsStatus::Ready => {
+                strong_engine.bootstrap_failure_logged.set(false);
+                return;
+            }
+            GraphicsStatus::Busy => {}
+            GraphicsStatus::Missing => {
+                if !strong_engine.bootstrap_failure_logged.replace(true) {
+                    match snapshot_result {
+                        Ok(_) => log::warn!(
+                            "an offscreen render did not set up graphics; retrying every {} ms",
+                            GRAPHICS_BOOTSTRAP_RETRY_INTERVAL.as_millis()
+                        ),
+                        Err(error) => log::warn!(
+                            "an offscreen render failed ({error}); retrying every {} ms",
+                            GRAPHICS_BOOTSTRAP_RETRY_INTERVAL.as_millis()
+                        ),
+                    }
+                }
             }
         }
         schedule_graphics_bootstrap(engine, GRAPHICS_BOOTSTRAP_RETRY_INTERVAL);
@@ -142,10 +158,12 @@ fn schedule_graphics_bootstrap(engine: Weak<Engine>, delay: Duration) {
 }
 
 impl Engine {
-    fn rendering_setup_seen(&self) -> bool {
-        self.state
-            .try_borrow()
-            .is_ok_and(|state| state.rendering_setup_seen)
+    fn graphics_status(&self) -> GraphicsStatus {
+        match self.state.try_borrow() {
+            Ok(state) if state.rendering_context.is_some() => GraphicsStatus::Ready,
+            Ok(_) => GraphicsStatus::Missing,
+            Err(_) => GraphicsStatus::Busy,
+        }
     }
 
     /// Advances Servo and the browser state. Skips, rather than panics, if re-entered.
@@ -172,10 +190,20 @@ impl Engine {
         match rendering_state {
             RenderingState::RenderingSetup => state.set_up_rendering(&window, graphics_api),
             RenderingState::BeforeRendering => {
+                if state.rendering_context.is_none() {
+                    // An earlier setup failed; every render offers the device again.
+                    state.set_up_rendering(&window, graphics_api);
+                }
                 state.pump(&window);
                 state.present(&window);
             }
-            RenderingState::RenderingTeardown => state.tear_down_rendering(&window),
+            RenderingState::RenderingTeardown => {
+                state.tear_down_rendering(&window);
+                drop(state);
+                // A later setup needs bootstrapping again if the window is covered by then.
+                let engine = ENGINE.with(|current| current.borrow().clone());
+                schedule_graphics_bootstrap(engine, GRAPHICS_BOOTSTRAP_DELAY);
+            }
             _ => {}
         }
     }
@@ -183,7 +211,6 @@ impl Engine {
 
 impl EngineState {
     fn set_up_rendering(&mut self, window: &MainWindow, graphics_api: &GraphicsAPI<'_>) {
-        self.rendering_setup_seen = true;
         if self.rendering_context.is_some() {
             return;
         }
@@ -224,7 +251,11 @@ impl EngineState {
     fn pump(&mut self, window: &MainWindow) {
         self.runtime.spin_event_loop();
 
-        if apply_pending_browser_events(&self.controller, &self.browser_event_receiver) {
+        let mut state_changed = false;
+        for receiver in self.event_receivers.values() {
+            state_changed |= apply_pending_browser_events(&self.controller, receiver);
+        }
+        if state_changed {
             sync_ui(window, &self.controller.borrow());
         }
 
@@ -248,24 +279,42 @@ impl EngineState {
             (active_tab_id, tab_ids)
         };
         self.web_views.retain(|tab_id, _| tab_ids.contains(tab_id));
+        self.event_receivers
+            .retain(|tab_id, _| tab_ids.contains(tab_id));
         for tab_id in tab_ids {
-            if self.web_views.contains_key(&tab_id) {
-                continue;
-            }
-
             let initial_url = self.controller.borrow_mut().take_initial_url(tab_id);
+            let url = match plan_web_view(self.web_views.contains_key(&tab_id), initial_url) {
+                WebViewPlan::Keep => continue,
+                WebViewPlan::Create { url } => url,
+                WebViewPlan::Replace { url } => {
+                    log::info!(
+                        "tab {}: replacing a page that never committed",
+                        tab_id.value()
+                    );
+                    self.web_views.remove(&tab_id);
+                    self.event_receivers.remove(&tab_id);
+                    if self.visible_tab_id == Some(tab_id) {
+                        // Show, focus and size the new web view like a newly selected tab.
+                        self.visible_tab_id = None;
+                    }
+                    url
+                }
+            };
+
+            let (event_sender, event_receiver) = mpsc::channel::<TabEvent>();
             let create_result = self.runtime.create_web_view(
                 rendering_context.clone(),
-                initial_url.as_deref().unwrap_or(NEW_TAB_URL),
+                &url,
                 scale_factor,
                 tab_id,
-                self.browser_event_sender.clone(),
+                event_sender,
             );
 
             match create_result {
                 Ok(created_web_view) => {
                     created_web_view.hide();
                     self.web_views.insert(tab_id, created_web_view);
+                    self.event_receivers.insert(tab_id, event_receiver);
                 }
                 Err(error) => {
                     report_web_view_error(window, &self.controller, tab_id, &error);
@@ -311,7 +360,8 @@ impl EngineState {
         match dispatch_pending_commands(&self.controller, &mut self.web_views) {
             Ok(has_pending_commands) => {
                 if has_pending_commands {
-                    window.window().request_redraw();
+                    // A redraw may be skipped while the window is covered; pump again instead.
+                    let _queued = slint::invoke_from_event_loop(pump_after_wake);
                 }
             }
             Err((tab_id, error)) => {
@@ -349,11 +399,36 @@ impl EngineState {
     fn tear_down_rendering(&mut self, window: &MainWindow) {
         window.set_web_view_texture(Image::default());
         self.web_views.clear();
+        self.event_receivers.clear();
         drop(self.rendering_context.take());
         drop(self.wgpu_device.take());
         self.visible_tab_id = None;
         self.current_viewport_size = None;
         self.current_scale_factor = None;
+    }
+}
+
+/// What the engine does with a tab's web view during a pump.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WebViewPlan {
+    Keep,
+    Create {
+        url: String,
+    },
+    /// The tab's page was replaced before it committed: discard the web view, start afresh.
+    Replace {
+        url: String,
+    },
+}
+
+/// `initial_url` is what `BrowserController::take_initial_url` returned for the tab.
+pub(crate) fn plan_web_view(has_web_view: bool, initial_url: Option<String>) -> WebViewPlan {
+    match (has_web_view, initial_url) {
+        (false, initial_url) => WebViewPlan::Create {
+            url: initial_url.unwrap_or_else(|| NEW_TAB_URL.to_owned()),
+        },
+        (true, Some(url)) => WebViewPlan::Replace { url },
+        (true, None) => WebViewPlan::Keep,
     }
 }
 
@@ -487,6 +562,33 @@ mod tests {
             .borrow_mut()
             .handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
         assert!(handled);
+    }
+
+    #[test]
+    fn a_tab_without_a_web_view_gets_one_at_its_initial_url_or_blank() {
+        assert_eq!(
+            plan_web_view(false, Some("https://a.test/".to_owned())),
+            WebViewPlan::Create {
+                url: "https://a.test/".to_owned()
+            }
+        );
+        assert_eq!(
+            plan_web_view(false, None),
+            WebViewPlan::Create {
+                url: NEW_TAB_URL.to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn a_web_view_is_kept_unless_a_new_initial_url_is_pending() {
+        assert_eq!(plan_web_view(true, None), WebViewPlan::Keep);
+        assert_eq!(
+            plan_web_view(true, Some("https://other.test/".to_owned())),
+            WebViewPlan::Replace {
+                url: "https://other.test/".to_owned()
+            }
+        );
     }
 
     #[test]
