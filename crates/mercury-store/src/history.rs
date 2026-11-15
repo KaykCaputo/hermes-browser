@@ -53,6 +53,26 @@ pub struct HistoryEntry {
     pub transition: VisitTransition,
 }
 
+impl HistoryEntry {
+    /// The cursor that continues a listing after this entry.
+    pub fn cursor(&self) -> HistoryCursor {
+        HistoryCursor {
+            visited_at_ms: self.visited_at_ms,
+            visit_id: self.visit_id,
+        }
+    }
+}
+
+/// A position in the history listing, which is ordered by visit time and then visit id, both
+/// descending. [`Store::history`] lists the visits strictly after it in that order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HistoryCursor {
+    /// The visit time of the last entry already listed.
+    pub visited_at_ms: i64,
+    /// The id of the last entry already listed.
+    pub visit_id: VisitId,
+}
+
 /// Which visits [`Store::clear_history`] removes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClearRange {
@@ -81,17 +101,17 @@ pub struct Suggestion {
 const HISTORY_SQL: &str = "
     SELECT v.id, p.url, p.title, v.visited_at, v.transition
     FROM visits v JOIN places p ON p.id = v.place_id
-    WHERE v.visited_at < ?1
+    WHERE (v.visited_at, v.id) < (?1, ?2)
     ORDER BY v.visited_at DESC, v.id DESC
-    LIMIT ?2";
+    LIMIT ?3";
 
 const HISTORY_SEARCH_SQL: &str = "
     SELECT v.id, p.url, p.title, v.visited_at, v.transition
     FROM visits v JOIN places p ON p.id = v.place_id
-    WHERE v.visited_at < ?1
-      AND v.place_id IN (SELECT rowid FROM places_fts WHERE places_fts MATCH ?3)
+    WHERE (v.visited_at, v.id) < (?1, ?2)
+      AND v.place_id IN (SELECT rowid FROM places_fts WHERE places_fts MATCH ?4)
     ORDER BY v.visited_at DESC, v.id DESC
-    LIMIT ?2";
+    LIMIT ?3";
 
 const SUGGEST_URL_SQL: &str = "
     SELECT p.id, p.url,
@@ -167,29 +187,31 @@ impl Store {
 
     /// Newest first. `query` filters by URL or title (full-text, prefix match on the last word).
     ///
-    /// Only visits strictly before `before_ms` are listed, if given. An empty or blank `query`
+    /// With a `before` cursor (see [`HistoryEntry::cursor`]), only the visits after it in this
+    /// order are listed, so paging never skips or repeats visits. An empty or blank `query`
     /// lists everything; one with no searchable words matches nothing. Characters with a meaning
     /// in FTS5 query syntax are never interpreted.
     pub fn history(
         &self,
         query: Option<&str>,
-        before_ms: Option<i64>,
+        before: Option<HistoryCursor>,
         limit: u32,
     ) -> Result<Vec<HistoryEntry>> {
-        let before = before_ms.unwrap_or(i64::MAX);
+        let (before, before_id) =
+            before.map_or((i64::MAX, i64::MAX), |c| (c.visited_at_ms, c.visit_id.0));
         let query = query.filter(|q| !q.trim().is_empty());
         let mut stmt;
         let rows = match query {
             None => {
                 stmt = self.conn.prepare_cached(HISTORY_SQL)?;
-                stmt.query(params![before, limit])?
+                stmt.query(params![before, before_id, limit])?
             }
             Some(query) => {
                 let Some(fts) = fts_query(query) else {
                     return Ok(Vec::new());
                 };
                 stmt = self.conn.prepare_cached(HISTORY_SEARCH_SQL)?;
-                stmt.query(params![before, limit, fts])?
+                stmt.query(params![before, before_id, limit, fts])?
             }
         };
         rows.mapped(|row| {

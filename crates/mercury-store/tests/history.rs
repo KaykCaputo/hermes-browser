@@ -1,7 +1,7 @@
 mod common;
 
 use common::{DAY_MS, Fixture, NOW};
-use mercury_store::{BookmarkRoot, ClearRange, Store, VisitId, VisitTransition};
+use mercury_store::{BookmarkRoot, ClearRange, HistoryCursor, Store, VisitId, VisitTransition};
 
 const A: &str = "https://example.com/a";
 const B: &str = "https://example.org/b";
@@ -167,13 +167,20 @@ fn history_is_newest_first_with_all_fields() {
 }
 
 #[test]
-fn history_honours_before_and_limit() {
+fn history_honours_the_cursor_and_limit() {
     let store = sample();
-    let entries = store.history(None, Some(NOW + 2000), 10).unwrap();
+    let all = store.history(None, None, 10).unwrap();
+    // Continue after the second entry (the visit at NOW + 2000).
+    let entries = store.history(None, Some(all[1].cursor()), 10).unwrap();
     assert_eq!(
         urls(&entries),
         ["https://servo.org/", "https://www.rust-lang.org/learn"]
     );
+    let cursor = HistoryCursor {
+        visited_at_ms: NOW + 2000,
+        visit_id: all[1].visit_id,
+    };
+    assert_eq!(all[1].cursor(), cursor);
     let entries = store.history(None, None, 2).unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].visited_at_ms, NOW + 3000);
@@ -229,10 +236,42 @@ fn only_the_last_word_is_a_prefix() {
 #[test]
 fn search_combines_with_before_and_limit() {
     let store = sample();
-    let entries = store.history(Some("servo"), Some(NOW + 3000), 10).unwrap();
+    let first = store.history(Some("servo"), None, 1).unwrap();
+    assert_eq!(first[0].visited_at_ms, NOW + 3000);
+    let entries = store
+        .history(Some("servo"), Some(first[0].cursor()), 10)
+        .unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].visited_at_ms, NOW + 1000);
     assert_eq!(store.history(Some("servo"), None, 1).unwrap().len(), 1);
+}
+
+#[test]
+fn paging_returns_visits_that_share_a_millisecond_exactly_once() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut recorded = Vec::new();
+    for i in 0..25 {
+        let url = format!("https://example.com/{i}");
+        recorded.push(
+            store
+                .record_visit(&url, None, VisitTransition::Link, NOW)
+                .unwrap(),
+        );
+    }
+    for query in [None, Some("example")] {
+        let mut seen = Vec::new();
+        let mut cursor = None;
+        loop {
+            let page = store.history(query, cursor, 10).unwrap();
+            assert!(page.len() <= 10);
+            let Some(last) = page.last() else { break };
+            cursor = Some(last.cursor());
+            seen.extend(page.iter().map(|e| e.visit_id));
+        }
+        let mut expected = recorded.clone();
+        expected.reverse();
+        assert_eq!(seen, expected, "query {query:?}");
+    }
 }
 
 #[test]

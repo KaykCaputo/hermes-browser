@@ -26,7 +26,7 @@ use rusqlite::Connection;
 pub use bookmarks::{BookmarkId, BookmarkKind, BookmarkNode, BookmarkRoot};
 pub use downloads::{DownloadRecord, DownloadRecordId, DownloadState, NewDownload};
 pub use error::{Result, StoreError};
-pub use history::{ClearRange, HistoryEntry, Suggestion, VisitId, VisitTransition};
+pub use history::{ClearRange, HistoryCursor, HistoryEntry, Suggestion, VisitId, VisitTransition};
 
 /// The profile database. Owns one SQLite connection.
 #[derive(Debug)]
