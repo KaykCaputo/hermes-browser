@@ -1,8 +1,8 @@
 //! Policy in `PasswordStore`: validation and exact-origin lookup. All passwords are fake.
 
 use mercury_passwords::{
-    LoginKey, LoginKind, MAX_PASSWORD_BYTES, MAX_REALM_BYTES, MAX_USERNAME_BYTES, MemoryBackend,
-    Origin, Password, PasswordError, PasswordStore, SaveOutcome,
+    LoginKey, LoginKind, LoginSummary, MAX_PASSWORD_BYTES, MAX_REALM_BYTES, MAX_USERNAME_BYTES,
+    MemoryBackend, Origin, Password, PasswordError, PasswordStore, SaveOutcome, SecretBackend,
 };
 
 fn origin(text: &str) -> Origin {
@@ -165,16 +165,130 @@ fn control_characters_are_refused_in_usernames_and_realms() {
             ),
             "realm {bad:?} should be refused"
         );
-        assert!(matches!(
-            store.password(&form("https://example.com", bad)),
-            Err(PasswordError::InvalidInput(_))
-        ));
-        assert!(matches!(
-            store.remove(&form("https://example.com", bad)),
-            Err(PasswordError::InvalidInput(_))
-        ));
     }
     assert!(store.all().expect("all").is_empty());
+}
+
+#[test]
+fn every_listed_login_can_be_read_and_removed() {
+    // A backend may hold keys `save` would refuse (written by another tool or an older
+    // version). Whatever `all()` returns must be readable and removable.
+    let backend = MemoryBackend::new();
+    let odd = [
+        form("https://example.com", "tab\tname"),
+        form("https://example.com", "nul\0name"),
+        http_auth("https://example.com", "line\nbreak", "u"),
+        form("https://example.com", &"u".repeat(MAX_USERNAME_BYTES + 1)),
+    ];
+    for key in &odd {
+        backend
+            .put(key, &fake("fake-odd"))
+            .expect("the backend stores anything");
+    }
+    let store = PasswordStore::new(backend);
+    let listed = store.all().expect("all");
+    assert_eq!(listed.len(), odd.len());
+    for summary in &listed {
+        assert_eq!(
+            store
+                .password(&summary.key)
+                .expect("a listed login can be read")
+                .expect("present")
+                .expose(),
+            "fake-odd"
+        );
+    }
+    for summary in &listed {
+        assert!(
+            store
+                .remove(&summary.key)
+                .expect("a listed login can be removed")
+        );
+    }
+    assert!(store.all().expect("all").is_empty());
+}
+
+/// A memory backend whose `delete` fails for one user name.
+struct FailingDelete {
+    inner: MemoryBackend,
+    fail_for: &'static str,
+}
+
+impl SecretBackend for FailingDelete {
+    fn put(&self, key: &LoginKey, password: &Password) -> Result<SaveOutcome, PasswordError> {
+        self.inner.put(key, password)
+    }
+    fn get(&self, key: &LoginKey) -> Result<Option<Password>, PasswordError> {
+        self.inner.get(key)
+    }
+    fn delete(&self, key: &LoginKey) -> Result<bool, PasswordError> {
+        if key.username == self.fail_for {
+            return Err(PasswordError::Os {
+                code: -1,
+                message: "simulated failure".to_owned(),
+            });
+        }
+        self.inner.delete(key)
+    }
+    fn list(&self) -> Result<Vec<LoginSummary>, PasswordError> {
+        self.inner.list()
+    }
+}
+
+#[test]
+fn remove_all_continues_past_an_error_and_reports_the_count_with_the_first_error() {
+    let store = PasswordStore::new(FailingDelete {
+        inner: MemoryBackend::new(),
+        fail_for: "bob",
+    });
+    for username in ["alice", "bob", "carol", "dave"] {
+        store
+            .save(&form("https://example.com", username), &fake("fake"))
+            .expect("save");
+    }
+    let error = store.remove_all().expect_err("one login cannot be removed");
+    assert_eq!(
+        error,
+        PasswordError::RemoveAllIncomplete {
+            removed: 3,
+            first_error: Box::new(PasswordError::Os {
+                code: -1,
+                message: "simulated failure".to_owned(),
+            }),
+        }
+    );
+    assert!(error.to_string().contains('3'), "{error}");
+    assert_eq!(usernames(&store.all().expect("all")), ["bob"]);
+}
+
+#[test]
+fn debug_output_shows_origin_and_kind_but_not_the_user_name() {
+    let key = http_auth("https://example.com:8443", "Staff", "alice-secret-name");
+    let shown = format!("{key:?}");
+    assert!(shown.contains("https://example.com:8443"), "{shown}");
+    assert!(
+        shown.contains("HttpAuth") && shown.contains("Staff"),
+        "{shown}"
+    );
+    assert!(!shown.contains("alice-secret-name"), "{shown}");
+    assert!(shown.contains("<redacted, 17 chars>"), "{shown}");
+
+    let store = store();
+    store
+        .save(
+            &form("https://example.com", "bob-secret-name"),
+            &fake("fake"),
+        )
+        .expect("save");
+    let summary = format!("{:?}", store.all().expect("all"));
+    assert!(!summary.contains("bob-secret-name"), "{summary}");
+    assert!(
+        summary.contains("<redacted, 15 chars>") && summary.contains("Form"),
+        "{summary}"
+    );
+
+    let empty = format!("{:?}", form("https://example.com", ""));
+    assert!(empty.contains("<redacted, 0 chars>"), "{empty}");
 }
 
 #[test]

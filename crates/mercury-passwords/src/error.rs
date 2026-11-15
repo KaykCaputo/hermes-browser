@@ -33,6 +33,17 @@ pub enum PasswordError {
     /// The operating system's random number generator failed.
     #[error("the operating system's random number generator failed")]
     RandomUnavailable,
+    /// [`PasswordStore::remove_all`](crate::PasswordStore::remove_all) removed some logins but
+    /// could not remove at least one; it went on with the rest.
+    #[error(
+        "removed {removed} saved logins, but not all of them; the first error was: {first_error}"
+    )]
+    RemoveAllIncomplete {
+        /// How many logins were removed.
+        removed: u64,
+        /// The first error met.
+        first_error: Box<PasswordError>,
+    },
     /// Any other operating-system error.
     #[error("operating system error {code}: {message}")]
     Os {

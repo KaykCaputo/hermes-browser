@@ -12,7 +12,8 @@ use common::contract::{fake, form, http_auth};
 use common::keychain::{TEST_KEYCHAIN_PASSWORD, TempKeychain, temp_keychain};
 use core_foundation::data::CFData;
 use mercury_passwords::{
-    KEYCHAIN_SERVICE, KeychainBackend, PasswordError, PasswordStore, SaveOutcome, SecretBackend,
+    KEYCHAIN_SERVICE, KeychainBackend, LoginKey, PasswordError, PasswordStore, SaveOutcome,
+    SecretBackend,
 };
 use security_framework::item::{
     ItemAddOptions, ItemAddValue, ItemClass, ItemSearchOptions, Limit, Location,
@@ -97,6 +98,71 @@ fn one_generic_password_item_per_login_with_the_documented_attributes() {
     );
     assert_eq!(items[2]["labl"], "example.com:8443 (bob%) – Staff|Area");
     assert_eq!(items[2]["desc"], "Mercury Browser HTTP login");
+}
+
+/// Paths `KeychainBackend::file` must refuse before touching the file system or the Keychain.
+/// Nothing is created: each path is refused, and the test checks it still does not exist.
+#[test]
+fn login_keychain_names_and_real_keychain_folders_are_refused() {
+    let guard = TempKeychain::new();
+    let home = std::env::home_dir().expect("the test user has a home directory");
+    let refused = [
+        guard.dir().join("login.keychain-db"),
+        guard.dir().join("login.keychain"),
+        guard.dir().join("LOGIN.KEYCHAIN-DB"),
+        guard.dir().join("Login.Keychain.copy"),
+        guard
+            .dir()
+            .join("login.keychain-folder")
+            .join("other.keychain-db"),
+        home.join("Library/Keychains/mercury-test-never-created.keychain-db"),
+        home.join("Library/Keychains/sub/mercury-test-never-created.keychain-db"),
+        home.join("library/KEYCHAINS/mercury-test-never-created.keychain-db"),
+        home.join("Library/Other/../Keychains/mercury-test-never-created.keychain-db"),
+        "/Library/Keychains/mercury-test-never-created.keychain-db".into(),
+        "/Library/Keychains/./mercury-test-never-created.keychain-db".into(),
+        "/System/Library/Keychains/mercury-test-never-created.keychain-db".into(),
+    ];
+    for path in &refused {
+        assert!(
+            !path.exists(),
+            "{} must not exist before the test",
+            path.display()
+        );
+        match KeychainBackend::file(path, TEST_KEYCHAIN_PASSWORD) {
+            Err(PasswordError::InvalidInput(reason)) => {
+                assert!(reason.contains("keychain"), "{reason}")
+            }
+            Err(other) => panic!("{} gave {other:?}", path.display()),
+            Ok(_) => panic!("{} was accepted", path.display()),
+        }
+        assert!(
+            !path.exists(),
+            "{} must not have been created",
+            path.display()
+        );
+    }
+    assert!(
+        std::fs::read_dir(guard.dir())
+            .expect("the temporary directory is readable")
+            .next()
+            .is_none(),
+        "nothing was created in the temporary directory"
+    );
+}
+
+#[test]
+fn ordinary_names_in_a_temporary_folder_are_accepted() {
+    let guard = TempKeychain::new();
+    for name in [
+        "my-login.keychain-db",
+        "logins.keychain-db",
+        "test.keychain-db",
+    ] {
+        let path = guard.dir().join(name);
+        drop(KeychainBackend::file(&path, TEST_KEYCHAIN_PASSWORD).expect("accepted"));
+        assert!(path.exists());
+    }
 }
 
 #[test]
@@ -221,18 +287,46 @@ fn other_items_are_skipped_never_listed_or_removed() {
     );
 }
 
+/// Locks the test keychain and returns a handle that can unlock it again.
+///
+/// `security-framework` has no call that locks a keychain, so this sets the keychain's idle
+/// timer to one second and waits for it, polling instead of sleeping a fixed time: on a loaded
+/// machine the timer may fire late. Each probe comes after more than a second of idleness, so even
+/// if a probe counts as activity the timer can still fire before the next one. Gives up after a
+/// minute.
+fn lock_by_idle_timer(
+    guard: &TempKeychain,
+    backend: &KeychainBackend,
+    probe: &LoginKey,
+) -> SecKeychain {
+    let mut handle = guard.handle();
+    let mut settings = KeychainSettings::new();
+    settings.set_lock_interval(Some(1));
+    handle.set_settings(&settings).expect("settings");
+    for _ in 0..40 {
+        sleep(Duration::from_millis(1_500));
+        match backend.get(probe) {
+            Err(PasswordError::Locked) => return handle,
+            Ok(_) => {}
+            Err(other) => panic!("unexpected error while waiting for the lock: {other:?}"),
+        }
+    }
+    panic!("the test keychain did not lock within a minute");
+}
+
+fn unlock(handle: &mut SecKeychain) {
+    handle.unlock(Some(TEST_KEYCHAIN_PASSWORD)).expect("unlock");
+    let mut settings = KeychainSettings::new();
+    settings.set_lock_interval(None);
+    handle.set_settings(&settings).expect("settings");
+}
+
 #[test]
 fn a_locked_keychain_reports_locked_and_still_lists() {
     let (guard, backend) = temp_keychain();
     let key = form("https://example.com", "locked-user");
     backend.put(&key, &fake("fake-before-lock")).expect("save");
-
-    // Lock the temporary keychain: it locks itself after one idle second.
-    let mut handle = guard.handle();
-    let mut settings = KeychainSettings::new();
-    settings.set_lock_interval(Some(1));
-    handle.set_settings(&settings).expect("settings");
-    sleep(Duration::from_millis(2_500));
+    let mut handle = lock_by_idle_timer(&guard, &backend, &key);
 
     let error = backend
         .get(&key)
@@ -249,14 +343,39 @@ fn a_locked_keychain_reports_locked_and_still_lists() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].key, key);
 
-    handle.unlock(Some(TEST_KEYCHAIN_PASSWORD)).expect("unlock");
-    let mut settings = KeychainSettings::new();
-    settings.set_lock_interval(None);
-    handle.set_settings(&settings).expect("settings");
+    unlock(&mut handle);
     assert_eq!(
         backend.get(&key).expect("read").expect("present").expose(),
         "fake-before-lock"
     );
+}
+
+#[test]
+fn saving_over_a_login_whose_secret_cannot_be_read_fails_and_leaves_one_item() {
+    let (guard, backend) = temp_keychain();
+    let key = form("https://example.com", "alice");
+    backend.put(&key, &fake("fake-original")).expect("save");
+    let mut handle = lock_by_idle_timer(&guard, &backend, &key);
+
+    assert_eq!(
+        backend.put(&key, &fake("fake-replacement")),
+        Err(PasswordError::Locked)
+    );
+    let listed = backend.list().expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].key, key);
+    assert_eq!(
+        attributes(&handle).len(),
+        1,
+        "exactly one item in the keychain"
+    );
+
+    unlock(&mut handle);
+    assert_eq!(
+        backend.get(&key).expect("read").expect("present").expose(),
+        "fake-original"
+    );
+    assert_eq!(attributes(&handle).len(), 1);
 }
 
 #[test]

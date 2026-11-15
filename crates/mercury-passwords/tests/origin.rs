@@ -221,3 +221,16 @@ fn display_shows_the_origin_text() {
     let origin = origin("https://example.com:8443/").expect("valid");
     assert_eq!(origin.to_string(), "https://example.com:8443");
 }
+
+#[test]
+fn unusual_spellings_of_loopback_addresses_become_canonical() {
+    for (text, expected) in [
+        ("http://127.1/", "http://127.0.0.1"),
+        ("http://2130706433/", "http://127.0.0.1"),
+        ("http://0x7f.1/", "http://127.0.0.1"),
+        ("http://[0:0:0:0:0:0:0:1]/", "http://[::1]"),
+        ("http://127.0.0.1./", "http://127.0.0.1"),
+    ] {
+        assert_eq!(origin_text(text), expected, "{text}");
+    }
+}

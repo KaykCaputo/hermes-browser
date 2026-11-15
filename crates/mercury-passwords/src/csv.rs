@@ -8,13 +8,20 @@
 //! dropped; the copy on disk is the caller's responsibility. When reading, the caller should
 //! likewise wipe the text it read from the file once [`parse_logins_csv`] has returned.
 //!
+//! **Spreadsheet formulas.** A spreadsheet that opens an exported file may treat a value
+//! beginning with `=`, `+`, `-` or `@` as a formula and run it. The writer deliberately does not
+//! alter such values (no leading quote or space), because a password must round-trip exactly;
+//! the caller should warn the user not to open the file in a spreadsheet.
+//!
 //! Formats, told apart by their header row (names compared case-insensitively, in any order):
 //! - Chrome, Edge and Brave: `name,url,username,password,note`; exports before 2023 have no
 //!   `note`. (Chromium `components/password_manager/core/browser/export/password_csv_writer.cc`.)
 //! - Firefox: `url,username,password,httpRealm,formActionOrigin,guid,timeCreated,timeLastUsed,
 //!   timePasswordChanged`, every field quoted. (`toolkit/components/passwordmgr/LoginExport.sys.mjs`.)
 //! - Safari and the Passwords app: `Title,URL,Username,Password,Notes,OTPAuth`; older Safari
-//!   versions have no `Notes`. One-time-code secrets in `OTPAuth` are not imported.
+//!   versions have no `Notes`. One-time-code secrets in `OTPAuth` are not imported. Source:
+//!   Apple's Safari User Guide as quoted in Mozilla bug 1827467
+//!   (<https://bugzilla.mozilla.org/show_bug.cgi?id=1827467>); not checked against a real export.
 //!
 //! The reader follows RFC 4180: fields may be quoted, a quote inside a quoted field is doubled,
 //! quoted fields may contain commas and line breaks, and records end with CRLF or LF. A leading
@@ -23,10 +30,16 @@
 use url::Url;
 use zeroize::Zeroizing;
 
+use std::fmt;
+
+use crate::backend::{validate_password, validate_realm, validate_username};
+use crate::login::Redacted;
 use crate::{LoginKey, Origin, Password, PasswordError};
 
 /// One login read from a CSV file.
-#[derive(Clone, Debug)]
+///
+/// `Debug` shows the URL, title and realm, and only the lengths of the user name and note.
+#[derive(Clone)]
 pub struct CsvLogin {
     /// The site's URL as written in the file; [`Origin::parse`] accepts it.
     pub url: String,
@@ -40,6 +53,20 @@ pub struct CsvLogin {
     pub note: Option<String>,
     /// The HTTP-authentication realm, for Firefox entries that have one.
     pub http_realm: Option<String>,
+}
+
+impl fmt::Debug for CsvLogin {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CsvLogin")
+            .field("url", &self.url)
+            .field("username", &Redacted::of(&self.username))
+            .field("password", &self.password)
+            .field("name", &self.name)
+            .field("note", &self.note.as_deref().map(Redacted::of))
+            .field("http_realm", &self.http_realm)
+            .finish()
+    }
 }
 
 /// A row that was not imported.
@@ -73,6 +100,8 @@ const FIREFOX: &[&str] = &[
     "url",
     "username",
 ];
+// Safari: from Apple's Safari User Guide as quoted in Mozilla bug 1827467; not checked against a
+// real export. Older versions are reported (by the same kind of second-hand source) to lack Notes.
 const SAFARI: &[&str] = &["otpauth", "password", "title", "url", "username"];
 const SAFARI_WITH_NOTES: &[&str] = &["notes", "otpauth", "password", "title", "url", "username"];
 
@@ -135,6 +164,18 @@ impl Columns {
         if fields[self.password].is_empty() {
             return Err("the password is empty");
         }
+        // The rules `PasswordStore::save` applies, so a row it would refuse is a numbered skip.
+        let rule = |result: Result<(), PasswordError>| {
+            result.map_err(|error| match error {
+                PasswordError::InvalidInput(reason) => reason,
+                _ => "the row is not acceptable",
+            })
+        };
+        rule(validate_username(&fields[self.username]))?;
+        if let Some(realm) = self.realm {
+            rule(validate_realm(&fields[realm]))?;
+        }
+        rule(validate_password(&fields[self.password]))?;
         let optional = |index: Option<usize>| {
             index
                 .map(|index| fields[index].as_str())
@@ -161,13 +202,15 @@ impl Columns {
 ///
 /// Headers: Chrome, Edge and Brave `name,url,username,password[,note]`; Firefox
 /// `url,username,password,httpRealm,formActionOrigin,guid,timeCreated,timeLastUsed,timePasswordChanged`;
-/// Safari `Title,URL,Username,Password[,Notes],OTPAuth`. Names are compared case-insensitively
+/// Safari `Title,URL,Username,Password[,Notes],OTPAuth` (from Apple's Safari User Guide as quoted
+/// in Mozilla bug 1827467; not checked against a real export). Names are compared case-insensitively
 /// and may come in any order. The file is clear text: the caller should wipe its copy of `text`
 /// once this returns.
 ///
 /// Rows with the wrong number of fields, broken quoting, an Android-app entry, a URL that is not
-/// an https site (or a loopback http site), or an empty password are skipped and listed in
-/// [`CsvImport::skipped`]. A missing or unrecognised header is an error.
+/// an https site (or a loopback http site), an empty password, or a user name, realm or password
+/// that [`PasswordStore::save`](crate::PasswordStore::save) would refuse are skipped and listed
+/// in [`CsvImport::skipped`] with a fixed reason. A missing or unrecognised header is an error.
 pub fn parse_logins_csv(text: &str) -> Result<CsvImport, PasswordError> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut records = Reader::new(text);
@@ -217,7 +260,9 @@ pub fn parse_logins_csv(text: &str) -> Result<CsvImport, PasswordError> {
 ///
 /// Write the result only when the user has explicitly asked for an export, to the location they
 /// chose, as a new file only they can read (mode `0600`); never to a temporary directory, a log
-/// or a crash report. Tell the user to delete the file once it has been imported elsewhere.
+/// or a crash report. Tell the user to delete the file once it has been imported elsewhere, and
+/// not to open it in a spreadsheet: values beginning with `=`, `+`, `-` or `@` are written
+/// unchanged, so they round-trip exactly, and a spreadsheet may run them as formulas.
 ///
 /// Columns are `name,url,username,password,note`: the host, the origin, the user name, the
 /// password and an empty note. Fields are quoted when they contain a comma, a quote or a line

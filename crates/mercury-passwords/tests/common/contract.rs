@@ -34,6 +34,15 @@ pub fn fake(text: &str) -> Password {
     Password::new(text.to_owned())
 }
 
+/// A total order on keys that does not depend on their (redacted) `Debug` output.
+fn sort_key(key: &LoginKey) -> (String, Option<String>, String) {
+    let realm = match &key.kind {
+        LoginKind::Form => None,
+        LoginKind::HttpAuth { realm } => Some(realm.clone()),
+    };
+    (key.origin.as_str().to_owned(), realm, key.username.clone())
+}
+
 fn read(backend: &impl SecretBackend, key: &LoginKey) -> Option<String> {
     backend
         .get(key)
@@ -48,7 +57,7 @@ fn keys(backend: &impl SecretBackend) -> Vec<LoginKey> {
         .into_iter()
         .map(|summary| summary.key)
         .collect();
-    keys.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    keys.sort_by_key(sort_key);
     keys
 }
 
@@ -193,7 +202,7 @@ pub fn form_and_http_auth_logins_are_separate(backend: &impl SecretBackend) {
         Some("fake-empty-realm")
     );
     let mut expected = vec![form_key, auth_key, other_realm, empty_realm];
-    expected.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    expected.sort_by_key(sort_key);
     assert_eq!(keys(backend), expected);
 }
 
@@ -224,7 +233,7 @@ pub fn hostile_keys_round_trip(backend: &impl SecretBackend) {
         );
     }
     let mut expected = hostile.to_vec();
-    expected.sort_by(|a, b| format!("{a:?}").cmp(&format!("{b:?}")));
+    expected.sort_by_key(sort_key);
     assert_eq!(keys(backend), expected);
     for (index, key) in hostile.iter().enumerate() {
         assert_eq!(read(backend, key), Some(format!("fake-hostile-{index}")));

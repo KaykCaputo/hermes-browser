@@ -1,4 +1,21 @@
+use std::fmt;
+
 use crate::Origin;
+
+/// Shows a value's length but not the value, in `Debug` output.
+pub(crate) struct Redacted(pub(crate) usize);
+
+impl Redacted {
+    pub(crate) fn of(text: &str) -> Self {
+        Self(text.chars().count())
+    }
+}
+
+impl fmt::Debug for Redacted {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "<redacted, {} chars>", self.0)
+    }
+}
 
 /// How a login is used on its origin.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -13,7 +30,9 @@ pub enum LoginKind {
 }
 
 /// What identifies one saved login. Two keys are the same login exactly when they are equal.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// `Debug` shows the origin and kind but only the length of the user name.
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct LoginKey {
     /// The only origin the login is offered on.
     pub origin: Origin,
@@ -49,7 +68,18 @@ impl LoginKey {
     }
 }
 
-/// A saved login without its password.
+impl fmt::Debug for LoginKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LoginKey")
+            .field("origin", &self.origin)
+            .field("kind", &self.kind)
+            .field("username", &Redacted::of(&self.username))
+            .finish()
+    }
+}
+
+/// A saved login without its password. `Debug` redacts the user name as [`LoginKey`] does.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoginSummary {
     /// Which login this is.

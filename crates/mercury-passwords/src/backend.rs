@@ -30,12 +30,13 @@ impl<B: SecretBackend> PasswordStore<B> {
         Self { backend }
     }
 
-    /// The backend, for callers that need it directly.
+    /// The backend itself. Intended for tests and tools; application code should go through the
+    /// store so its rules apply.
     pub fn backend(&self) -> &B {
         &self.backend
     }
 
-    /// Gives the backend back.
+    /// Gives the backend back. Intended for tests and tools.
     pub fn into_backend(self) -> B {
         self.backend
     }
@@ -48,7 +49,7 @@ impl<B: SecretBackend> PasswordStore<B> {
     /// user name or realm. An empty user name is allowed.
     pub fn save(&self, key: &LoginKey, password: &Password) -> Result<SaveOutcome, PasswordError> {
         validate_key(key)?;
-        validate_password(password)?;
+        validate_password(password.expose())?;
         self.backend.put(key, password)
     }
 
@@ -70,14 +71,16 @@ impl<B: SecretBackend> PasswordStore<B> {
     }
 
     /// The password of one login, or `None` if it is not saved.
+    ///
+    /// Any key is accepted, so every login [`PasswordStore::all`] lists can be read, including
+    /// one `save` would refuse (written by another tool or an older version).
     pub fn password(&self, key: &LoginKey) -> Result<Option<Password>, PasswordError> {
-        validate_key(key)?;
         self.backend.get(key)
     }
 
-    /// Removes one login; `false` if it was not saved.
+    /// Removes one login; `false` if it was not saved. Any key is accepted, so every login
+    /// [`PasswordStore::all`] lists can be removed.
     pub fn remove(&self, key: &LoginKey) -> Result<bool, PasswordError> {
-        validate_key(key)?;
         self.backend.delete(key)
     }
 
@@ -92,15 +95,28 @@ impl<B: SecretBackend> PasswordStore<B> {
     /// Removes every login this application saved and returns how many were removed.
     ///
     /// Only logins the backend lists are touched; on macOS that is items under this
-    /// application's service name whose account decodes as a login.
+    /// application's service name whose account decodes as a login. A login that cannot be
+    /// removed does not stop the others: they are still removed, and the result is
+    /// [`PasswordError::RemoveAllIncomplete`] with the number removed and the first error.
     pub fn remove_all(&self) -> Result<u64, PasswordError> {
         let mut removed = 0;
+        let mut first_error = None;
         for summary in self.backend.list()? {
-            if self.backend.delete(&summary.key)? {
-                removed += 1;
+            match self.backend.delete(&summary.key) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                }
             }
         }
-        Ok(removed)
+        match first_error {
+            None => Ok(removed),
+            Some(error) => Err(PasswordError::RemoveAllIncomplete {
+                removed,
+                first_error: Box::new(error),
+            }),
+        }
     }
 
     fn matching(
@@ -127,29 +143,41 @@ fn sort_key(key: &LoginKey) -> (&Origin, Option<&str>, &str) {
 }
 
 fn validate_key(key: &LoginKey) -> Result<(), PasswordError> {
-    if key.username.len() > MAX_USERNAME_BYTES {
-        return Err(PasswordError::InvalidInput("the user name is too long"));
-    }
-    if key.username.chars().any(char::is_control) {
-        return Err(PasswordError::InvalidInput(
-            "the user name contains a control character",
-        ));
-    }
+    validate_username(&key.username)?;
     if let LoginKind::HttpAuth { realm } = &key.kind {
-        if realm.len() > MAX_REALM_BYTES {
-            return Err(PasswordError::InvalidInput("the realm is too long"));
-        }
-        if realm.chars().any(char::is_control) {
-            return Err(PasswordError::InvalidInput(
-                "the realm contains a control character",
-            ));
-        }
+        validate_realm(realm)?;
     }
     Ok(())
 }
 
-fn validate_password(password: &Password) -> Result<(), PasswordError> {
-    let text = password.expose();
+/// The rules `save` applies to a user name; also used when importing.
+pub(crate) fn validate_username(username: &str) -> Result<(), PasswordError> {
+    if username.len() > MAX_USERNAME_BYTES {
+        return Err(PasswordError::InvalidInput("the user name is too long"));
+    }
+    if username.chars().any(char::is_control) {
+        return Err(PasswordError::InvalidInput(
+            "the user name contains a control character",
+        ));
+    }
+    Ok(())
+}
+
+/// The rules `save` applies to a realm; also used when importing.
+pub(crate) fn validate_realm(realm: &str) -> Result<(), PasswordError> {
+    if realm.len() > MAX_REALM_BYTES {
+        return Err(PasswordError::InvalidInput("the realm is too long"));
+    }
+    if realm.chars().any(char::is_control) {
+        return Err(PasswordError::InvalidInput(
+            "the realm contains a control character",
+        ));
+    }
+    Ok(())
+}
+
+/// The rules `save` applies to a password; also used when importing.
+pub(crate) fn validate_password(text: &str) -> Result<(), PasswordError> {
     if text.is_empty() {
         return Err(PasswordError::InvalidInput("the password is empty"));
     }

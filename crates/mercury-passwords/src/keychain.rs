@@ -17,7 +17,7 @@
 //!
 //! Listing reads attributes only, never secret data, so it cannot make macOS ask the user.
 
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 use core_foundation::data::CFData;
 use security_framework::base::Error as SecError;
@@ -74,9 +74,17 @@ impl KeychainBackend {
     /// A keychain file at `path`, created with `password` if absent. For tests and tools.
     ///
     /// An existing file is opened and unlocked with `password`; a wrong password gives
-    /// [`PasswordError::AccessDenied`]. A new file is created unlocked. Neither adds the file to
-    /// the user's keychain search list.
+    /// [`PasswordError::AccessDenied`]. A new file is created unlocked.
+    ///
+    /// Apple's implementation adds a newly created keychain to the user's search list (and makes
+    /// it the default keychain if the user has none) when its path contains `/login.keychain`.
+    /// To make that impossible, and to keep this away from real keychains, `file` refuses with
+    /// [`PasswordError::InvalidInput`], before touching the file system or the Keychain, any path
+    /// with a component beginning with `login.keychain` (in any case) and any path inside
+    /// `~/Library/Keychains`, `/Library/Keychains` or `/System/Library/Keychains`. Other paths
+    /// are created without changing the search list.
     pub fn file(path: &Path, password: &str) -> Result<Self, PasswordError> {
+        check_keychain_path(path)?;
         if path.as_os_str().as_encoded_bytes().contains(&0) {
             return Err(PasswordError::InvalidInput(
                 "the keychain path contains a NUL byte",
@@ -191,6 +199,90 @@ impl SecretBackend for KeychainBackend {
         }
         Ok(summaries)
     }
+}
+
+/// Refuses paths where creating or opening a keychain could affect the user's real keychains.
+///
+/// Apple's `SecKeychainCreate` adds a new keychain to the user's search list, and makes it the
+/// default keychain if there is none, when its path contains `/login.keychain`. So any path with
+/// a component beginning with `login.keychain` (in any case) is refused, as is any path inside
+/// `~/Library/Keychains`, `/Library/Keychains` or `/System/Library/Keychains`. Both the path as
+/// written (with `.` and `..` resolved) and the path with symbolic links resolved, as far as it
+/// exists, are checked; folder names are compared case-insensitively.
+fn check_keychain_path(path: &Path) -> Result<(), PasswordError> {
+    let absolute = std::path::absolute(path)
+        .map_err(|_| PasswordError::InvalidInput("the keychain path cannot be resolved"))?;
+    let lexical = resolve_dots(&absolute);
+    let mut candidates = vec![lexical.clone()];
+    if let Some(resolved) = resolve_links(&lexical) {
+        candidates.push(resolved);
+    }
+
+    let mut roots = vec![
+        PathBuf::from("/Library/Keychains"),
+        PathBuf::from("/System/Library/Keychains"),
+    ];
+    if let Some(home) = std::env::home_dir() {
+        roots.push(home.join("Library/Keychains"));
+    }
+    let roots: Vec<PathBuf> = roots
+        .iter()
+        .flat_map(|root| [Some(root.clone()), root.canonicalize().ok()])
+        .flatten()
+        .map(|root| lower_case(&root))
+        .collect();
+
+    for candidate in &candidates {
+        let candidate = lower_case(candidate);
+        if candidate.components().any(|component| {
+            matches!(component, Component::Normal(name)
+                if name.as_encoded_bytes().starts_with(b"login.keychain"))
+        }) {
+            return Err(PasswordError::InvalidInput(
+                "a keychain file name must not begin with \"login.keychain\"",
+            ));
+        }
+        if roots.iter().any(|root| candidate.starts_with(root)) {
+            return Err(PasswordError::InvalidInput(
+                "a keychain file must not be inside a system or user Keychains folder",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `path` without `.` components and with each `..` removing the component before it.
+fn resolve_dots(path: &Path) -> PathBuf {
+    let mut resolved = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other),
+        }
+    }
+    resolved
+}
+
+/// `path` with symbolic links resolved in its longest existing ancestor, the rest appended.
+fn resolve_links(path: &Path) -> Option<PathBuf> {
+    let mut remainder = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(canonical) = existing.canonicalize() {
+            let mut resolved = canonical;
+            resolved.extend(remainder.iter().rev());
+            return Some(resolved);
+        }
+        remainder.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
+}
+
+fn lower_case(path: &Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().to_lowercase())
 }
 
 /// A search for this application's generic-password items in `keychain` only.

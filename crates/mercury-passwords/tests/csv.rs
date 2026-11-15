@@ -314,7 +314,8 @@ fn writing_then_parsing_gives_back_the_logins() {
             fake("\"fake\" \"\""),
         ),
         (
-            key("https://example.org", "line\nbreak"),
+            // User names cannot hold line breaks (`save` refuses them); passwords can.
+            key("https://example.org", "plain"),
             fake("fake\r\ncrlf\nlf"),
         ),
         (
@@ -340,4 +341,125 @@ fn writing_then_parsing_gives_back_the_logins() {
         assert_eq!(login.note, None);
         assert_eq!(login.http_realm, None);
     }
+}
+
+#[test]
+fn rows_that_save_would_refuse_are_skipped_with_their_line() {
+    let long_username = "u".repeat(mercury_passwords::MAX_USERNAME_BYTES + 1);
+    let long_password = "p".repeat(mercury_passwords::MAX_PASSWORD_BYTES + 1);
+    let text = format!(
+        "name,url,username,password\n\
+         ok,https://example.com,alice,fake-ok\n\
+         tab,https://example.com,\"tab\tsecret\",fake-1\n\
+         nl,https://example.com,\"line\nsecret\",fake-2\n\
+         long-user,https://example.com,{long_username},fake-3\n\
+         long-pass,https://example.com,bob,{long_password}\n\
+         also-ok,https://example.org,carol,fake-ok-2\n"
+    );
+    let import = parse(&text);
+    assert_eq!(
+        summary(&import),
+        [
+            row("https://example.com", "alice", "fake-ok"),
+            row("https://example.org", "carol", "fake-ok-2"),
+        ]
+    );
+    assert_eq!(
+        skipped(&import),
+        [
+            (3, "the user name contains a control character"),
+            (4, "the user name contains a control character"),
+            (6, "the user name is too long"),
+            (7, "the password is too long"),
+        ]
+    );
+}
+
+#[test]
+fn firefox_rows_with_an_unacceptable_realm_are_skipped() {
+    let header = "\"url\",\"username\",\"password\",\"httpRealm\",\"formActionOrigin\",\"guid\",\"timeCreated\",\"timeLastUsed\",\"timePasswordChanged\"";
+    let long_realm = "r".repeat(mercury_passwords::MAX_REALM_BYTES + 1);
+    let text = format!(
+        "{header}\r\n\
+         \"https://example.com\",\"a\",\"fake-1\",\"Realm\u{7}secret\",,\"g1\",\"1\",\"1\",\"1\"\r\n\
+         \"https://example.com\",\"b\",\"fake-2\",\"{long_realm}\",,\"g2\",\"1\",\"1\",\"1\"\r\n\
+         \"https://example.com\",\"c\",\"fake-3\",\"Fine realm\",,\"g3\",\"1\",\"1\",\"1\"\r\n"
+    );
+    let import = parse(&text);
+    assert_eq!(
+        summary(&import),
+        [row("https://example.com", "c", "fake-3")]
+    );
+    assert_eq!(
+        skipped(&import),
+        [
+            (2, "the realm contains a control character"),
+            (3, "the realm is too long"),
+        ]
+    );
+}
+
+#[test]
+fn nul_bytes_and_lone_carriage_returns_are_field_content() {
+    // A NUL or a lone CR is not a separator. In a user name either is refused, as `save` would;
+    // in a password it is kept exactly.
+    let import = parse(
+        "name,url,username,password\n\
+         a,https://example.com,nul\0name,fake-1\n\
+         b,https://example.com,cr\rname,fake-2\n\
+         c,https://example.com,alice,fake\0with\rboth\n",
+    );
+    assert_eq!(
+        summary(&import),
+        [row("https://example.com", "alice", "fake\0with\rboth")]
+    );
+    assert_eq!(
+        skipped(&import),
+        [
+            (2, "the user name contains a control character"),
+            (3, "the user name contains a control character"),
+        ]
+    );
+
+    // A file that ends its lines with lone CRs (classic Mac OS) is one line: its header does not
+    // match any format, so it is refused rather than read wrongly.
+    assert!(matches!(
+        parse_logins_csv("name,url,username,password\rx,https://example.com,alice,fake\r"),
+        Err(PasswordError::InvalidInput(_))
+    ));
+}
+
+#[test]
+fn values_that_look_like_spreadsheet_formulas_round_trip_unchanged() {
+    let logins = [
+        (
+            key("https://example.com", "=user"),
+            fake("=HYPERLINK(\"x\")"),
+        ),
+        (key("https://example.com", "+user"), fake("+1+1")),
+        (key("https://example.com", "-user"), fake("-2+3")),
+        (key("https://example.com", "@user"), fake("@SUM(A1)")),
+    ];
+    let csv = write_logins_csv(logins.iter().map(|(key, password)| (key, password)));
+    let import = parse(&csv);
+    assert!(import.skipped.is_empty());
+    assert_eq!(import.logins.len(), logins.len());
+    for ((key, password), login) in logins.iter().zip(&import.logins) {
+        assert_eq!(login.username, key.username);
+        assert_eq!(login.password.expose(), password.expose());
+    }
+}
+
+#[test]
+fn debug_output_of_a_csv_login_hides_user_name_password_and_note() {
+    let import = parse(
+        "name,url,username,password,note\n\
+         x,https://example.com,alice-secret-name,fake-hidden,note-secret-text\n",
+    );
+    let shown = format!("{:?}", import.logins[0]);
+    assert!(shown.contains("https://example.com"), "{shown}");
+    assert!(!shown.contains("alice-secret-name"), "{shown}");
+    assert!(!shown.contains("fake-hidden"), "{shown}");
+    assert!(!shown.contains("note-secret-text"), "{shown}");
+    assert!(shown.contains("<redacted, 17 chars>"), "{shown}");
 }
