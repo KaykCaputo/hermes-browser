@@ -11,10 +11,16 @@
 //! logins never reads a password: on macOS, reading one is what can make the system ask the user.
 //!
 //! [`generate_password`] makes new passwords from the operating system's random source.
+//! [`parse_logins_csv`] and [`write_logins_csv`] read and write the login CSV files other
+//! browsers export; an exported file holds every password in clear text (see
+//! [`write_logins_csv`] for what the caller must do about that).
+
+#![warn(missing_docs)]
 
 #[cfg(target_os = "macos")]
 mod account;
 mod backend;
+mod csv;
 mod error;
 mod generator;
 #[cfg(target_os = "macos")]
@@ -27,6 +33,7 @@ mod secret;
 pub use backend::{
     MAX_PASSWORD_BYTES, MAX_REALM_BYTES, MAX_USERNAME_BYTES, PasswordStore, SecretBackend,
 };
+pub use csv::{CsvImport, CsvLogin, CsvSkipped, parse_logins_csv, write_logins_csv};
 pub use error::PasswordError;
 pub use generator::{
     AMBIGUOUS_CHARACTERS, DIGITS, GENERATOR_MAX_LENGTH, GENERATOR_MIN_LENGTH, GeneratorOptions,

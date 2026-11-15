@@ -44,6 +44,14 @@ const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 const ERR_SEC_INTERACTION_NOT_ALLOWED: i32 = -25308;
 
 /// Logins in a macOS keychain, one generic-password item per login.
+///
+/// Each item has the service [`KEYCHAIN_SERVICE`]; an account that encodes the login's origin,
+/// kind, realm and user name as `v1|kind|origin|realm|username` (`kind` is `form` or `http`; `|`,
+/// `%` and control characters in the realm and user name are written as `%XX`); a label such as
+/// `example.com (alice)`; the description `Mercury Browser web login` or
+/// `Mercury Browser HTTP login`; and the password as UTF-8 data. Every operation is restricted to
+/// the one keychain this backend was made for. Listing reads attributes only and never secret
+/// data. Items under the service whose account does not decode are skipped, never removed.
 pub struct KeychainBackend {
     target: Target,
 }
