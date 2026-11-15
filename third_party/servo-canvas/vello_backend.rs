@@ -70,7 +70,7 @@ pub(crate) struct VelloDrawTarget {
     renderer: Rc<RefCell<vello::Renderer>>,
     scene: vello::Scene,
     size: Size2D<u32>,
-    clips: Vec<Path>,
+    clips: Vec<(Path, peniko::Fill)>, // Mercury: with the clip's fill rule
     state: State,
     render_texture: Texture,
     render_texture_view: TextureView,
@@ -180,9 +180,9 @@ impl VelloDrawTarget {
         }
         f(self);
         // push all clip layers back
-        for path in &self.clips {
+        for (path, fill) in &self.clips {
             self.scene
-                .push_clip_layer(peniko::Fill::NonZero, kurbo::Affine::IDENTITY, &path.0);
+                .push_clip_layer(*fill, kurbo::Affine::IDENTITY, &path.0);
         }
     }
 
@@ -193,7 +193,7 @@ impl VelloDrawTarget {
         }
         let viewport: Rect<f64> = Rect::from_size(self.get_size().cast());
         let Some(clip) = self.clips.iter().try_fold(viewport, |acc, e| {
-            acc.intersection(&e.0.bounding_box().into())
+            acc.intersection(&e.0.0.bounding_box().into())
         }) else {
             // clip makes no visible side effects
             return false;
@@ -554,12 +554,13 @@ impl GenericDrawTarget for VelloDrawTarget {
         }
     }
 
-    fn push_clip(&mut self, path: &Path, _fill_rule: FillRule, transform: Transform2D<f64>) {
+    fn push_clip(&mut self, path: &Path, fill_rule: FillRule, transform: Transform2D<f64>) {
+        let fill = fill_rule.convert();
         self.scene
-            .push_clip_layer(peniko::Fill::NonZero, transform.cast().into(), &path.0);
+            .push_clip_layer(fill, transform.cast().into(), &path.0);
         let mut path = path.clone();
         path.transform(transform.cast());
-        self.clips.push(path);
+        self.clips.push((path, fill));
     }
 
     fn push_clip_rect(&mut self, rect: &Rect<i32>) {
@@ -790,9 +791,9 @@ impl VelloDrawTarget {
         // prune scene
         self.scene.reset();
         // push all clip layers back
-        for path in &self.clips {
+        for (path, fill) in &self.clips {
             self.scene
-                .push_clip_layer(peniko::Fill::NonZero, kurbo::Affine::IDENTITY, &path.0);
+                .push_clip_layer(*fill, kurbo::Affine::IDENTITY, &path.0);
         }
         true
     }

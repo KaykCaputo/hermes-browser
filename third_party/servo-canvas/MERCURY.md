@@ -14,7 +14,7 @@ repository's MPL-2.0 `LICENSE` file applies to this directory.
 Mercury enables Servo's `vello` feature, the GPU 2D-canvas backend. The first
 commit that added this directory (`60ee59f`) holds the crate as published, so
 `git diff 60ee59f -- third_party/servo-canvas` shows every change below.
-Changes 2–7 are marked with `Mercury:` comments in the source.
+Changes 2–8 are marked with `Mercury:` comments in the source.
 
 ## 1. Build with wgpu 30 (`vello_backend.rs`, `VelloDrawTarget::map_read`)
 
@@ -148,6 +148,18 @@ clip layers and re-opens them afterwards.
 
 Drop it when Servo closes the clip layers itself.
 
+## 8. Honour the fill rule of a clip (`vello_backend.rs`, `push_clip`, `clips`)
+
+`push_clip` ignored its `fill_rule` argument and always clipped with the
+non-zero rule, so `clip("evenodd")` clipped to the whole outer shape
+(`tests/pages/canvas-parity.html`, case `clip-evenodd`). Now the rule is
+converted with the crate's existing `FillRule` → `peniko::Fill` conversion,
+used for the clip layer and stored with the clip path, so that the layer is
+re-opened with the same rule after a render. (The CPU backend has the same
+defect in `vello_cpu`; this change does not touch it.)
+
+Drop it when Servo passes the fill rule itself.
+
 ## Known limitations (accepted)
 
 - A device lost while a read-back waits on the GPU panics inside
@@ -162,5 +174,5 @@ Drop it when Servo closes the clip layers itself.
 ## Removing this directory
 
 Remove the `[patch.crates-io]` entry and this directory once a Servo release
-compiles with the `vello` feature and contains equivalents of changes 2–7, or
+compiles with the `vello` feature and contains equivalents of changes 2–8, or
 once Mercury no longer needs them.
