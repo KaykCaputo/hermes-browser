@@ -27,13 +27,15 @@
 #   - scripts/macos/test-bundle.sh passes.
 #
 # With --require-media, also:
-#   - Contents/MacOS/lib/ holds libgstreamer-1.0.0.dylib and lib<name>.dylib
-#     for every plugin in the lists scripts/macos/collect-gstreamer.sh copies
-#     from, found the same way by scripts/ci/servo-plugin-lists.sh
-#     ($MERCURY_SERVO_PLUGIN_LISTS, or the resolved `servo` crate's
-#     gstreamer_plugin_lists/{common,macos}.rs.in);
-#   - the executable loads @rpath/libgstreamer-1.0.0.dylib and has the rpath
-#     @executable_path/lib/;
+#   - Contents/MacOS/lib/ holds libgstreamer-1.0.0.dylib and every plugin
+#     library `scripts/macos/gstreamer-plugins.sh` lists, and none of those
+#     `scripts/macos/gstreamer-plugins.sh --excluded` lists (so a stale one
+#     cannot ride along). That script is the one definition the collector
+#     uses too; it honours MERCURY_SERVO_PLUGIN_LISTS and
+#     MERCURY_GSTREAMER_EXCLUDE_PLUGINS;
+#   - the executable loads @rpath/libgstreamer-1.0.0.dylib, and its only rpath
+#     is @executable_path/lib/ (an absolute rpath back to a build machine
+#     fails);
 #   - every library any Mach-O in the bundle loads is a system library or an
 #     @rpath/@loader_path/@executable_path name whose file is in
 #     Contents/MacOS/lib/: nothing points back at the machine it was built on.
@@ -257,14 +259,7 @@ else
 fi
 
 # ── Media libraries (--require-media) ─────────────────────────────────────
-# Each list is a Rust array of string literals with `//` comment lines.
-plugin_names() {
-    local list
-    for list in common.rs.in macos.rs.in; do
-        [ -f "$1/$list" ] || return 1
-        grep -v '^[[:space:]]*//' "$1/$list" | grep -o '"[^"]*"' | tr -d '"'
-    done
-}
+PLUGIN_LIST_SCRIPT="$REPO/scripts/macos/gstreamer-plugins.sh"
 
 # The libraries a Mach-O file loads, without its own install name.
 loaded_libraries() {
@@ -282,21 +277,34 @@ if [ "$REQUIRE_MEDIA" = 1 ]; then
         fail "Contents/MacOS/lib/libgstreamer-1.0.0.dylib is missing: the bundle has no media libraries"
     fi
 
-    if LISTS="$("$REPO/scripts/ci/servo-plugin-lists.sh")" &&
-        PLUGINS="$(plugin_names "$LISTS")" && [ -n "$PLUGINS" ]; then
+    # One plugin library file name per line, from the shared definition.
+    if [ ! -x "$PLUGIN_LIST_SCRIPT" ]; then
+        fail "scripts/macos/gstreamer-plugins.sh is missing: cannot tell which plugins belong in the bundle"
+    elif EFFECTIVE="$("$PLUGIN_LIST_SCRIPT")" && EXCLUDED="$("$PLUGIN_LIST_SCRIPT" --excluded)" &&
+        [ -n "$EFFECTIVE" ]; then
         listed=0
         missing=""
-        for plugin in $PLUGINS; do
+        for library in $EFFECTIVE; do
             listed=$((listed + 1))
-            [ -f "$LIB_DIR/lib$plugin.dylib" ] || missing="$missing lib$plugin.dylib"
+            [ -f "$LIB_DIR/$library" ] || missing="$missing $library"
         done
+        excluded_names="$(printf '%s\n' "$EXCLUDED" | sed '/^$/d' | tr '\n' ' ' | sed 's/ $//')"
         if [ -z "$missing" ]; then
-            pass "all $listed plugins in $LISTS/{common,macos}.rs.in are in Contents/MacOS/lib"
+            pass "all $listed plugins listed by scripts/macos/gstreamer-plugins.sh are in Contents/MacOS/lib (excluded: ${excluded_names:-none})"
         else
             fail "plugins missing from Contents/MacOS/lib:$missing"
         fi
+        present=""
+        for library in $EXCLUDED; do
+            [ ! -e "$LIB_DIR/$library" ] || present="$present $library"
+        done
+        if [ -z "$present" ]; then
+            pass "no excluded plugin is in Contents/MacOS/lib (excluded: ${excluded_names:-none})"
+        else
+            fail "excluded plugins are in Contents/MacOS/lib:$present"
+        fi
     else
-        fail "cannot read the plugin lists (set MERCURY_SERVO_PLUGIN_LISTS, or run where cargo metadata finds the servo crate)"
+        fail "scripts/macos/gstreamer-plugins.sh could not list the plugins (see its message above)"
     fi
 
     if [ -n "$BIN" ]; then
@@ -305,12 +313,16 @@ if [ "$REQUIRE_MEDIA" = 1 ]; then
         else
             fail "$EXECUTABLE does not load @rpath/libgstreamer-1.0.0.dylib"
         fi
+        # Exactly one rpath, and that one: any other (an absolute path to the
+        # build machine's prefix, say) would let the app load from outside.
         otool -l "$BIN" | awk '$1 == "cmd" { cmd = $2 } cmd == "LC_RPATH" && $1 == "path" { print $2 }' >"$TMP"
-        if grep -Eqx '@executable_path/lib/?' "$TMP"; then
-            pass "$EXECUTABLE has the rpath @executable_path/lib/"
-        else
-            fail "$EXECUTABLE lacks the rpath @executable_path/lib/ (has: $(tr '\n' ' ' <"$TMP"))"
-        fi
+        rpaths="$(tr '\n' ' ' <"$TMP" | sed 's/ $//')"
+        case "$rpaths" in
+            "@executable_path/lib/" | "@executable_path/lib")
+                pass "$EXECUTABLE's only rpath is @executable_path/lib/" ;;
+            *)
+                fail "$EXECUTABLE must have exactly the rpath @executable_path/lib/, has: ${rpaths:-none}" ;;
+        esac
     fi
 
     outside=0
