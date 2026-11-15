@@ -13,8 +13,9 @@ CSS pixel (so any display scale and window size work), and then samples well
 inside every region: red, blue, green, and white in the gaps between them.
 
 Prints one line per check. Exit status: 0 when every check passes, 1 when the
-picture is wrong, 2 when the file is not a PNG this script can read (for
-example a truncated file). Standard library only.
+picture is wrong, 2 when the file is not a usable PNG (truncated, corrupt,
+malformed, larger than a screenshot can be, or in a form this script does not
+read). Standard library only.
 """
 
 import struct
@@ -28,6 +29,12 @@ HEADING_TOP = 200
 HEADING_BOTTOM = 260  # 40px bold heading; its line box ends well before this
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+# Limits well above any screenshot (a 900x700 window at 3x is 2700x2100), so a
+# small crafted file cannot make the decoder allocate without bound.
+MAX_FILE_BYTES = 256 * 1024 * 1024
+MAX_SIDE = 16384
+MAX_PIXELS = 40 * 1000 * 1000
 
 
 class PngError(Exception):
@@ -99,8 +106,16 @@ def decode_png(data):
         if header is None and kind != b"IHDR":
             raise PngError("first chunk is not IHDR")
         if kind == b"IHDR":
+            if header is not None:
+                raise PngError("more than one IHDR chunk")
+            if length != 13:
+                raise PngError("IHDR chunk is %d bytes long, not 13" % length)
             header = struct.unpack(">IIBBBBB", body)
         elif kind == b"PLTE":
+            if palette is not None:
+                raise PngError("more than one PLTE chunk")
+            if length == 0 or length % 3 != 0 or length > 3 * 256:
+                raise PngError("PLTE chunk is %d bytes long, not a multiple of 3 up to 768" % length)
             palette = [tuple(body[i : i + 3]) for i in range(0, len(body), 3)]
         elif kind == b"IDAT":
             compressed.append(body)
@@ -111,31 +126,43 @@ def decode_png(data):
         raise PngError("no IHDR chunk")
     if not seen_end:
         raise PngError("no IEND chunk (file truncated?)")
-    width, height, depth, colour_type, _compression, _filter, interlace = header
+    width, height, depth, colour_type, compression, filter_method, interlace = header
     channels_by_type = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
     if colour_type not in channels_by_type:
         raise PngError("unsupported colour type %d" % colour_type)
     if depth != 8:
         raise PngError("unsupported bit depth %d (only 8 is handled)" % depth)
+    if compression != 0 or filter_method != 0:
+        raise PngError("unknown compression or filter method in IHDR")
     if interlace != 0:
         raise PngError("interlaced PNGs are not handled")
     if colour_type == 3 and not palette:
         raise PngError("palette image without a PLTE chunk")
     if width == 0 or height == 0:
         raise PngError("empty image")
-
-    decompressor = zlib.decompressobj()
-    try:
-        raw = decompressor.decompress(b"".join(compressed)) + decompressor.flush()
-    except zlib.error as error:
-        raise PngError("image data does not decompress: %s" % error)
-    if not decompressor.eof:
-        raise PngError("image data stream is incomplete")
+    if width > MAX_SIDE or height > MAX_SIDE or width * height > MAX_PIXELS:
+        raise PngError("%dx%d is larger than any screenshot this checks" % (width, height))
 
     channels = channels_by_type[colour_type]
     stride = width * channels
-    if len(raw) != height * (stride + 1):
-        raise PngError("image data has %d bytes, expected %d" % (len(raw), height * (stride + 1)))
+    expected = height * (stride + 1)
+
+    # Never produce more than the header allows: max_length stops a small
+    # stream that would expand without limit, and anything left over is an error.
+    decompressor = zlib.decompressobj()
+    try:
+        raw = decompressor.decompress(b"".join(compressed), expected)
+        overflow = bool(decompressor.unconsumed_tail) or (
+            not decompressor.eof and bool(decompressor.decompress(b"", 1))
+        )
+    except zlib.error as error:
+        raise PngError("image data does not decompress: %s" % error)
+    if overflow:
+        raise PngError("image data is larger than the %dx%d header allows" % (width, height))
+    if not decompressor.eof:
+        raise PngError("image data stream is incomplete")
+    if len(raw) != expected:
+        raise PngError("image data has %d bytes, expected %d" % (len(raw), expected))
 
     rows = []
     previous = bytearray(stride)
@@ -300,10 +327,17 @@ def main(argv):
     path = argv[1]
     try:
         with open(path, "rb") as handle:
-            data = handle.read()
+            data = handle.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise PngError("file is larger than %d bytes" % MAX_FILE_BYTES)
         image = decode_png(data)
     except (OSError, PngError) as error:
-        print("FAIL %s: cannot read the PNG: %s" % (path, error))
+        print("FAIL %s: not a usable PNG: %s" % (path, error))
+        return 2
+    except (struct.error, ValueError, IndexError, MemoryError) as error:
+        # Every malformed input above has its own message; this keeps any
+        # case they miss on the documented exit status rather than a traceback.
+        print("FAIL %s: not a usable PNG: %s: %s" % (path, type(error).__name__, error))
         return 2
     print("image %s: %dx%d" % (path, image.width, image.height))
     results = check(image)

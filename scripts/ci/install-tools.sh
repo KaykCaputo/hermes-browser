@@ -118,7 +118,7 @@ pinned_version() {
 reported_version() {
     case "$1" in
         shellcheck) "$2" --version 2>/dev/null | sed -n 's/^version: //p' ;;
-        actionlint) "$2" -version 2>/dev/null | head -n 1 ;;
+        actionlint) "$2" -version 2>/dev/null | sed -n 1p ;;
         cargo-deny) "$2" --version 2>/dev/null | sed -n 's/^cargo-deny //p' ;;
     esac
 }

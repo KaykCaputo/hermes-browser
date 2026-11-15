@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Run a command that prints shell `export` lines, and hand every variable it
-# sets or changes to the later steps of a GitHub Actions job.
+# Run `scripts/macos/gstreamer.sh env` (or another command printing the same
+# `export` lines) and hand the variables it sets to the later steps of a
+# GitHub Actions job.
 #
 #   scripts/ci/github-env.sh [--print] <command> [arguments…]
 #   scripts/ci/github-env.sh scripts/macos/gstreamer.sh env
@@ -11,20 +12,30 @@
 # The command's output is evaluated by bash exactly as
 # `eval "$(<command>)"` would be in a shell, so quoting, `$VAR` expansion and
 # path lists such as `PATH=/x/bin:$PATH` mean what they mean there; nothing is
-# parsed by hand. Every variable whose value then differs from before is
-# written with GitHub's multi-line form (NAME<<DELIMITER, value, DELIMITER)
-# using a random delimiter checked not to occur in the value, so values with
-# spaces, colons, quotes or newlines arrive unchanged. Directories prepended
-# to PATH go to $GITHUB_PATH, GitHub's documented way to extend it.
-# DYLD_* variables are reported in a warning and not exported (see below).
+# parsed by hand. Only these variables may change, and the first four must be
+# set:
 #
-# Fails, rather than exporting part of the environment, if the command fails,
-# prints nothing that sets a variable, unsets a variable, or sets a name GitHub
-# refuses (GITHUB_*, RUNNER_*, NODE_OPTIONS).
+#   MERCURY_GSTREAMER_PREFIX  the unpacked GStreamer prefix
+#   PKG_CONFIG                its pkg-config
+#   PKG_CONFIG_LIBDIR         its .pc directory
+#   PATH                      the old PATH with directories added in front;
+#                             they go to $GITHUB_PATH
+#   PKG_CONFIG_PATH           may only be unset; exported as empty, which
+#                             pkg-config treats the same
+#
+# Each value is written with GitHub's multi-line form (NAME<<DELIMITER, value,
+# DELIMITER) using a random delimiter checked not to occur in the value, so
+# spaces, colons, quotes and newlines arrive unchanged.
+#
+# Refuses, exporting nothing, if the command fails, sets or unsets anything
+# else, leaves one of the four unset, or changes PATH in any way other than
+# adding directories in front. DYLD_* variables are refused with an
+# explanation: macOS strips them whenever a SIP-protected program such as
+# /bin/bash starts, so they could not reach any later command.
 set -euo pipefail
 
 usage() {
-    sed -n '/^# Run a command that prints/,/^# refuses/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '/^# Run `scripts\/macos/,/^# \/bin\/bash starts/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 PRINT=0
@@ -42,9 +53,8 @@ command -v python3 >/dev/null 2>&1 || { printf 'github-env: python3 not found\n'
 BEFORE="$(mktemp)"
 trap 'rm -f -- "$BEFORE"' EXIT
 
-# DYLD_* variables, listed by bash itself: macOS removes them from the
-# environment of every SIP-protected program, which includes /usr/bin/python3
-# and /bin/bash, so python3 below may never see them.
+# DYLD_* variables, listed by bash itself: /usr/bin/python3 is SIP-protected
+# and would never see them.
 dyld_variables() {
     local name
     for name in $(compgen -e); do
@@ -61,18 +71,11 @@ DYLD_BEFORE="$(dyld_variables)"
 OUTPUT="$("$@")"
 eval "$OUTPUT"
 
-# Not exported: a step's `bash` on a macOS runner is /bin/bash, which is
-# SIP-protected and would drop them before any command saw them. A step that
-# needs one must evaluate the command's output itself.
 DYLD_AFTER="$(dyld_variables)"
 if [ "$DYLD_AFTER" != "$DYLD_BEFORE" ]; then
     names="$(printf '%s\n' "$DYLD_AFTER" | sed -n 's/=.*//p' | tr '\n' ' ')"
-    message="not exported: ${names}(macOS strips DYLD_* variables when a SIP-protected shell starts; evaluate '$*' inside the step that needs them)"
-    if [ "$PRINT" = 0 ]; then
-        printf '::warning title=github-env::%s\n' "$message"
-    else
-        printf 'github-env: warning: %s\n' "$message" >&2
-    fi
+    printf 'github-env: refused: %s(macOS strips DYLD_* variables when a SIP-protected shell starts, so they cannot pass between steps; set them on the command line that needs them)\n' "$names" >&2
+    exit 1
 fi
 
 python3 - "$BEFORE" "$PRINT" <<'PY'
@@ -81,45 +84,53 @@ import os
 import sys
 import uuid
 
+MUST_SET = ("MERCURY_GSTREAMER_PREFIX", "PKG_CONFIG", "PKG_CONFIG_LIBDIR", "PATH")
+MAY_UNSET = ("PKG_CONFIG_PATH",)
+
+
+def refuse(message):
+    sys.exit("github-env: refused: " + message)
+
+
 before = json.load(open(sys.argv[1]))
 print_only = sys.argv[2] == "1"
 after = dict(os.environ)
 for name in ("_", "SHLVL", "PWD", "OLDPWD"):
     before.pop(name, None)
     after.pop(name, None)
-# Reported by the shell above; never exported.
-before = {k: v for k, v in before.items() if not k.startswith("DYLD_")}
-after = {k: v for k, v in after.items() if not k.startswith("DYLD_")}
 
 removed = sorted(set(before) - set(after))
-if removed:
-    sys.exit("github-env: the command unset %s; GitHub cannot unset variables" % ", ".join(removed))
 changed = sorted(name for name in after if before.get(name) != after[name])
-if not changed:
-    sys.exit("github-env: the command's output set no variables")
-refused = [n for n in changed if n.startswith(("GITHUB_", "RUNNER_")) or n == "NODE_OPTIONS"]
-if refused:
-    sys.exit("github-env: GitHub does not let a step set %s" % ", ".join(refused))
+unexpected = [n for n in changed if n not in MUST_SET] + [n for n in removed if n not in MAY_UNSET]
+if unexpected:
+    refuse("the command changed %s, which is not on the allow-list" % ", ".join(sorted(unexpected)))
+missing = [n for n in MUST_SET if n not in changed]
+if missing:
+    refuse("the command did not set %s" % ", ".join(missing))
 
+old_path = before.get("PATH", "")
+new_path = after["PATH"]
+if not old_path or not new_path.endswith(":" + old_path):
+    refuse("PATH is not the old PATH with directories added in front")
+path_prefix = new_path[: -len(old_path) - 1].split(":")
+if not all(entry and "\n" not in entry for entry in path_prefix):
+    refuse("PATH gains an empty directory or one containing a newline")
+
+values = [(name, after[name]) for name in changed if name != "PATH"]
+values += [(name, "") for name in removed]
 env_entries = []
-path_entries = []
-for name in changed:
-    value = after[name]
-    if name == "PATH" and "PATH" in before:
-        old = before["PATH"]
-        prefix = value[: -len(old) - 1].split(":") if value.endswith(":" + old) else []
-        if prefix and all(entry and "\n" not in entry for entry in prefix):
-            # The runner puts the most recently added line first, so write
-            # them last-to-first to keep the order the command chose.
-            path_entries = [entry + "\n" for entry in reversed(prefix)]
-            continue
+for name, value in values:
     delimiter = "MERCURY_ENV_" + uuid.uuid4().hex
     if delimiter in value.split("\n"):
-        sys.exit("github-env: delimiter collision for %s" % name)
+        refuse("delimiter collision for %s" % name)
     env_entries.append("%s<<%s\n%s\n%s\n" % (name, delimiter, value, delimiter))
+# The runner puts the most recently added line first, so write them
+# last-to-first to keep the order the command chose.
+path_entries = [entry + "\n" for entry in reversed(path_prefix)]
 
-for name in changed:
+for name, _ in values:
     sys.stderr.write("github-env: exporting %s\n" % name)
+sys.stderr.write("github-env: adding to PATH: %s\n" % ":".join(path_prefix))
 if print_only:
     sys.stdout.write("# for $GITHUB_ENV\n" + "".join(env_entries))
     sys.stdout.write("# for $GITHUB_PATH\n" + "".join(path_entries))
