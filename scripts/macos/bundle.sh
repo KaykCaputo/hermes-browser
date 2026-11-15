@@ -16,7 +16,11 @@
 #   --out <dir>                where the .app (and the .dmg) are written
 #                              (default dist); nothing is written anywhere else
 #   --identity <id>            codesign identity; "-" signs ad hoc (default
-#                              $MERCURY_SIGN_IDENTITY, else "-")
+#                              $MERCURY_SIGN_IDENTITY, else "-"). Besides ad
+#                              hoc, only identities that carry a team
+#                              identifier are supported (Developer ID
+#                              Application, Apple Development); a self-signed
+#                              certificate is refused when libraries are bundled
 #   --gstreamer-prefix <dir>   GStreamer prefix handed to
 #                              scripts/macos/collect-gstreamer.sh, which fills
 #                              Contents/MacOS/lib (default
@@ -43,17 +47,8 @@ usage() {
     sed -n '/^# Assemble/,/^# to re-run/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-# The entitlements for an identity. An ad-hoc signature ("-") has no team
-# identifier, so the hardened runtime's library validation could never accept
-# the ad-hoc libraries in Contents/MacOS/lib; the ad-hoc set therefore turns it
-# off. Any real identity gets the strict set, with validation on.
-entitlements_for_identity() {
-    if [ "$1" = "-" ]; then
-        printf '%s\n' "apps/mercury-desktop/resources/macos/entitlements-adhoc.plist"
-    else
-        printf '%s\n' "apps/mercury-desktop/resources/macos/entitlements.plist"
-    fi
-}
+# shellcheck source=scripts/macos/lib.sh
+. "$(dirname -- "${BASH_SOURCE[0]}")/lib.sh"
 
 absolute() {
     case "$1" in
@@ -73,16 +68,28 @@ PRINT_ENTITLEMENTS=0
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
-        --out) OUT="${2:?--out needs a directory}"; shift 2 ;;
-        --identity) IDENTITY="${2:?--identity needs a codesign identity}"; shift 2 ;;
-        --gstreamer-prefix) GSTREAMER_PREFIX="${2:?--gstreamer-prefix needs a directory}"; shift 2 ;;
+        --binary | --out | --identity | --gstreamer-prefix)
+            [ "$#" -ge 2 ] || die "$1 needs a value"
+            case "$1" in
+                --binary) BINARY="$2" ;;
+                --out) OUT="$2" ;;
+                # An empty identity is reported by identity_problem below.
+                --identity) IDENTITY="$2" ;;
+                --gstreamer-prefix) GSTREAMER_PREFIX="$2" ;;
+            esac
+            shift 2
+            ;;
         --dmg) MAKE_DMG=1; shift ;;
         --print-entitlements) PRINT_ENTITLEMENTS=1; shift ;;
         -h | --help) usage; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
     esac
 done
+
+[ -n "$BINARY" ] || die "--binary needs a non-empty path"
+[ -n "$OUT" ] || die "--out needs a non-empty directory"
+problem="$(identity_problem "$IDENTITY")"
+[ -z "$problem" ] || die "$problem"
 
 BINARY="$(absolute "$BINARY")"
 OUT="$(absolute "$OUT")"
@@ -117,17 +124,13 @@ BIN="$BIN_DIR/$EXECUTABLE"
 # Both come from where the build takes them, so they cannot drift: the
 # workspace version from Cargo.toml, and the deployment target the compiler was
 # given from .cargo/config.toml (either `= "13.0"` or `= { value = "13.0", … }`).
-VERSION="$(awk '
-    /^\[/ { in_package = ($0 == "[workspace.package]") }
-    in_package && /^version[[:space:]]*=/ {
-        sub(/^[^"]*"/, ""); sub(/".*$/, ""); print; exit
-    }' Cargo.toml)"
+VERSION="$(workspace_version <Cargo.toml)"
 [ -n "$VERSION" ] || die "no version in the [workspace.package] table of Cargo.toml"
 # CFBundleVersion must be one to three dot-separated integers.
 [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]] ||
     die "version '$VERSION' is not usable as CFBundleVersion (one to three numbers separated by dots)"
 
-MIN_MACOS="$(sed -n 's/^MACOSX_DEPLOYMENT_TARGET[^"]*"\([0-9.]*\)".*/\1/p' .cargo/config.toml | head -n 1)"
+MIN_MACOS="$(config_deployment_target <.cargo/config.toml)"
 [ -n "$MIN_MACOS" ] || die "no MACOSX_DEPLOYMENT_TARGET in .cargo/config.toml"
 
 # ── The executable ────────────────────────────────────────────────────────
@@ -138,7 +141,9 @@ ARCHS="$(lipo -archs "$BINARY")"
 # The binary records the deployment target it was linked for. If the
 # environment overrode .cargo/config.toml, the bundle would claim a different
 # minimum than the code needs.
-BINARY_MINOS="$(otool -l "$BINARY" | awk '/LC_BUILD_VERSION/ { found = 1 } found && $1 == "minos" { print $2; exit }')"
+# (Output is captured first and parsed from a here-string; see lib.sh.)
+LOAD_COMMANDS="$(otool -l "$BINARY")" || die "otool cannot read $BINARY"
+BINARY_MINOS="$(listing_minos <<<"$LOAD_COMMANDS")"
 [ "$BINARY_MINOS" = "$MIN_MACOS" ] ||
     die "$BINARY was linked for macOS '$BINARY_MINOS' but .cargo/config.toml says $MIN_MACOS; rebuild without overriding MACOSX_DEPLOYMENT_TARGET"
 
@@ -189,7 +194,8 @@ fi
 # The executable finds the bundled libraries through this rpath. Builds that
 # already link it in are left alone; editing the load commands invalidates the
 # linker's signature, which the signing step below replaces anyway.
-if ! otool -l "$BIN" | awk '$1 == "path" { print $2 }' | grep -qx '@executable_path/lib/'; then
+LOAD_COMMANDS="$(otool -l "$BIN")" || die "otool cannot read $BIN"
+if ! listing_has_rpath @executable_path/lib/ <<<"$LOAD_COMMANDS"; then
     say "adding rpath @executable_path/lib/"
     install_name_tool -add_rpath @executable_path/lib/ "$BIN"
 fi
@@ -206,8 +212,8 @@ fi
 # The hardened runtime is used for every identity, ad hoc included, so local
 # builds run under the same rules as a notarised release; the entitlements let
 # the JavaScript JIT work under it, and the ad-hoc set also turns off library
-# validation (see entitlements_for_identity). A bundle's signature is stored in its main
-# executable, so signing the bundle re-signs that file: the bundle step must
+# validation (see entitlements_for_identity in lib.sh). A bundle's signature is
+# stored in its main executable, so signing the bundle re-signs that file: the bundle step must
 # repeat the runtime option and the entitlements or they would be dropped.
 SIGN_ARGS=(--force --sign "$IDENTITY" --options runtime)
 if [ "$IDENTITY" != "-" ]; then
@@ -227,6 +233,16 @@ if [ -d "$BIN_DIR/lib" ]; then
     done < <(find "$BIN_DIR/lib" -type f -print0)
 fi
 
+# Only libraries and loadable plugins belong in Contents/MacOS/lib. They are
+# signed below without entitlements, so an executable there (a plugin scanner,
+# say) would run with library validation on and, in an ad-hoc build, fail to
+# load the libraries beside it. Stop rather than ship that.
+for lib in ${LIBRARIES[@]+"${LIBRARIES[@]}"}; do
+    header="$(otool -hv "$lib")" || die "otool cannot read $lib"
+    problem="$(library_problem "${lib#"$APP/"}" <<<"$header")"
+    [ -z "$problem" ] || die "$problem"
+done
+
 say "signing with identity '$IDENTITY'"
 if [ "$IDENTITY" = "-" ]; then
     say "entitlements: ad-hoc set (JIT, library validation off): ${ENTITLEMENTS#"$REPO/"}"
@@ -244,6 +260,22 @@ codesign "${EXECUTABLE_SIGN_ARGS[@]}" --identifier "$IDENTIFIER" "$BIN" ||
 codesign "${EXECUTABLE_SIGN_ARGS[@]}" "$APP" || die "codesign failed on $APP"
 
 codesign --verify --deep --strict --verbose=2 "$APP" || die "$APP does not verify"
+
+# `codesign --verify` checks neither the hardened runtime nor the
+# entitlements, and a signing step that silently drops both still verifies.
+# Read them back from the executable and from the bundle and compare.
+for signed in "$BIN" "$APP"; do
+    info="$(codesign -dv "$signed" 2>&1)" || die "cannot read the signature of $signed"
+    codesign_has_runtime <<<"$info" || die "$signed is not signed with the hardened runtime"
+    granted="$(codesign -d --entitlements - --xml "$signed" 2>/dev/null)" ||
+        die "cannot read the entitlements of $signed"
+    entitlements_match "$ENTITLEMENTS" <<<"$granted" ||
+        die "the entitlements of $signed do not match ${ENTITLEMENTS#"$REPO/"}: expected [$(plist_grants "$ENTITLEMENTS" | tr '\n' ' ')], found [$(plist_grants - <<<"$granted" | tr '\n' ' ')]"
+done
+TEAM="$(codesign_team <<<"$info")"
+problem="$(team_problem "$IDENTITY" "${#LIBRARIES[@]}" "$TEAM")"
+[ -z "$problem" ] || die "$problem"
+say "verified: hardened runtime and entitlements on the executable and the bundle (team: ${TEAM:-unknown})"
 APP_COMPLETE=1
 say "built $APP"
 

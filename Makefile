@@ -32,6 +32,7 @@ LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 	package-linux \
 	app-macos \
 	package-macos \
+	test-bundle-macos \
 	run \
 	run-debug \
 	run-release \
@@ -61,6 +62,7 @@ help:
 		'package-linux' 'Build and package the Linux x86-64 release.' \
 		'app-macos' 'Build the release and assemble the signed Mercury Browser.app.' \
 		'package-macos' 'Build Mercury Browser.app and its .dmg for macOS arm64.' \
+		'test-bundle-macos' 'Check the macOS bundle script helpers (no build needed).' \
 		'run' 'Run the optimized Mercury Desktop build.' \
 		'run-debug' 'Run Mercury Desktop with development debug information.' \
 		'run-release' 'Alias for the optimized run target.' \
@@ -172,13 +174,24 @@ package-linux: build-release
 	tar -C "$(DIST_DIR)" -czf "$(DIST_DIR)/$(LINUX_ARCHIVE)" "$(LINUX_PACKAGE_NAME)"
 	cd "$(DIST_DIR)" && sha256sum "$(LINUX_ARCHIVE)" > "$(LINUX_ARCHIVE).sha256"
 
+REQUIRE_MACOS = @[ "$$(uname -s)" = Darwin ] || { \
+		printf '%s\n' 'error: $@ needs macOS; this host is not macOS.' >&2; \
+		exit 1; \
+	}
+
 app-macos:
+	$(REQUIRE_MACOS)
 	"$(CARGO)" build --release --package "$(APP_PACKAGE)"
 	scripts/macos/bundle.sh --out "$(DIST_DIR)"
 
 package-macos:
+	$(REQUIRE_MACOS)
 	"$(CARGO)" build --release --package "$(APP_PACKAGE)"
 	scripts/macos/bundle.sh --out "$(DIST_DIR)" --dmg
+
+test-bundle-macos:
+	$(REQUIRE_MACOS)
+	scripts/macos/test-bundle.sh
 
 run:
 	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)
