@@ -12,12 +12,13 @@ use talaria_core::{
     TabId, WebView as TalariaWebView, dispatch_command,
 };
 use talaria_servo::{
-    EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ServoRuntime, ServoWebView, ServoWebViewError,
-    ViewportSize,
+    EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ScreenMetrics, ServoRuntime, ServoWebView,
+    ServoWebViewError, ViewportSize,
 };
 
 use crate::keyboard::system_color_scheme;
 use crate::rendering::BrowserRenderingContext;
+use crate::screen_metrics::screen_metrics;
 use crate::shutdown::{
     ENGINE_SHUTDOWN_TIMEOUT, EngineParts, Watchdog, drop_catching_panic, release_in_order,
     settle_period, spin_for,
@@ -59,6 +60,8 @@ struct EngineState {
     current_scale_factor: Option<f32>,
     /// Whether shutdown has content processes (and WebGL contexts) to wait for.
     web_view_created: bool,
+    /// What pages were last told about the screen and window.
+    screen_metrics: Option<ScreenMetrics>,
 }
 
 enum GraphicsStatus {
@@ -94,6 +97,7 @@ pub(crate) fn connect_servo_runtime(
             current_viewport_size: None,
             current_scale_factor: None,
             web_view_created: false,
+            screen_metrics: None,
         })),
         bootstrap_failure_logged: Cell::new(false),
     });
@@ -309,6 +313,8 @@ impl EngineState {
     /// Everything that does not need a frame: Servo's event loop, browser events, web-view
     /// lifetimes, tab visibility, sizing and command dispatch.
     fn pump(&mut self, window: &MainWindow) {
+        // Before spinning, so that a page's first query after the window moved is current.
+        self.update_screen_metrics(window);
         self.runtime.spin_event_loop();
 
         let ready_before = {
@@ -458,6 +464,14 @@ impl EngineState {
         }
     }
 
+    fn update_screen_metrics(&mut self, window: &MainWindow) {
+        let metrics = window.window().with_winit_window(screen_metrics).flatten();
+        if metrics != self.screen_metrics {
+            self.runtime.set_screen_metrics(metrics);
+            self.screen_metrics = metrics;
+        }
+    }
+
     /// Paints the visible tab's latest Servo frame into the window. Only runs inside a render.
     fn present(&mut self, window: &MainWindow) {
         let (Some(rendering_context), Some(device), Some(visible_tab_id)) = (
@@ -536,6 +550,9 @@ impl EngineState {
                         "Servo did not shut down within {} seconds; exiting without it",
                         ENGINE_SHUTDOWN_TIMEOUT.as_secs()
                     );
+                    // `process::exit` skips destructors; the temporary profile holds this
+                    // run's cookies.
+                    crate::profile::remove_temporary_profile();
                     std::process::exit(i32::from(exit_code_if_stuck));
                 });
                 // Let content processes release their WebGL contexts before the constellation

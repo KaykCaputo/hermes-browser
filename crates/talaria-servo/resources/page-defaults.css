@@ -1,0 +1,16 @@
+/* Mercury Browser user-origin defaults, applied to every document in every web view.
+ * Author styles override every declaration here; none is marked important.
+ *
+ * Servo resolves system colours (CanvasText, LinkText, Field, ButtonFace…) for an element
+ * whose color-scheme is `normal` from the system appearance, while the canvas behind a page
+ * stays white. On a dark system that gives light text on a white page. A page that has not
+ * opted in to a colour scheme gets the light defaults here, as in other browsers.
+ *
+ * A page that opts in to a dark scheme gets dark system colours, but Servo paints no Canvas
+ * colour behind it, so the root is given the dark Canvas colour. A page's own root background
+ * replaces it. In a light scheme it is transparent, the same as no declaration, so the body's
+ * background still spreads to the canvas. */
+:root {
+  color-scheme: light;
+  background-color: light-dark(transparent, Canvas);
+}

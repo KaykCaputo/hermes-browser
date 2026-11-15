@@ -26,7 +26,7 @@ checksum = "d3b7f7f85a7e5f68090000ed7622545829afd484d210358702ae4cb97dd0c320"
 dependencies = [
  "enumn",
  "serde",
- "uuid 1.29.2",
+ "uuid",
 ]
 
 [[package]]
@@ -1703,7 +1703,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -1964,6 +1964,27 @@ dependencies = [
  "smallvec",
  "strck",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "dirs"
+version = "7.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d57d423b3c82e89b9a24ca3091fee61f456a26edbd28d26c65906f4bc1dcd8f"
+dependencies = [
+ "dirs-sys",
+]
+
+[[package]]
+name = "dirs-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e01a3366d27ee9890022452ee61b2b63a67e6f13f58900b651ff5665f0bb1fab"
+dependencies = [
+ "libc",
+ "option-ext",
+ "redox_users",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4753,7 +4774,7 @@ dependencies = [
  "serde_core",
  "tempfile",
  "thiserror 2.0.21",
- "uuid 0.8.2",
+ "uuid",
  "windows",
 ]
 
@@ -5320,17 +5341,23 @@ name = "mercury-desktop"
 version = "0.2.0"
 dependencies = [
  "ash",
+ "backtrace",
+ "dirs",
  "dpi",
  "euclid",
  "gl_generator",
  "gleam",
  "glow",
  "image",
+ "libc",
  "log",
  "mercury-ui",
  "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "objc2-metal 0.3.2",
  "servo",
+ "signal-hook-registry",
  "slint",
  "surfman",
  "talaria-core",
@@ -5380,6 +5407,30 @@ dependencies = [
  "thiserror 2.0.21",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "mercury-settings"
+version = "0.2.0"
+dependencies = [
+ "libc",
+ "log",
+ "serde",
+ "serde_json",
+ "talaria-core",
+ "tempfile",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
+name = "mercury-store"
+version = "0.2.0"
+dependencies = [
+ "log",
+ "rusqlite",
+ "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]
@@ -6544,6 +6595,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1"
 
 [[package]]
+name = "option-ext"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
 name = "option-operations"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7578,6 +7635,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "redox_users"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
+dependencies = [
+ "libredox",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "ref-cast"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8456,7 +8523,7 @@ dependencies = [
  "smallvec",
  "time",
  "unicode-segmentation",
- "uuid 1.29.2",
+ "uuid",
  "webrender_api",
  "windows-sys 0.61.2",
 ]
@@ -8615,7 +8682,7 @@ dependencies = [
  "servo-storage-traits",
  "servo-url",
  "strum",
- "uuid 1.29.2",
+ "uuid",
  "webrender_api",
  "zeroize",
 ]
@@ -8668,7 +8735,7 @@ dependencies = [
  "servo-net-traits",
  "servo-profile-traits",
  "servo-url",
- "uuid 1.29.2",
+ "uuid",
 ]
 
 [[package]]
@@ -8687,7 +8754,7 @@ dependencies = [
  "servo-net-traits",
  "servo-profile-traits",
  "servo-url",
- "uuid 1.29.2",
+ "uuid",
 ]
 
 [[package]]
@@ -8732,7 +8799,7 @@ dependencies = [
  "stylo",
  "stylo_traits",
  "url",
- "uuid 1.29.2",
+ "uuid",
  "webdriver",
  "webrender_api",
 ]
@@ -8790,7 +8857,7 @@ dependencies = [
  "unicode-properties",
  "unicode-script",
  "url",
- "uuid 1.29.2",
+ "uuid",
  "webrender_api",
  "winapi",
  "xml",
@@ -8819,7 +8886,7 @@ dependencies = [
  "servo-url",
  "servo_arc",
  "stylo",
- "uuid 1.29.2",
+ "uuid",
  "webrender_api",
 ]
 
@@ -8921,7 +8988,7 @@ dependencies = [
  "unicode-script",
  "unicode_categories",
  "url",
- "uuid 1.29.2",
+ "uuid",
  "web_atoms",
  "webrender_api",
  "writeable",
@@ -8959,7 +9026,7 @@ dependencies = [
  "servo_arc",
  "stylo",
  "stylo_traits",
- "uuid 1.29.2",
+ "uuid",
  "webrender_api",
 ]
 
@@ -9007,7 +9074,7 @@ dependencies = [
  "unicode-script",
  "url",
  "urlpattern",
- "uuid 1.29.2",
+ "uuid",
  "vello_cpu",
  "webrender",
  "webrender_api",
@@ -9201,7 +9268,7 @@ checksum = "6a36e094d79e768473b699e84513547521476529f5b2253dad9edf3a337dd116"
 dependencies = [
  "malloc_size_of_derive",
  "servo-malloc-size-of",
- "uuid 1.29.2",
+ "uuid",
 ]
 
 [[package]]
@@ -9244,7 +9311,7 @@ dependencies = [
  "malloc_size_of_derive",
  "servo-malloc-size-of",
  "servo-media-streams",
- "uuid 1.29.2",
+ "uuid",
 ]
 
 [[package]]
@@ -9336,7 +9403,7 @@ dependencies = [
  "tower",
  "tungstenite",
  "url",
- "uuid 1.29.2",
+ "uuid",
  "webpki-roots",
  "webrender_api",
 ]
@@ -9383,7 +9450,7 @@ dependencies = [
  "sys-locale",
  "tokio",
  "url",
- "uuid 1.29.2",
+ "uuid",
  "webrender_api",
 ]
 
@@ -9618,7 +9685,7 @@ dependencies = [
  "unicode-script",
  "url",
  "urlpattern",
- "uuid 1.29.2",
+ "uuid",
  "web_atoms",
  "webdriver",
  "webrender_api",
@@ -9762,7 +9829,7 @@ dependencies = [
  "sponge-cursor",
  "strum",
  "trait-set",
- "uuid 1.29.2",
+ "uuid",
  "x-wing",
  "x25519-dalek",
  "x448",
@@ -9792,7 +9859,7 @@ dependencies = [
  "servo-storage-traits",
  "servo-url",
  "tempfile",
- "uuid 1.29.2",
+ "uuid",
 ]
 
 [[package]]
@@ -9807,7 +9874,7 @@ dependencies = [
  "servo-malloc-size-of",
  "servo-profile-traits",
  "servo-url",
- "uuid 1.29.2",
+ "uuid",
 ]
 
 [[package]]
@@ -9844,7 +9911,7 @@ dependencies = [
  "servo-malloc-size-of",
  "servo_arc",
  "url",
- "uuid 1.29.2",
+ "uuid",
 ]
 
 [[package]]
@@ -10836,8 +10903,10 @@ dependencies = [
  "content-security-policy",
  "dpi",
  "euclid",
+ "libc",
  "log",
  "rustls",
+ "serde_json",
  "servo",
  "talaria-core",
  "url",
@@ -10873,7 +10942,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.6",
  "windows-sys 0.61.2",
@@ -11734,18 +11803,9 @@ checksum = "3a3b425286980a367278453f3b6d28cdcb134b574e5a35824a6ff5eebad50bb6"
 
 [[package]]
 name = "uuid"
-version = "0.8.2"
+version = "1.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc5cf98d8186244414c848017f0e2676b3fcb46807f6668a97dfe67359a3c4b7"
-dependencies = [
- "getrandom 0.2.17",
-]
-
-[[package]]
-name = "uuid"
-version = "1.29.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bed99139f7dac9b5cfe5f17be4d66dc7079a34dee1d74bcc77217119240e267c"
+checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
@@ -13387,7 +13447,7 @@ dependencies = [
  "serde_repr",
  "tracing",
  "uds_windows",
- "uuid 1.29.2",
+ "uuid",
  "windows-sys 0.61.2",
  "winnow 1.0.5",
  "zbus_macros",

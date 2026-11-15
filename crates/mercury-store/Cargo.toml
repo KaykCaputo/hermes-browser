@@ -1,0 +1,11 @@
+[package]
+name = "mercury-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true
+rusqlite.workspace = true
+thiserror.workspace = true
+url.workspace = true
