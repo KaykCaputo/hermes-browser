@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::SettingsError;
-use crate::settings::{Repair, SearchSettings};
+use crate::settings::{Repair, SearchSettings, quoted};
 
 /// The id of the engine used when none is chosen: DuckDuckGo, as the browser uses today.
 pub const DEFAULT_ENGINE_ID: &str = "duckduckgo";
@@ -26,9 +26,11 @@ pub const MAX_CUSTOM_ENGINES: usize = 50;
 pub struct SearchEngine {
     /// A stable identifier: 1 to [`MAX_ENGINE_ID_BYTES`] of `a-z`, `0-9`, `-`, `_`, `.`.
     pub id: String,
-    /// The name shown to the user.
+    /// The name shown to the user: 1 to [`MAX_ENGINE_NAME_BYTES`], without control characters
+    /// or invisible formatting characters (bidirectional controls, zero-width characters…).
     pub name: String,
-    /// The address-bar keyword (`"w"` in `"w rust book"`); empty for none. No whitespace.
+    /// The address-bar keyword (`"@wikipedia"` in `"@wikipedia rust book"`); empty for none. At
+    /// most [`MAX_KEYWORD_BYTES`], without whitespace, control or invisible characters.
     pub keyword: String,
     /// The results page, with [`SEARCH_TERMS_PLACEHOLDER`] where the query goes.
     pub url_template: String,
@@ -41,15 +43,17 @@ pub struct SearchEngine {
 /// the order implies no ranking.
 ///
 /// Each template is the engine's own: from its OpenSearch description where it publishes one,
-/// otherwise from the search form on its home page (Google and Bing publish no OpenSearch
-/// description), fetched on 2026-11-15. Attribution and language parameters in the published
+/// otherwise from the search form on its home page, fetched on 2026-11-15. Attribution and language parameters in the published
 /// templates are left out; see the crate's report for the full sources. Keywords start with `@`,
 /// as Firefox's do, so an ordinary first word of a search is never mistaken for one and sent to
 /// a different engine.
 pub fn builtin_engines() -> Vec<SearchEngine> {
     vec![
         duckduckgo(),
-        // The search form on https://www.bing.com/: GET /search with the query in `q`.
+        // Bing publishes no OpenSearch description (checked 2026-11-15: /osd.xml,
+        // /opensearch.xml and /sa/osd/bing.xml give 404 and the home page links none). This is
+        // Bing's own form endpoint: the search form on https://www.bing.com/ submits
+        // GET /search with the query in `q`.
         engine(
             "bing",
             "Bing",
@@ -73,7 +77,10 @@ pub fn builtin_engines() -> Vec<SearchEngine> {
             "https://www.ecosia.org/search?q={searchTerms}",
             Some("https://ac.ecosia.org/autocomplete?q={searchTerms}&type=list"),
         ),
-        // The search form on https://www.google.com/: GET /search with the query in `q`.
+        // Google publishes no OpenSearch description (checked 2026-11-15: /opensearch.xml
+        // gives 404 and the home page links none). This is Google's own form endpoint: the
+        // search form on https://www.google.com/ is `<form action="/search" method="GET">`
+        // with the query in `q`.
         engine(
             "google",
             "Google",
@@ -146,6 +153,18 @@ impl SearchEngine {
     /// over [`MAX_TEMPLATE_BYTES`], the same for `suggest_template` when present, and an id,
     /// name or keyword outside the limits documented on the fields.
     pub fn validate(&self) -> Result<(), SettingsError> {
+        match self.problem() {
+            None => Ok(()),
+            Some(reason) => Err(SettingsError::InvalidSearchEngine {
+                id: self.id.clone(),
+                reason,
+            }),
+        }
+    }
+
+    /// What [`validate`](Self::validate) objects to, in words that quote nothing from the
+    /// engine itself.
+    fn problem(&self) -> Option<String> {
         self.check_identity()
             .and_then(|()| check_template(&self.url_template).map(|_| ()))
             .and_then(|()| match &self.suggest_template {
@@ -154,10 +173,7 @@ impl SearchEngine {
                     .map_err(|reason| format!("suggestion template: {reason}")),
                 None => Ok(()),
             })
-            .map_err(|reason| SettingsError::InvalidSearchEngine {
-                id: self.id.clone(),
-                reason,
-            })
+            .err()
     }
 
     /// The results page for `query`, encoded correctly for where the placeholder sits.
@@ -207,20 +223,22 @@ impl SearchEngine {
         }
         if self.name.trim().is_empty()
             || self.name.len() > MAX_ENGINE_NAME_BYTES
-            || self.name.chars().any(char::is_control)
+            || self.name.chars().any(is_invisible_or_control)
         {
             return Err(format!(
-                "the name must be 1 to {MAX_ENGINE_NAME_BYTES} bytes without control characters"
+                "the name must be 1 to {MAX_ENGINE_NAME_BYTES} bytes without control or \
+                 invisible characters"
             ));
         }
         if self.keyword.len() > MAX_KEYWORD_BYTES
             || self
                 .keyword
                 .chars()
-                .any(|c| c.is_whitespace() || c.is_control())
+                .any(|c| c.is_whitespace() || is_invisible_or_control(c))
         {
             return Err(format!(
-                "the keyword must be at most {MAX_KEYWORD_BYTES} bytes without spaces"
+                "the keyword must be at most {MAX_KEYWORD_BYTES} bytes without spaces, control \
+                 or invisible characters"
             ));
         }
         Ok(())
@@ -302,11 +320,14 @@ fn fills_a_path_segment(template: &str) -> bool {
         })
 }
 
-/// The custom engines that can be used alongside the built-in ones, and a repair for each one
-/// that cannot: invalid, or reusing a built-in id, an earlier id, or a keyword already taken
-/// (compared case-insensitively). At most [`MAX_CUSTOM_ENGINES`] are kept.
-pub(crate) fn usable_custom_engines(custom: &[SearchEngine]) -> (Vec<SearchEngine>, Vec<Repair>) {
-    const FIELD: &str = "search.custom_engines";
+/// The custom engines that can be used alongside the built-in ones, and at most one repair
+/// counting those that cannot: invalid, or reusing a built-in id, an earlier id, or a keyword
+/// already taken (compared case-insensitively), or beyond [`MAX_CUSTOM_ENGINES`] (including
+/// `unread` that a bounded decode skipped). The repair names the first engine dropped.
+pub(crate) fn usable_custom_engines(
+    custom: &[SearchEngine],
+    unread: u64,
+) -> (Vec<SearchEngine>, Option<Repair>) {
     let builtins = builtin_engines();
     let mut ids: Vec<String> = builtins.iter().map(|engine| engine.id.clone()).collect();
     let mut keywords: Vec<String> = builtins
@@ -315,37 +336,35 @@ pub(crate) fn usable_custom_engines(custom: &[SearchEngine]) -> (Vec<SearchEngin
         .map(|engine| engine.keyword.to_lowercase())
         .collect();
     let mut usable = Vec::new();
-    let mut repairs = Vec::new();
+    let mut dropped = 0_u64;
+    let mut first = None;
+    let mut over_limit = unread;
 
     for engine in custom {
-        let drop = |reason: String| Repair {
-            field: FIELD,
-            reason: format!("dropped engine {:?}: {reason}", engine.id),
-        };
         if usable.len() == MAX_CUSTOM_ENGINES {
-            repairs.push(drop(format!(
-                "more than {MAX_CUSTOM_ENGINES} custom engines"
-            )));
+            over_limit += 1;
             continue;
         }
-        if let Err(error) = engine.validate() {
-            repairs.push(drop(error.to_string()));
-            continue;
-        }
-        if builtins.iter().any(|builtin| builtin.id == engine.id) {
-            repairs.push(drop("the id is a built-in engine's".to_owned()));
-            continue;
-        }
-        if ids.contains(&engine.id) {
-            repairs.push(drop("the id is used by an earlier engine".to_owned()));
-            continue;
-        }
+        let problem = engine
+            .problem()
+            .or_else(|| {
+                builtins
+                    .iter()
+                    .any(|builtin| builtin.id == engine.id)
+                    .then(|| "the id is a built-in engine's".to_owned())
+            })
+            .or_else(|| {
+                ids.contains(&engine.id)
+                    .then(|| "the id is used by an earlier engine".to_owned())
+            });
         let keyword = engine.keyword.to_lowercase();
-        if !keyword.is_empty() && keywords.contains(&keyword) {
-            repairs.push(drop(format!(
-                "the keyword {:?} is already taken",
-                engine.keyword
-            )));
+        let problem = problem.or_else(|| {
+            (!keyword.is_empty() && keywords.contains(&keyword))
+                .then(|| "the keyword is already taken".to_owned())
+        });
+        if let Some(problem) = problem {
+            dropped += 1;
+            first.get_or_insert_with(|| format!("{}: {problem}", quoted(&engine.id)));
             continue;
         }
         ids.push(engine.id.clone());
@@ -354,11 +373,66 @@ pub(crate) fn usable_custom_engines(custom: &[SearchEngine]) -> (Vec<SearchEngin
         }
         usable.push(engine.clone());
     }
-    (usable, repairs)
+
+    let mut parts = Vec::new();
+    if dropped > 0 {
+        parts.push(format!(
+            "dropped {dropped} unusable (the first: {})",
+            first.unwrap_or_default()
+        ));
+    }
+    if over_limit > 0 {
+        parts.push(format!(
+            "dropped {over_limit} beyond the first {MAX_CUSTOM_ENGINES}"
+        ));
+    }
+    let repair = (!parts.is_empty()).then(|| Repair {
+        field: crate::bounded::CUSTOM_ENGINES,
+        reason: parts.join("; "),
+    });
+    (usable, repair)
+}
+
+/// Whether `c` is a control character or one that changes or hides how text around it is
+/// shown: Unicode's format characters (category Cf: bidirectional controls, zero-width
+/// characters, the soft hyphen, tags…), line and paragraph separators, and the invisible
+/// Hangul fillers.
+fn is_invisible_or_control(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
+        )
 }
 
 impl SearchSettings {
     /// `"w rust book"` → (Wikipedia, "rust book") when `w` is an engine's keyword.
+    ///
+    /// `w` would be a custom engine's keyword; the built-in Wikipedia engine's is `@wikipedia`,
+    /// so `"@wikipedia rust book"` gives the same.
     ///
     /// The keyword must be the first word, compared case-insensitively, and be followed by
     /// whitespace and a non-empty query; the query is returned trimmed. A keyword alone, or a
@@ -379,7 +453,7 @@ impl SearchSettings {
     /// Built-in engines followed by valid custom ones; ids and keywords unique.
     pub fn engines(&self) -> Vec<SearchEngine> {
         let mut engines = builtin_engines();
-        engines.extend(usable_custom_engines(&self.custom_engines).0);
+        engines.extend(usable_custom_engines(&self.custom_engines, 0).0);
         engines
     }
 

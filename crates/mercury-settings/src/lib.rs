@@ -10,7 +10,9 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 
 mod atomic;
+mod bounded;
 mod error;
+mod read;
 mod search;
 mod session;
 mod settings;
@@ -29,11 +31,12 @@ pub use session::{
 };
 pub use settings::{
     AppearanceSettings, ClearOnExit, DownloadSettings, MAX_LANGUAGE_TAG_BYTES,
-    MAX_NEVER_SAVE_ORIGINS, MAX_ORIGIN_BYTES, MAX_PATH_BYTES, MAX_URL_BYTES, MAX_ZOOM_PERCENT,
-    MIN_ZOOM_PERCENT, PasswordSettings, PrivacySettings, Repair, SearchSettings, Settings,
-    StartupBehavior, Theme, WebSettings,
+    MAX_NEVER_SAVE_ORIGINS, MAX_ORIGIN_BYTES, MAX_PATH_BYTES, MAX_QUOTED_BYTES, MAX_URL_BYTES,
+    MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, PasswordSettings, PrivacySettings, Repair, SearchSettings,
+    Settings, StartupBehavior, Theme, WebSettings, canonical_origin, homepage_url,
+    is_plausible_language_tag,
 };
 pub use store::{
     Loaded, MAX_SESSION_FILE_BYTES, MAX_SETTINGS_FILE_BYTES, PreviousSession,
-    SESSION_FORMAT_VERSION, SETTINGS_FORMAT_VERSION, SessionStore, SettingsStore,
+    SESSION_FORMAT_VERSION, SETTINGS_FORMAT_VERSION, SessionStore, SettingsStore, StartupSessions,
 };

@@ -105,6 +105,11 @@ fn an_unwritable_directory_is_an_error_and_the_old_file_survives() {
     let path = dir.path().join("settings.json");
     fs::write(&path, b"old").expect("seed the old file");
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).expect("lock the dir");
+    if fs::write(dir.path().join("probe"), b"").is_ok() {
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).expect("unlock");
+        eprintln!("skipped: permissions are not enforced here (running as root?)");
+        return;
+    }
 
     let result = write_private_atomic(&path, b"new");
     let names = names_in(dir.path());

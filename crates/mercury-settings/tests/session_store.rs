@@ -4,7 +4,7 @@ use std::path::Path;
 use mercury_settings::{
     ClosedTab, MAX_CLOSED_TABS, MAX_RESTORED_TABS, MAX_SESSION_FILE_BYTES, MAX_TITLE_BYTES,
     MAX_URL_BYTES, PreviousSession, SESSION_FORMAT_VERSION, SessionSnapshot, SessionStore,
-    SettingsError, TabSnapshot, WindowBounds, WindowSnapshot,
+    SettingsError, StartupSessions, TabSnapshot, WindowBounds, WindowSnapshot,
 };
 
 const EXAMPLE_FILE: &str = r#"{
@@ -127,8 +127,9 @@ fn names_in(dir: &Path) -> Vec<String> {
     names
 }
 
+/// The last run's session, as `begin_run` reports it.
 fn begin(dir: &Path) -> Option<PreviousSession> {
-    SessionStore::new(dir).begin_run().expect("begin_run")
+    SessionStore::new(dir).begin_run().expect("begin_run").last
 }
 
 #[test]
@@ -225,6 +226,7 @@ fn the_previous_session_stays_on_disk_after_new_saves() {
     let run_2 = store
         .begin_run()
         .expect("begin_run")
+        .last
         .expect("run 1's session");
     store.save(&other(), false).expect("run 2 saves");
     store.save(&other(), false).expect("run 2 saves again");
@@ -339,7 +341,10 @@ fn a_newer_session_is_left_alone_and_never_overwritten() {
     fs::write(session_path(dir.path()), &newer).expect("seed");
     let store = SessionStore::new(dir.path());
 
-    assert_eq!(store.begin_run().expect("begin_run"), None);
+    assert_eq!(
+        store.begin_run().expect("begin_run"),
+        StartupSessions::default()
+    );
     let saved = store.save(&example(), false);
 
     assert!(
@@ -361,7 +366,7 @@ fn a_newer_previous_file_is_not_overwritten_either() {
     let store = SessionStore::new(dir.path());
     store.save(&example(), false).expect("save");
 
-    let previous = store.begin_run().expect("begin_run");
+    let previous = store.begin_run().expect("begin_run").last;
 
     assert_eq!(previous.map(|previous| previous.snapshot), Some(example()));
     assert_eq!(
@@ -449,4 +454,117 @@ fn the_largest_session_fits_under_the_file_limit() {
         begin(dir.path()).map(|previous| previous.snapshot),
         Some(session)
     );
+}
+
+#[test]
+fn save_keeps_a_copy_of_a_damaged_session_file_it_finds() {
+    let dir = tempfile::tempdir().expect("a profile");
+    fs::write(session_path(dir.path()), b"{\"windows\": [ truncated").expect("seed");
+
+    SessionStore::new(dir.path())
+        .save(&example(), false)
+        .expect("save");
+
+    assert_eq!(
+        names_in(dir.path()),
+        vec!["session.json", "session.json.damaged-1"]
+    );
+    assert_eq!(
+        fs::read(dir.path().join("session.json.damaged-1")).expect("the copy"),
+        b"{\"windows\": [ truncated"
+    );
+    assert_eq!(
+        fs::read_to_string(session_path(dir.path())).expect("read"),
+        EXAMPLE_FILE
+    );
+}
+
+#[test]
+fn a_newer_session_larger_than_the_limit_is_still_newer() {
+    let dir = tempfile::tempdir().expect("a profile");
+    let limit = usize::try_from(MAX_SESSION_FILE_BYTES).expect("fits");
+    let mut newer = format!(
+        r#"{{"format_version": {}, "windows": []"#,
+        SESSION_FORMAT_VERSION + 1
+    )
+    .into_bytes();
+    newer.resize(limit + 10, b' ');
+    newer.push(b'}');
+    fs::write(session_path(dir.path()), &newer).expect("seed");
+    let store = SessionStore::new(dir.path());
+
+    assert_eq!(
+        store.begin_run().expect("begin_run"),
+        StartupSessions::default()
+    );
+    assert!(matches!(
+        store.save(&example(), false),
+        Err(SettingsError::NewerVersion { .. })
+    ));
+    assert_eq!(names_in(dir.path()), vec!["session.json"]);
+    assert_eq!(fs::read(session_path(dir.path())).expect("read"), newer);
+}
+
+#[test]
+fn a_version_beyond_u32_is_newer_not_damaged() {
+    let dir = tempfile::tempdir().expect("a profile");
+    let newer = r#"{"format_version": 99999999999999999999999, "windows": []}"#;
+    fs::write(session_path(dir.path()), newer).expect("seed");
+    let store = SessionStore::new(dir.path());
+
+    assert_eq!(
+        store.begin_run().expect("begin_run"),
+        StartupSessions::default()
+    );
+    let saved = store.save(&example(), false);
+
+    assert!(
+        matches!(
+            saved,
+            Err(SettingsError::NewerVersion {
+                found: u32::MAX,
+                ..
+            })
+        ),
+        "{saved:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(session_path(dir.path())).expect("read"),
+        newer
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_recovery_file_is_private() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("a profile");
+    let store = SessionStore::new(dir.path());
+    store.save(&example(), false).expect("a crashed run's save");
+    store.begin_run().expect("begin_run");
+
+    let path = dir.path().join("session.recovery.json");
+    let mode = fs::metadata(&path).expect("the slot").permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn credentials_never_reach_the_session_file() {
+    let dir = tempfile::tempdir().expect("a profile");
+    let mut session = example();
+    session.windows[0].tabs[0].url = "https://alice:hunter2@example.org/inbox".to_owned();
+    session.closed_tabs[0].tab.url = "https://bob:swordfish@www.rust-lang.org/".to_owned();
+
+    SessionStore::new(dir.path())
+        .save(&session, false)
+        .expect("save");
+
+    let text = fs::read_to_string(session_path(dir.path())).expect("read");
+    assert!(
+        !text.contains("hunter2") && !text.contains("swordfish"),
+        "{text}"
+    );
+    assert!(!text.contains("alice") && !text.contains("bob@"), "{text}");
+    assert!(text.contains("https://example.org/inbox"), "{text}");
 }

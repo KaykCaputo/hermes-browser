@@ -434,3 +434,35 @@ fn a_dropped_engine_has_no_keyword() {
     )]);
     assert_eq!(settings.match_keyword("b anything"), None);
 }
+
+#[test]
+fn names_and_keywords_with_invisible_characters_are_refused() {
+    let good = engine("ok", "ok", "https://ok.example/?q={searchTerms}");
+    for sneaky in [
+        "evil\u{202E}moc.elgoog", // right-to-left override
+        "Goo\u{200B}gle",         // zero-width space
+        "a\u{2066}b\u{2069}",     // isolates
+        "soft\u{00AD}hyphen",
+        "\u{FEFF}bom",
+        "tag\u{E0041}",
+        "line\u{2028}break",
+        "\u{3164}",
+    ] {
+        let bad_name = SearchEngine {
+            name: sneaky.to_owned(),
+            ..good.clone()
+        };
+        assert!(bad_name.validate().is_err(), "name {sneaky:?}");
+        let bad_keyword = SearchEngine {
+            keyword: sneaky.to_owned(),
+            ..good.clone()
+        };
+        assert!(bad_keyword.validate().is_err(), "keyword {sneaky:?}");
+    }
+    let fine = SearchEngine {
+        name: "Recherche • Ελληνικά 日本語 🦀".to_owned(),
+        keyword: "@récherche".to_owned(),
+        ..good
+    };
+    assert!(fine.validate().is_ok());
+}

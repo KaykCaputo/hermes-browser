@@ -3,7 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, is_restorable_url, truncated};
+use crate::bounded;
+use crate::settings::{MAX_ZOOM_PERCENT, MIN_ZOOM_PERCENT, session_url, truncated};
 
 /// How many recently closed tabs are remembered (as Chrome's and Firefox's defaults).
 pub const MAX_CLOSED_TABS: usize = 25;
@@ -24,8 +25,10 @@ pub const MAX_WINDOW_COORDINATE: u32 = 65_536;
 #[serde(default)]
 pub struct SessionSnapshot {
     /// The open windows, front to back as the caller chooses.
+    #[serde(deserialize_with = "bounded::windows")]
     pub windows: Vec<WindowSnapshot>,
     /// Recently closed tabs, newest first.
+    #[serde(deserialize_with = "bounded::closed_tabs")]
     pub closed_tabs: Vec<ClosedTab>,
     /// When the snapshot was taken, in milliseconds since the Unix epoch.
     pub saved_at_ms: i64,
@@ -36,6 +39,7 @@ pub struct SessionSnapshot {
 #[serde(default)]
 pub struct WindowSnapshot {
     /// The tabs, in strip order.
+    #[serde(deserialize_with = "bounded::tabs")]
     pub tabs: Vec<TabSnapshot>,
     /// The index of the selected tab in `tabs`.
     pub active_tab: usize,
@@ -65,9 +69,12 @@ pub struct WindowBounds {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TabSnapshot {
-    /// The page's URL.
+    /// The page's URL. A new-tab page must be an `about:` URL (for example `about:newtab`) to
+    /// survive a restore.
+    #[serde(deserialize_with = "bounded::url")]
     pub url: String,
     /// The page's title.
+    #[serde(deserialize_with = "bounded::title")]
     pub title: String,
     /// The tab's zoom, in percent.
     pub zoom_percent: u16,
@@ -104,8 +111,9 @@ impl SessionSnapshot {
     /// Drops what must not or cannot be restored and clamps the rest:
     ///
     /// - Tabs are kept only if their URL is `http`, `https`, `file` or `about` and at most
-    ///   [`crate::MAX_URL_BYTES`] long; `javascript:`, `data:`, `blob:`, other schemes and
-    ///   unparsable URLs are dropped. Titles are cut to [`MAX_TITLE_BYTES`] and zoom clamped to
+    ///   [`crate::MAX_URL_BYTES`] long before and after parsing; `javascript:`, `data:`, `blob:`,
+    ///   other schemes and unparsable URLs are dropped. The URL kept is the parsed URL's text,
+    ///   with any user name and password removed: a session file never holds a password. Titles are cut to [`MAX_TITLE_BYTES`] and zoom clamped to
     ///   [`MIN_ZOOM_PERCENT`]..=[`MAX_ZOOM_PERCENT`].
     /// - Windows left without tabs are dropped. `active_tab` is clamped into range; if the
     ///   active tab itself was dropped, the nearest surviving tab to its right becomes active,
@@ -160,11 +168,10 @@ impl SessionSnapshot {
 
 impl TabSnapshot {
     fn sanitized(self) -> Option<Self> {
-        if !is_restorable_url(&self.url) {
-            return None;
-        }
+        let url = session_url(&self.url)?;
         let title = truncated(&self.title, MAX_TITLE_BYTES).to_owned();
         Some(Self {
+            url,
             title,
             zoom_percent: self.zoom_percent.clamp(MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT),
             ..self

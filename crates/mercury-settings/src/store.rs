@@ -10,27 +10,31 @@
 //! value (an older reader would call the file damaged), a renamed or retyped field. Adding a
 //! field with a default needs none.
 
-use std::fs::File;
-use std::io::{self, Read as _};
+use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use serde_json::{Map, Value};
+use serde::{Deserialize, Serialize};
 
 use crate::atomic::write_private_atomic;
+use crate::bounded;
 use crate::error::SettingsError;
-use crate::session::SessionSnapshot;
+use crate::read::{Format, Inspection, Migration, Peek, inspect, peek};
+use crate::session::{ClosedTab, SessionSnapshot, WindowSnapshot};
 use crate::settings::{Repair, Settings};
 
 /// The format version this crate writes into `settings.json`.
 pub const SETTINGS_FORMAT_VERSION: u32 = 1;
-/// The largest `settings.json` that is read; a larger one is treated as damaged.
+/// The largest `settings.json` that is read; a larger one is treated as damaged (unless its
+/// version, read first, is newer).
 pub const MAX_SETTINGS_FILE_BYTES: u64 = 1024 * 1024;
 
-const VERSION_KEY: &str = "format_version";
 /// How many `.damaged-<n>` names are tried before giving up.
 const MAX_BACKUPS: u32 = 10_000;
+
+const SETTINGS_FILE: &str = "settings.json";
+const SESSION_FILE: &str = "session.json";
+const PREVIOUS_FILE: &str = "session.previous.json";
+const RECOVERY_FILE: &str = "session.recovery.json";
 
 /// The outcome of loading a file.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,7 +45,7 @@ pub enum Loaded<T> {
     Ok {
         /// The value read, after repairs.
         value: T,
-        /// What was corrected; empty for a valid file.
+        /// What was corrected; empty for a valid file. At most one repair per field.
         repairs: Vec<Repair>,
     },
     /// The file could not be understood. It was moved aside to `backup`; defaults are used.
@@ -55,7 +59,7 @@ pub enum Loaded<T> {
     Newer {
         /// Defaults.
         value: T,
-        /// The format version found in the file.
+        /// The format version found in the file; `u32::MAX` for any larger number.
         found_version: u32,
     },
 }
@@ -82,28 +86,10 @@ impl<T> Loaded<T> {
     }
 }
 
-/// One step of a migration ladder: turns a document of version `n` into one of version `n + 1`.
-pub(crate) type Migration = fn(&mut Map<String, Value>);
-
-/// Version 0 is a document without `format_version` (hand-written, or from before versioning)
-/// in the version 1 layout, so the step only has to exist.
-fn settings_v0_to_v1(_document: &mut Map<String, Value>) {}
-
 /// `SETTINGS_MIGRATIONS[n]` migrates version `n` to `n + 1`; its length is the current version.
-const SETTINGS_MIGRATIONS: [Migration; SETTINGS_FORMAT_VERSION as usize] = [settings_v0_to_v1];
-
-/// A file format: its name in messages, its size limit and its migration ladder.
-pub(crate) struct Format {
-    pub(crate) what: &'static str,
-    pub(crate) max_bytes: u64,
-    pub(crate) migrations: &'static [Migration],
-}
-
-impl Format {
-    fn current_version(&self) -> u32 {
-        u32::try_from(self.migrations.len()).unwrap_or(u32::MAX)
-    }
-}
+/// Version 0 is a document without `format_version` (hand-written, or from before versioning)
+/// in the version 1 layout.
+const SETTINGS_MIGRATIONS: [Migration; SETTINGS_FORMAT_VERSION as usize] = [Migration::Unchanged];
 
 const SETTINGS_FORMAT: Format = Format {
     what: "settings",
@@ -111,109 +97,16 @@ const SETTINGS_FORMAT: Format = Format {
     migrations: &SETTINGS_MIGRATIONS,
 };
 
-/// What is on disk at a path, decoded as far as it goes.
-#[derive(Debug)]
-pub(crate) enum Inspection<T> {
-    Missing,
-    Damaged(String),
-    Newer(u32),
-    Current(T),
-}
-
-/// Reads at most `max + 1` bytes of a regular file. `None` when there is no file.
-fn read_limited(path: &Path, max: u64) -> Result<Option<Result<Vec<u8>, u64>>, SettingsError> {
-    // Checked before opening: opening a FIFO for reading would block until a writer appears.
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(SettingsError::io("inspect", path, error)),
-    };
-    if !metadata.is_file() {
-        let kind = if metadata.is_dir() {
-            io::ErrorKind::IsADirectory
-        } else {
-            io::ErrorKind::InvalidInput
-        };
-        return Err(SettingsError::io(
-            "read",
-            path,
-            io::Error::new(kind, "not a regular file"),
-        ));
-    }
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(SettingsError::io("open", path, error)),
-    };
-    let mut bytes = Vec::new();
-    file.take(max.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| SettingsError::io("read", path, error))?;
-    let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if length > max {
-        return Ok(Some(Err(length)));
-    }
-    Ok(Some(Ok(bytes)))
-}
-
-/// Reads, checks the version of, migrates and decodes the file at `path`.
-pub(crate) fn inspect<T>(
-    path: &Path,
-    format: &Format,
-    decode: impl FnOnce(Map<String, Value>) -> Result<T, String>,
-) -> Result<Inspection<T>, SettingsError> {
-    let bytes = match read_limited(path, format.max_bytes)? {
-        None => return Ok(Inspection::Missing),
-        Some(Err(_)) => {
-            return Ok(Inspection::Damaged(format!(
-                "larger than {} bytes",
-                format.max_bytes
-            )));
-        }
-        Some(Ok(bytes)) => bytes,
-    };
-    let document = match serde_json::from_slice::<Value>(&bytes) {
-        Ok(Value::Object(document)) => document,
-        Ok(_) => return Ok(Inspection::Damaged("not a JSON object".to_owned())),
-        Err(error) => return Ok(Inspection::Damaged(format!("not JSON: {error}"))),
-    };
-    Ok(migrate(document, format.migrations).map_or_else(
-        |problem| problem,
-        |document| match decode(document) {
-            Ok(value) => Inspection::Current(value),
-            Err(reason) => Inspection::Damaged(reason),
-        },
-    ))
-}
-
-/// Takes `format_version` out of `document` and runs the ladder from that version up.
-pub(crate) fn migrate<T>(
-    mut document: Map<String, Value>,
-    migrations: &[Migration],
-) -> Result<Map<String, Value>, Inspection<T>> {
-    let version = match document.remove(VERSION_KEY) {
-        None => 0,
-        Some(value) => match value.as_u64().and_then(|value| u32::try_from(value).ok()) {
-            Some(version) => version,
-            None => {
-                return Err(Inspection::Damaged(format!(
-                    "{VERSION_KEY} is not a version number"
-                )));
-            }
-        },
-    };
-    let Some(steps) = migrations.get(version as usize..) else {
-        return Err(Inspection::Newer(version));
-    };
-    for step in steps {
-        step(&mut document);
-    }
-    Ok(document)
-}
-
 /// Moves a damaged file to the first free `<name>.damaged-<n>` beside it, never replacing an
-/// earlier backup.
+/// earlier backup, and makes the backup private.
 pub(crate) fn move_aside(path: &Path) -> Result<PathBuf, SettingsError> {
+    move_aside_with(path, |from, to| std::fs::hard_link(from, to))
+}
+
+fn move_aside_with(
+    path: &Path,
+    link: impl Fn(&Path, &Path) -> io::Result<()>,
+) -> Result<PathBuf, SettingsError> {
     let name = path.file_name().map_or_else(
         || "file".to_owned(),
         |name| name.to_string_lossy().into_owned(),
@@ -222,7 +115,7 @@ pub(crate) fn move_aside(path: &Path) -> Result<PathBuf, SettingsError> {
         let backup = path.with_file_name(format!("{name}.damaged-{n}"));
         // A hard link fails if the name is taken, so an earlier backup can never be replaced,
         // even by a concurrent writer.
-        match std::fs::hard_link(path, &backup) {
+        match link(path, &backup) {
             Ok(()) => {
                 if let Err(error) = std::fs::remove_file(path) {
                     log::warn!(
@@ -231,14 +124,16 @@ pub(crate) fn move_aside(path: &Path) -> Result<PathBuf, SettingsError> {
                         backup.display()
                     );
                 }
+                make_private(&backup);
                 return Ok(backup);
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             // Hard links are not supported everywhere; fall back to a rename to a free name.
             Err(_) if std::fs::symlink_metadata(&backup).is_err() => {
-                return std::fs::rename(path, &backup)
-                    .map(|()| backup)
-                    .map_err(|error| SettingsError::io("move aside", path, error));
+                std::fs::rename(path, &backup)
+                    .map_err(|error| SettingsError::io("move aside", path, error))?;
+                make_private(&backup);
+                return Ok(backup);
             }
             Err(_) => {}
         }
@@ -250,32 +145,47 @@ pub(crate) fn move_aside(path: &Path) -> Result<PathBuf, SettingsError> {
     ))
 }
 
-/// Serialises `body` after `format_version` (and any members in `header`), checks the size and
-/// writes it over `path` atomically, provided what is there may be replaced: a missing file or
-/// one of this version or older is replaced; a file from a newer version is an error; a file
-/// that cannot be understood is moved aside first.
+/// Mode 0600 for a backup, whatever the damaged file's own mode was. Only a regular file is
+/// changed: a symlink's target is not the profile's to change.
+fn make_private(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let is_file = std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file());
+        if is_file
+            && let Err(error) =
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        {
+            log::warn!("could not make {} private: {error}", path.display());
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Serialises `body` after `format_version` (and the `exited_cleanly` member, if given),
+/// checks the size and writes it over `path` atomically, provided what is there may be
+/// replaced. Only the version is read from the existing file: a missing file or one of this
+/// version or older is replaced; a file from a newer version is an error; a file whose start
+/// cannot be understood is moved aside first.
 pub(crate) fn write_document<B: Serialize>(
     path: &Path,
     format: &Format,
-    header: Option<(&'static str, bool)>,
+    exited_cleanly: Option<bool>,
     body: &B,
 ) -> Result<(), SettingsError> {
     #[derive(Serialize)]
     struct Document<'a, B> {
         format_version: u32,
-        #[serde(flatten)]
-        header: Map<String, Value>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        exited_cleanly: Option<bool>,
         #[serde(flatten)]
         body: &'a B,
     }
 
-    let mut header_members = Map::new();
-    if let Some((key, value)) = header {
-        header_members.insert(key.to_owned(), Value::Bool(value));
-    }
     let mut bytes = serde_json::to_vec_pretty(&Document {
         format_version: format.current_version(),
-        header: header_members,
+        exited_cleanly,
         body,
     })
     .map_err(|source| SettingsError::Serialize {
@@ -292,16 +202,17 @@ pub(crate) fn write_document<B: Serialize>(
         });
     }
 
-    match inspect(path, format, |_| Ok(()))? {
-        Inspection::Missing | Inspection::Current(()) => {}
-        Inspection::Newer(found) => {
+    match peek(path, format)? {
+        Peek::Missing => {}
+        Peek::Version(found) if found <= format.current_version() => {}
+        Peek::Version(found) => {
             return Err(SettingsError::NewerVersion {
                 path: path.to_owned(),
                 found,
                 supported: format.current_version(),
             });
         }
-        Inspection::Damaged(reason) => {
+        Peek::Damaged(reason) => {
             let backup = move_aside(path)?;
             log::warn!(
                 "{} could not be understood ({reason}); kept at {} before replacing it",
@@ -314,11 +225,6 @@ pub(crate) fn write_document<B: Serialize>(
     write_private_atomic(path, &bytes).map_err(|error| SettingsError::io("write", path, error))
 }
 
-/// Decodes a migrated document into `T`.
-pub(crate) fn decode<T: DeserializeOwned>(document: Map<String, Value>) -> Result<T, String> {
-    serde_json::from_value(Value::Object(document)).map_err(|error| error.to_string())
-}
-
 /// Reads and writes `<profile>/settings.json`.
 #[derive(Clone, Debug)]
 pub struct SettingsStore {
@@ -329,23 +235,30 @@ impl SettingsStore {
     /// A store for `<profile_dir>/settings.json`. Touches nothing on disk.
     pub fn new(profile_dir: &Path) -> Self {
         Self {
-            path: profile_dir.join("settings.json"),
+            path: profile_dir.join(SETTINGS_FILE),
         }
     }
 
     /// Reads the settings, validated (see [`Settings::validated`]).
     ///
-    /// A file over [`MAX_SETTINGS_FILE_BYTES`], or one that is not a JSON object of the right
-    /// shape, is moved aside and reported as [`Loaded::Damaged`]. A file from a newer version is
-    /// left untouched and reported as [`Loaded::Newer`]. A directory or other non-file at the
-    /// path, or a file that cannot be read, is an error.
+    /// The version is read first: a file from a newer version is left untouched and reported
+    /// as [`Loaded::Newer`], whatever its size. A file over [`MAX_SETTINGS_FILE_BYTES`], or one
+    /// that is not a JSON object of the right shape, is moved aside and reported as
+    /// [`Loaded::Damaged`]. Lists are read up to their limits and the rest skipped unbuilt, with
+    /// one counted repair per list. A directory or other non-file at the path, or a file that
+    /// cannot be read, is an error.
     pub fn load(&self) -> Result<Loaded<Settings>, SettingsError> {
-        match inspect(&self.path, &SETTINGS_FORMAT, decode::<Settings>)? {
+        match inspect::<Settings>(&self.path, &SETTINGS_FORMAT)? {
             Inspection::Missing => Ok(Loaded::Missing(Settings::default())),
-            Inspection::Current(settings) => {
-                let (value, repairs) = settings.validated();
-                for repair in &repairs {
-                    log::info!("settings: {}: {}", repair.field, repair.reason);
+            Inspection::Current(settings, unread) => {
+                let (value, repairs) = settings.validated_with(&unread);
+                if !repairs.is_empty() {
+                    let fields: Vec<&str> = repairs.iter().map(|repair| repair.field).collect();
+                    log::info!(
+                        "settings: {} repaired: {}",
+                        repairs.len(),
+                        fields.join(", ")
+                    );
                 }
                 Ok(Loaded::Ok { value, repairs })
             }
@@ -378,19 +291,59 @@ impl SettingsStore {
     /// Writes the settings, validated, privately and atomically.
     ///
     /// Refused with [`SettingsError::NewerVersion`], changing nothing, when the file on disk was
-    /// written by a newer version. A file there that cannot be understood is moved aside first.
+    /// written by a newer version. A file there whose start cannot be understood is moved
+    /// aside first.
     pub fn save(&self, settings: &Settings) -> Result<(), SettingsError> {
         let (settings, _) = settings.clone().validated();
         write_document(&self.path, &SETTINGS_FORMAT, None, &settings)
     }
 }
 
-/// The format version this crate writes into `session.json`.
+/// The format version this crate writes into the session files.
 pub const SESSION_FORMAT_VERSION: u32 = 1;
-/// The largest `session.json` that is read; a larger one is treated as damaged.
+/// The largest session file that is read; a larger one is treated as damaged (unless its
+/// version, read first, is newer).
 pub const MAX_SESSION_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// The session of the previous run, as [`SessionStore::begin_run`] found it.
+/// `SESSION_MIGRATIONS[n]` migrates version `n` to `n + 1`; its length is the current version.
+/// Version 0 is a session document without `format_version`, in the version 1 layout.
+const SESSION_MIGRATIONS: [Migration; SESSION_FORMAT_VERSION as usize] = [Migration::Unchanged];
+
+const SESSION_FORMAT: Format = Format {
+    what: "session",
+    max_bytes: MAX_SESSION_FILE_BYTES,
+    migrations: &SESSION_MIGRATIONS,
+};
+
+/// A session file as decoded: the snapshot's fields and the clean-exit mark, each list bounded
+/// while it is read.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct SessionDocument {
+    exited_cleanly: Option<bool>,
+    #[serde(deserialize_with = "bounded::windows")]
+    windows: Vec<WindowSnapshot>,
+    #[serde(deserialize_with = "bounded::closed_tabs")]
+    closed_tabs: Vec<ClosedTab>,
+    saved_at_ms: i64,
+}
+
+impl SessionDocument {
+    /// The snapshot, sanitized, and whether the run quit in order (no mark: it did not).
+    fn into_previous(self) -> PreviousSession {
+        PreviousSession {
+            snapshot: SessionSnapshot {
+                windows: self.windows,
+                closed_tabs: self.closed_tabs,
+                saved_at_ms: self.saved_at_ms,
+            }
+            .sanitized(),
+            exited_cleanly: self.exited_cleanly.unwrap_or(false),
+        }
+    }
+}
+
+/// A session found at start-up, as [`SessionStore::begin_run`] read it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviousSession {
     /// The windows and tabs, sanitized.
@@ -399,92 +352,157 @@ pub struct PreviousSession {
     pub exited_cleanly: bool,
 }
 
-/// Reads and writes `<profile>/session.json` and keeps `<profile>/session.previous.json`.
+/// What [`SessionStore::begin_run`] found.
+///
+/// The two answer different questions. `recovery` is "restore after a crash": offer it
+/// whenever it is `Some`, whatever the start-up setting, until
+/// [`SessionStore::resolve_recovery`] is called. `last` is "continue where you left off": when
+/// `recovery` is `None` and `last` quit in order, restore it if the start-up setting asks for
+/// the previous session. If `last` did not quit in order, `recovery` is `Some` — either that
+/// session or an older one the user has not yet dealt with — unless that session had nothing
+/// restorable or the recovery file belongs to a newer version.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StartupSessions {
+    /// The session the last run saved, if one could be read.
+    pub last: Option<PreviousSession>,
+    /// A session from a run that did not quit in order, kept until the user restores or
+    /// dismisses it, sanitized. Never empty.
+    pub recovery: Option<SessionSnapshot>,
+}
+
+/// What the recovery slot holds.
+enum Slot {
+    Empty,
+    Occupied(SessionSnapshot),
+    /// A file from a newer version: neither used nor replaced.
+    Unusable,
+}
+
+/// Reads and writes the session files of a profile:
+///
+/// - `session.json`: the running session, saved by [`save`](Self::save);
+/// - `session.previous.json`: a copy of the last run's session, made by
+///   [`begin_run`](Self::begin_run), used if `session.json` turns out damaged;
+/// - `session.recovery.json`: the pending recovery — a session from a run that did not quit in
+///   order, kept until [`resolve_recovery`](Self::resolve_recovery).
 #[derive(Clone, Debug)]
 pub struct SessionStore {
     path: PathBuf,
     previous_path: PathBuf,
+    recovery_path: PathBuf,
 }
 
 impl SessionStore {
-    /// A store for `<profile_dir>/session.json` and `session.previous.json`. Touches nothing.
+    /// A store for the session files of `profile_dir`. Touches nothing.
     pub fn new(profile_dir: &Path) -> Self {
         Self {
-            path: profile_dir.join("session.json"),
-            previous_path: profile_dir.join("session.previous.json"),
+            path: profile_dir.join(SESSION_FILE),
+            previous_path: profile_dir.join(PREVIOUS_FILE),
+            recovery_path: profile_dir.join(RECOVERY_FILE),
         }
     }
 
-    /// Call once at start-up: returns the last run's session, if any, and keeps a copy of it
-    /// as the "previous" file so it stays recoverable after this run starts saving.
+    /// Call once at start-up: returns the last run's session and any pending recovery, and
+    /// keeps copies so that both stay recoverable after this run starts saving.
     ///
-    /// The session returned is [sanitized](SessionSnapshot::sanitized). If the last run quit in
-    /// order, `session.json` is marked as running again, so that a crash of this run before its
-    /// first save is still reported as a crash next time. A damaged file is moved aside like
-    /// damaged settings and gives `None`; a file from a newer version is left untouched and
-    /// gives `None`, and [`save`](Self::save) will refuse to replace it. Failing to write the
-    /// "previous" copy or the running mark is logged, not returned, so the session is never
-    /// lost to a full disk. A directory or other non-file at the path, an unreadable file, or a
-    /// damaged file that cannot be moved aside is an error.
-    pub fn begin_run(&self) -> Result<Option<PreviousSession>, SettingsError> {
-        let (snapshot, exited_cleanly) = match inspect(&self.path, &SESSION_FORMAT, decode_session)?
-        {
-            Inspection::Missing => return Ok(None),
-            Inspection::Newer(found) => {
-                log::warn!(
-                    "{} was written by a newer version (format {found}); not restoring it \
-                         and not saving over it",
-                    self.path.display()
-                );
-                return Ok(None);
-            }
-            Inspection::Damaged(reason) => {
-                let backup = move_aside(&self.path)?;
-                log::warn!(
-                    "{} could not be understood ({reason}); moved to {}",
-                    self.path.display(),
-                    backup.display()
-                );
-                return Ok(None);
-            }
-            Inspection::Current(found) => found,
+    /// In order:
+    ///
+    /// 1. The recovery slot is read. A damaged slot is moved aside and counts as empty; one from
+    ///    a newer version is left alone, not offered and never replaced.
+    /// 2. `session.json` is read as `last`. If it is damaged, it is moved aside and
+    ///    `session.previous.json` is offered in its place, marked as not having quit in order.
+    ///    If it is from a newer version, it is left alone and `last` is `None`.
+    /// 3. If `last` did not quit in order, has tabs, and the slot is empty, `last` fills the
+    ///    slot. An occupied slot is never replaced: the oldest unresolved crash wins.
+    /// 4. If `last` came from `session.json`, it is copied to `session.previous.json`.
+    /// 5. If `last` quit in order, `session.json` is marked as running, so that a crash of this
+    ///    run before its first save is still reported as a crash next time.
+    ///
+    /// Sessions returned are [sanitized](SessionSnapshot::sanitized). Failing to write the
+    /// slot, the copy or the mark is logged, not returned, so the session is never lost to a
+    /// full disk. Saving the running session at any time afterwards is safe: it never touches
+    /// the slot. A directory or other non-file at a path, an unreadable file, or a damaged file
+    /// that cannot be moved aside is an error.
+    pub fn begin_run(&self) -> Result<StartupSessions, SettingsError> {
+        let slot = self.read_slot()?;
+        let (last, from_current) = self.read_last()?;
+
+        let recovery = match slot {
+            Slot::Occupied(snapshot) => Some(snapshot),
+            Slot::Unusable => None,
+            Slot::Empty => match &last {
+                Some(previous)
+                    if !previous.exited_cleanly && !previous.snapshot.windows.is_empty() =>
+                {
+                    let kept = write_document(
+                        &self.recovery_path,
+                        &SESSION_FORMAT,
+                        Some(false),
+                        &previous.snapshot,
+                    );
+                    if let Err(error) = kept {
+                        log::warn!("could not keep the crashed session for recovery: {error}");
+                    }
+                    Some(previous.snapshot.clone())
+                }
+                _ => None,
+            },
         };
-        let snapshot = snapshot.sanitized();
 
-        let previous = write_document(
-            &self.previous_path,
-            &SESSION_FORMAT,
-            Some((EXITED_CLEANLY_KEY, exited_cleanly)),
-            &snapshot,
-        );
-        if let Err(error) = previous {
-            log::warn!("could not keep a copy of the previous session: {error}");
-        }
-        if exited_cleanly {
-            let running = write_document(
-                &self.path,
+        if let Some(previous) = last.as_ref().filter(|_| from_current) {
+            let copied = write_document(
+                &self.previous_path,
                 &SESSION_FORMAT,
-                Some((EXITED_CLEANLY_KEY, false)),
-                &snapshot,
+                Some(previous.exited_cleanly),
+                &previous.snapshot,
             );
-            if let Err(error) = running {
-                log::warn!("could not mark the session as running: {error}");
+            if let Err(error) = copied {
+                log::warn!("could not keep a copy of the previous session: {error}");
+            }
+            if previous.exited_cleanly {
+                let running =
+                    write_document(&self.path, &SESSION_FORMAT, Some(false), &previous.snapshot);
+                if let Err(error) = running {
+                    log::warn!("could not mark the session as running: {error}");
+                }
             }
         }
 
-        Ok(Some(PreviousSession {
-            snapshot,
-            exited_cleanly,
-        }))
+        Ok(StartupSessions { last, recovery })
+    }
+
+    /// Clears the pending recovery once the user has restored or dismissed it. Until then
+    /// every [`begin_run`](Self::begin_run) offers it again.
+    ///
+    /// Nothing to clear is not an error. A slot from a newer version is not removed
+    /// ([`SettingsError::NewerVersion`]); a damaged one is moved aside rather than deleted.
+    pub fn resolve_recovery(&self) -> Result<(), SettingsError> {
+        match peek(&self.recovery_path, &SESSION_FORMAT)? {
+            Peek::Missing => Ok(()),
+            Peek::Version(found) if found > SESSION_FORMAT.current_version() => {
+                Err(SettingsError::NewerVersion {
+                    path: self.recovery_path.clone(),
+                    found,
+                    supported: SESSION_FORMAT.current_version(),
+                })
+            }
+            Peek::Damaged(_) => move_aside(&self.recovery_path).map(|_| ()),
+            Peek::Version(_) => match std::fs::remove_file(&self.recovery_path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(SettingsError::io("remove", &self.recovery_path, error)),
+            },
+        }
     }
 
     /// Saves the running session. `exited_cleanly` is false while running and true only for
-    /// the final save of an orderly quit.
+    /// the final save of an orderly quit (made even when nothing changed; see
+    /// [`SaveThrottle`](crate::SaveThrottle)).
     ///
     /// The snapshot is written [sanitized](SessionSnapshot::sanitized), privately and
     /// atomically. Refused with [`SettingsError::NewerVersion`], changing nothing, when the file
-    /// on disk was written by a newer version; a file there that cannot be understood is moved
-    /// aside first.
+    /// on disk was written by a newer version; a file there whose start cannot be understood is
+    /// moved aside first. The recovery slot is never touched.
     pub fn save(
         &self,
         snapshot: &SessionSnapshot,
@@ -493,38 +511,89 @@ impl SessionStore {
         write_document(
             &self.path,
             &SESSION_FORMAT,
-            Some((EXITED_CLEANLY_KEY, exited_cleanly)),
+            Some(exited_cleanly),
             &snapshot.clone().sanitized(),
         )
     }
+
+    fn read_slot(&self) -> Result<Slot, SettingsError> {
+        Ok(match self.read(&self.recovery_path)? {
+            Read::Missing => Slot::Empty,
+            Read::Newer => Slot::Unusable,
+            Read::Damaged => Slot::Empty,
+            Read::Current(previous) if previous.snapshot.windows.is_empty() => Slot::Empty,
+            Read::Current(previous) => Slot::Occupied(previous.snapshot),
+        })
+    }
+
+    /// The last run's session and whether it came from `session.json` (rather than the
+    /// previous copy).
+    fn read_last(&self) -> Result<(Option<PreviousSession>, bool), SettingsError> {
+        Ok(match self.read(&self.path)? {
+            Read::Current(previous) => (Some(previous), true),
+            Read::Missing | Read::Newer => (None, false),
+            Read::Damaged => match self.read(&self.previous_path)? {
+                Read::Current(previous) => {
+                    log::warn!("offering the copy of the session before the damaged one");
+                    (
+                        Some(PreviousSession {
+                            exited_cleanly: false,
+                            ..previous
+                        }),
+                        false,
+                    )
+                }
+                Read::Missing | Read::Newer | Read::Damaged => (None, false),
+            },
+        })
+    }
+
+    /// Reads one session file; a damaged one is moved aside.
+    fn read(&self, path: &Path) -> Result<Read, SettingsError> {
+        Ok(match inspect::<SessionDocument>(path, &SESSION_FORMAT)? {
+            Inspection::Missing => Read::Missing,
+            Inspection::Newer(found) => {
+                log::warn!(
+                    "{} was written by a newer version (format {found}); leaving it alone",
+                    path.display()
+                );
+                Read::Newer
+            }
+            Inspection::Damaged(reason) => {
+                let backup = move_aside(path)?;
+                log::warn!(
+                    "{} could not be understood ({reason}); moved to {}",
+                    path.display(),
+                    backup.display()
+                );
+                Read::Damaged
+            }
+            Inspection::Current(document, unread) => {
+                if unread.total() > 0 {
+                    log::warn!(
+                        "{}: {} items beyond the limits were not read",
+                        path.display(),
+                        unread.total()
+                    );
+                }
+                Read::Current(document.into_previous())
+            }
+        })
+    }
 }
 
-const EXITED_CLEANLY_KEY: &str = "exited_cleanly";
-
-/// Version 0 is a session document without `format_version`, in the version 1 layout.
-fn session_v0_to_v1(_document: &mut Map<String, Value>) {}
-
-/// `SESSION_MIGRATIONS[n]` migrates version `n` to `n + 1`; its length is the current version.
-const SESSION_MIGRATIONS: [Migration; SESSION_FORMAT_VERSION as usize] = [session_v0_to_v1];
-
-const SESSION_FORMAT: Format = Format {
-    what: "session",
-    max_bytes: MAX_SESSION_FILE_BYTES,
-    migrations: &SESSION_MIGRATIONS,
-};
-
-/// The snapshot and the clean-exit mark; a missing mark means the run did not quit in order.
-fn decode_session(mut document: Map<String, Value>) -> Result<(SessionSnapshot, bool), String> {
-    let exited_cleanly = match document.remove(EXITED_CLEANLY_KEY) {
-        None => false,
-        Some(Value::Bool(clean)) => clean,
-        Some(_) => return Err(format!("{EXITED_CLEANLY_KEY} is not true or false")),
-    };
-    Ok((decode::<SessionSnapshot>(document)?, exited_cleanly))
+/// One session file, read.
+enum Read {
+    Missing,
+    Newer,
+    Damaged,
+    Current(PreviousSession),
 }
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Map, Value};
+
     use super::*;
 
     /// A made-up history: version 0 kept the zoom at the top level as `zoom` and named the
@@ -551,14 +620,17 @@ mod tests {
     const INVENTED: Format = Format {
         what: "settings",
         max_bytes: MAX_SETTINGS_FILE_BYTES,
-        migrations: &[invented_v0_to_v1, mark_v1_to_v2],
+        migrations: &[
+            Migration::Transform(invented_v0_to_v1),
+            Migration::Transform(mark_v1_to_v2),
+        ],
     };
 
     fn inspect_text(text: &str, format: &Format) -> Inspection<Settings> {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         std::fs::write(&path, text).unwrap();
-        inspect(&path, format, decode::<Settings>).unwrap()
+        inspect(&path, format).unwrap()
     }
 
     #[test]
@@ -574,7 +646,7 @@ mod tests {
             &INVENTED,
         );
 
-        let Inspection::Current(settings) = inspection else {
+        let Inspection::Current(settings, _) = inspection else {
             panic!("expected a migrated document, got {inspection:?}");
         };
         assert_eq!(settings.appearance.default_zoom_percent, 150);
@@ -586,7 +658,7 @@ mod tests {
     fn a_middle_version_runs_only_the_steps_above_it() {
         let inspection = inspect_text(r#"{"format_version": 1, "zoom": 150}"#, &INVENTED);
 
-        let Inspection::Current(settings) = inspection else {
+        let Inspection::Current(settings, _) = inspection else {
             panic!("expected a migrated document, got {inspection:?}");
         };
         assert_eq!(
@@ -600,5 +672,57 @@ mod tests {
     fn a_version_beyond_the_ladder_is_newer() {
         let inspection = inspect_text(r#"{"format_version": 3}"#, &INVENTED);
         assert!(matches!(inspection, Inspection::Newer(3)), "{inspection:?}");
+    }
+
+    #[test]
+    fn a_migration_is_bounded_too() {
+        let bomb = format!(
+            r#"{{"format_version": 0, "padding": [{}0]}}"#,
+            "0,".repeat(bounded::MAX_TREE_NODES)
+        );
+        let inspection = inspect_text(&bomb, &INVENTED);
+        assert!(
+            matches!(inspection, Inspection::Damaged(_)),
+            "{inspection:?}"
+        );
+    }
+
+    #[test]
+    fn the_migration_path_still_bounds_lists() {
+        let engines = vec!["{}"; crate::MAX_CUSTOM_ENGINES + 7].join(",");
+        let inspection = inspect_text(
+            &format!(r#"{{"format_version": 1, "search": {{"custom_engines": [{engines}]}}}}"#),
+            &INVENTED,
+        );
+        let Inspection::Current(settings, unread) = inspection else {
+            panic!("expected a migrated document, got {inspection:?}");
+        };
+        assert_eq!(
+            settings.search.custom_engines.len(),
+            crate::MAX_CUSTOM_ENGINES
+        );
+        assert_eq!(unread.get(bounded::CUSTOM_ENGINES), 7);
+    }
+
+    #[test]
+    fn without_hard_links_a_damaged_file_is_renamed_to_a_free_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, b"damaged").unwrap();
+        let earlier = dir.path().join("settings.json.damaged-1");
+        std::fs::write(&earlier, b"an earlier backup").unwrap();
+
+        let backup = move_aside_with(&path, |_, _| {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "no hard links here",
+            ))
+        })
+        .unwrap();
+
+        assert_eq!(backup, dir.path().join("settings.json.damaged-2"));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"damaged");
+        assert_eq!(std::fs::read(&earlier).unwrap(), b"an earlier backup");
+        assert!(!path.exists());
     }
 }

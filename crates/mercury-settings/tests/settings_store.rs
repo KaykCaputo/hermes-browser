@@ -101,7 +101,141 @@ fn a_bad_format_version_is_damaged() {
     assert_damaged(br#"{"format_version": "one"}"#);
     assert_damaged(br#"{"format_version": -1}"#);
     assert_damaged(br#"{"format_version": 1.5}"#);
-    assert_damaged(br#"{"format_version": 99999999999}"#);
+    assert_damaged(br#"{"format_version": null}"#);
+    assert_damaged(br#"{"homepage": "", "format_version": "late and wrong"}"#);
+}
+
+#[test]
+fn a_version_too_large_for_the_integer_type_is_newer() {
+    for text in [
+        r#"{"format_version": 99999999999, "homepage": "x"}"#,
+        r#"{"homepage": "x", "format_version": 99999999999999999999999999}"#,
+    ] {
+        let dir = profile();
+        let path = settings_path(dir.path());
+        fs::write(&path, text).expect("seed");
+        let store = SettingsStore::new(dir.path());
+
+        assert_eq!(
+            store.load().expect("load"),
+            Loaded::Newer {
+                value: Settings::default(),
+                found_version: u32::MAX
+            },
+            "{text}"
+        );
+        assert!(store.save(&Settings::default()).is_err());
+        assert_eq!(fs::read_to_string(&path).expect("untouched"), text);
+    }
+}
+
+#[test]
+fn a_version_that_is_not_the_first_member_is_still_found() {
+    let dir = profile();
+    let path = settings_path(dir.path());
+    let text = format!(
+        r#"{{"homepage": "about:blank", "format_version": {}}}"#,
+        SETTINGS_FORMAT_VERSION + 1
+    );
+    fs::write(&path, &text).expect("seed");
+    let store = SettingsStore::new(dir.path());
+
+    assert!(matches!(store.load().expect("load"), Loaded::Newer { .. }));
+    assert!(matches!(
+        store.save(&Settings::default()),
+        Err(SettingsError::NewerVersion { .. })
+    ));
+    assert_eq!(fs::read_to_string(&path).expect("untouched"), text);
+}
+
+#[test]
+fn a_newer_file_larger_than_the_limit_is_left_alone() {
+    let dir = profile();
+    let path = settings_path(dir.path());
+    let limit = usize::try_from(MAX_SETTINGS_FILE_BYTES).expect("fits");
+    let mut newer = format!(
+        r#"{{"format_version": {}, "padding": ""#,
+        SETTINGS_FORMAT_VERSION + 1
+    )
+    .into_bytes();
+    newer.resize(limit * 2, b'p');
+    newer.extend_from_slice(b"\"}");
+    fs::write(&path, &newer).expect("seed");
+    let store = SettingsStore::new(dir.path());
+
+    assert!(matches!(
+        store.load().expect("load"),
+        Loaded::Newer { found_version, .. } if found_version == SETTINGS_FORMAT_VERSION + 1
+    ));
+    assert!(matches!(
+        store.save(&Settings::default()),
+        Err(SettingsError::NewerVersion { .. })
+    ));
+    assert_eq!(fs::read(&path).expect("untouched"), newer);
+    assert_eq!(names_in(dir.path()), vec!["settings.json"]);
+}
+
+#[test]
+fn a_deeply_nested_document_neither_crashes_nor_costs_much() {
+    let depth = 100_000;
+    // Where a value is expected, nesting is refused at once.
+    let mut deep = String::from(r#"{"format_version": 1, "homepage": "#);
+    deep.push_str(&"[".repeat(depth));
+    deep.push_str(&"]".repeat(depth));
+    deep.push('}');
+    assert_damaged(deep.as_bytes());
+
+    // In an unknown member it is skipped without recursion, before and after the version.
+    for version_first in [true, false] {
+        let mut unknown = String::from("{");
+        if version_first {
+            unknown.push_str(r#""format_version": 1, "#);
+        }
+        unknown.push_str(r#""unknown": "#);
+        unknown.push_str(&"{\"a\":".repeat(depth));
+        unknown.push('1');
+        unknown.push_str(&"}".repeat(depth));
+        unknown.push_str(r#", "homepage": "about:blank"}"#);
+        let dir = profile();
+        fs::write(settings_path(dir.path()), &unknown).expect("seed");
+
+        let loaded = SettingsStore::new(dir.path()).load().expect("load");
+
+        let Loaded::Ok { value, .. } = loaded else {
+            panic!("expected Ok, got {loaded:?}");
+        };
+        assert_eq!(value.homepage, "about:blank");
+    }
+}
+
+#[test]
+fn duplicate_keys_damage_the_file() {
+    assert_damaged(
+        br#"{"format_version": 1, "homepage": "about:blank", "homepage": "https://evil.example/"}"#,
+    );
+    assert_damaged(br#"{"format_version": 1, "appearance": {"theme": "dark", "theme": "light"}}"#);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_backup_is_private_whatever_the_damaged_file_was() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = profile();
+    let path = settings_path(dir.path());
+    fs::write(&path, "damaged").expect("seed");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("make it public");
+
+    let Loaded::Damaged { backup, .. } = SettingsStore::new(dir.path()).load().expect("load")
+    else {
+        panic!("expected Damaged");
+    };
+
+    let mode = fs::metadata(&backup)
+        .expect("the backup")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
 }
 
 #[test]
@@ -278,6 +412,11 @@ fn an_unreadable_file_is_an_error() {
     let path = settings_path(dir.path());
     fs::write(&path, "{}").expect("seed");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("lock it");
+    if fs::read(&path).is_ok() {
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("unlock it");
+        eprintln!("skipped: permissions are not enforced here (running as root?)");
+        return;
+    }
 
     let loaded = SettingsStore::new(dir.path()).load();
 

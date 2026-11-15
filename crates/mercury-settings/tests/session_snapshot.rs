@@ -400,3 +400,32 @@ fn the_closed_tab_list_is_bounded() {
     assert_eq!(session.closed_tabs[0], closed(MAX_CLOSED_TABS + 4));
     assert_eq!(session.closed_tabs.last(), Some(&closed(5)));
 }
+
+#[test]
+fn credentials_are_removed_and_urls_stored_as_parsed() {
+    let mut session = snapshot(vec![window(
+        vec![
+            tab("https://alice:hunter2@example.org/inbox"),
+            tab("https://bob@example.org/"),
+            tab(" https://exa\tmple.org/a b\n"),
+        ],
+        0,
+    )]);
+    session.closed_tabs = vec![ClosedTab {
+        tab: tab("http://carol:pw@example.org:8080/x"),
+        ..closed(0)
+    }];
+
+    let session = session.sanitized();
+
+    assert_eq!(
+        urls(&session.windows[0]),
+        vec![
+            "https://example.org/inbox",
+            "https://example.org/",
+            "https://example.org/a%20b",
+        ]
+    );
+    assert_eq!(session.closed_tabs[0].tab.url, "http://example.org:8080/x");
+    assert_eq!(session.clone().sanitized(), session);
+}

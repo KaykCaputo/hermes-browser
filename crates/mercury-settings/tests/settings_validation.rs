@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use mercury_settings::{
-    DEFAULT_ENGINE_ID, MAX_CUSTOM_ENGINES, MAX_NEVER_SAVE_ORIGINS, MAX_URL_BYTES, Repair,
-    SearchEngine, Settings,
+    DEFAULT_ENGINE_ID, MAX_CUSTOM_ENGINES, MAX_NEVER_SAVE_ORIGINS, MAX_QUOTED_BYTES, MAX_URL_BYTES,
+    Repair, SearchEngine, Settings, canonical_origin, homepage_url, is_plausible_language_tag,
 };
 
 fn custom(id: &str, keyword: &str) -> SearchEngine {
@@ -176,11 +176,15 @@ fn unusable_custom_engines_are_dropped() {
         .map(|engine| engine.id.as_str())
         .collect();
     assert_eq!(kept, vec!["first", "fourth", "fifth"]);
-    assert_eq!(repairs.len(), 6, "{repairs:?}");
+    assert_eq!(
+        fields(&repairs),
+        vec!["search.custom_engines"],
+        "one repair for the list"
+    );
     assert!(
-        repairs
-            .iter()
-            .all(|repair| repair.field == "search.custom_engines")
+        repairs[0].reason.contains("dropped 6"),
+        "{}",
+        repairs[0].reason
     );
 }
 
@@ -194,7 +198,12 @@ fn custom_engines_beyond_the_limit_are_dropped() {
     let (validated, repairs) = settings.validated();
 
     assert_eq!(validated.search.custom_engines.len(), MAX_CUSTOM_ENGINES);
-    assert_eq!(repairs.len(), 3);
+    assert_eq!(repairs.len(), 1);
+    assert!(
+        repairs[0].reason.contains("dropped 3 beyond"),
+        "{}",
+        repairs[0].reason
+    );
 }
 
 #[test]
@@ -273,12 +282,11 @@ fn never_save_origins_keep_only_distinct_origins() {
             "https://shop.example".to_owned(),
         ]
     );
-    assert_eq!(repairs.len(), 9, "{repairs:?}");
-    assert!(
-        repairs
-            .iter()
-            .all(|repair| repair.field == "passwords.never_save_origins")
-    );
+    assert_eq!(fields(&repairs), vec!["passwords.never_save_origins"]);
+    let reason = &repairs[0].reason;
+    assert!(reason.contains("dropped 6 not of the form"), "{reason}");
+    assert!(reason.contains("dropped 2 listed twice"), "{reason}");
+    assert!(reason.contains("wrote 1 in canonical form"), "{reason}");
 }
 
 #[test]
@@ -342,4 +350,92 @@ fn every_repair_is_reported_in_field_order() {
     assert!(repairs.iter().all(|repair| !repair.reason.is_empty()));
     let (_, again) = validated.validated();
     assert!(again.is_empty(), "validating twice repairs nothing more");
+}
+
+#[test]
+fn the_home_page_is_stored_as_the_parser_reads_it() {
+    let settings = Settings {
+        homepage: "  https://exa\tmple.org/a b\n".to_owned(),
+        ..Settings::default()
+    };
+
+    let (validated, repairs) = settings.validated();
+
+    assert_eq!(validated.homepage, "https://example.org/a%20b");
+    assert_eq!(fields(&repairs), vec!["homepage"]);
+    let (_, again) = validated.validated();
+    assert!(again.is_empty());
+}
+
+#[test]
+fn a_home_page_with_credentials_is_refused() {
+    for bad in [
+        "https://user:secret@example.org/",
+        "https://user@example.org/",
+        "http://:secret@example.org/",
+    ] {
+        let settings = Settings {
+            homepage: bad.to_owned(),
+            ..Settings::default()
+        };
+
+        let (validated, repairs) = settings.validated();
+
+        assert_eq!(validated.homepage, "", "{bad}");
+        assert_eq!(fields(&repairs), vec!["homepage"], "{bad}");
+        assert!(!repairs[0].reason.contains("secret"));
+    }
+}
+
+#[test]
+fn the_validators_are_available_to_the_settings_window() {
+    assert_eq!(homepage_url(""), Some(String::new()));
+    assert_eq!(
+        homepage_url("https://Example.org"),
+        Some("https://example.org/".to_owned())
+    );
+    assert_eq!(homepage_url("javascript:alert(1)"), None);
+    assert_eq!(homepage_url("https://a:b@example.org/"), None);
+
+    assert!(is_plausible_language_tag("pt-BR"));
+    assert!(!is_plausible_language_tag("pt_BR"));
+
+    assert_eq!(
+        canonical_origin("https://Bank.Example:443/"),
+        Some("https://bank.example".to_owned())
+    );
+    assert_eq!(canonical_origin("https://bank.example/login"), None);
+}
+
+#[test]
+fn repair_messages_quote_only_a_short_piece_of_the_file() {
+    let long = "x".repeat(100_000);
+    let settings = Settings {
+        language: Some(long.clone()),
+        search: mercury_settings::SearchSettings {
+            default_engine: long.clone(),
+            custom_engines: vec![SearchEngine {
+                id: long.clone(),
+                ..custom("ignored", "k")
+            }],
+            ..mercury_settings::SearchSettings::default()
+        },
+        passwords: mercury_settings::PasswordSettings {
+            never_save_origins: vec![long.clone()],
+            ..mercury_settings::PasswordSettings::default()
+        },
+        ..Settings::default()
+    };
+
+    let (_, repairs) = settings.validated();
+
+    assert_eq!(repairs.len(), 4, "{repairs:?}");
+    for repair in &repairs {
+        assert!(
+            repair.reason.len() < MAX_QUOTED_BYTES + 200,
+            "{}: {} bytes",
+            repair.field,
+            repair.reason.len()
+        );
+    }
 }
