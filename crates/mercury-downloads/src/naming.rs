@@ -32,6 +32,10 @@ pub(crate) const PART_SUFFIX: &str = ".part";
 /// Evaluated at compile time, so it cannot underflow.
 const MAX_UNIQUE_BYTES: usize = MAX_NAME_BYTES - PART_SUFFIX.len();
 
+/// The longest extension, dot included, kept whole when a name is cut and kept apart when it is
+/// numbered. One limit for both, so the two never disagree about what the extension is.
+const MAX_EXTENSION_BYTES: usize = 62;
+
 /// The name used when nothing better is available.
 const FALLBACK_NAME: &str = "download";
 
@@ -95,13 +99,12 @@ pub fn unique_path(dir: &Path, file_name: &str, exists: impl Fn(&Path) -> bool) 
     }
 
     // An "extension" too long to keep when fitting is not kept when numbering either, so the
-    // suffix is at most ` (10000)` plus a quarter of the budget and the stem always has room.
-    let (stem, extension) = split_for_numbering(&base, budget);
+    // suffix is at most ` (10000)` plus `MAX_EXTENSION_BYTES` and the stem always has room.
+    let (stem, extension) = split_for_numbering(&base);
     let mut candidate = base.clone();
     for index in 1..=MAX_NUMBERED {
         let suffix = format!(" ({index}){extension}");
-        let stem =
-            trim_end_dots_and_spaces(truncate_bytes(stem, budget.saturating_sub(suffix.len())));
+        let stem = trim_name_end(truncate_bytes(stem, budget.saturating_sub(suffix.len())));
         let stem = if stem.is_empty() { FALLBACK_NAME } else { stem };
         // Cannot be over budget given the limits above; `fit` makes that hold regardless.
         candidate = fit(&format!("{stem}{suffix}"), budget);
@@ -142,10 +145,11 @@ fn clean(name: &str) -> Option<String> {
         })
         .collect();
 
-    let without_leading = cleaned.trim_start_matches(is_dot_or_space);
+    let without_leading = cleaned.trim_start_matches(is_name_edge);
     let leading = cleaned.len().saturating_sub(without_leading.len());
     let had_leading_dot = cleaned[..leading].contains('.');
-    let core = trim_end_dots_and_spaces(without_leading);
+    let core = without_kept_in_extension(trim_name_end(without_leading));
+    let core = trim_name_end(&core);
     if core.is_empty() {
         return None;
     }
@@ -162,12 +166,30 @@ fn clean(name: &str) -> Option<String> {
     Some(fit(&name, MAX_NAME_BYTES))
 }
 
-fn is_dot_or_space(character: char) -> bool {
-    character == '.' || character.is_whitespace()
+/// What a name may not start or end with: dots, white space, and the joiners and selectors of
+/// `KEPT_IGNORABLE` (invisible there, and at the end they would follow the extension).
+fn is_name_edge(character: char) -> bool {
+    character == '.' || character.is_whitespace() || KEPT_IGNORABLE.contains(&character)
 }
 
-fn trim_end_dots_and_spaces(text: &str) -> &str {
-    text.trim_end_matches(is_dot_or_space)
+fn trim_name_end(text: &str) -> &str {
+    text.trim_end_matches(is_name_edge)
+}
+
+/// Removes `KEPT_IGNORABLE` characters after the last dot: inside an extension they would make
+/// `.pdf` or `.exe` an unknown type to the system and to any check based on the extension.
+fn without_kept_in_extension(name: &str) -> String {
+    match name.rfind('.') {
+        Some(dot) => {
+            let (stem, extension) = name.split_at(dot);
+            let extension: String = extension
+                .chars()
+                .filter(|character| !KEPT_IGNORABLE.contains(character))
+                .collect();
+            format!("{stem}{extension}")
+        }
+        None => name.to_owned(),
+    }
 }
 
 /// Unicode's `Default_Ignorable_Code_Point` property, from `DerivedCoreProperties.txt` of
@@ -193,9 +215,10 @@ const DEFAULT_IGNORABLE: [(char, char); 17] = [
     ('\u{e0000}', '\u{e0fff}'),
 ];
 
-/// Default-ignorable characters that are kept because real text needs them: the zero-width
-/// non-joiner (Persian and other scripts) and joiner (emoji sequences), and the text/emoji
-/// presentation selectors. Each is only ever drawn as part of its neighbours.
+/// Default-ignorable characters that are kept **in the stem** because real text needs them: the
+/// zero-width non-joiner (Persian and other scripts) and joiner (emoji sequences), and the
+/// text/emoji presentation selectors. They are removed from the extension and from both ends of
+/// the name (`without_kept_in_extension`, `is_name_edge`).
 const KEPT_IGNORABLE: [char; 4] = ['\u{200c}', '\u{200d}', '\u{fe0e}', '\u{fe0f}'];
 
 /// Invisible characters to remove that are neither `char::is_control` nor default-ignorable:
@@ -263,10 +286,10 @@ fn fit(name: &str, max: usize) -> String {
         return name.to_owned();
     }
     let (stem, extension) = match split_extension(name) {
-        (stem, extension) if keeps_extension(extension, max) => (stem, extension),
+        (stem, extension) if keeps_extension(extension) => (stem, extension),
         _ => (name, ""),
     };
-    let stem = trim_end_dots_and_spaces(truncate_bytes(stem, max.saturating_sub(extension.len())));
+    let stem = trim_name_end(truncate_bytes(stem, max.saturating_sub(extension.len())));
     let stem = if stem.is_empty() { FALLBACK_NAME } else { stem };
     format!("{stem}{extension}")
 }
@@ -291,16 +314,16 @@ fn split_extension(name: &str) -> (&str, &str) {
     }
 }
 
-/// Whether an extension is short enough to be kept whole when a name is cut to `max` bytes.
-fn keeps_extension(extension: &str, max: usize) -> bool {
-    extension.len() <= max / 4
+/// Whether an extension is short enough to be treated as one.
+fn keeps_extension(extension: &str) -> bool {
+    extension.len() <= MAX_EXTENSION_BYTES
 }
 
 /// Like `split_extension`, but keeps `.tar.gz` and friends together so numbering gives
 /// `archive (1).tar.gz`, and, like `fit`, does not treat an over-long tail as an extension.
-fn split_for_numbering(name: &str, max: usize) -> (&str, &str) {
+fn split_for_numbering(name: &str) -> (&str, &str) {
     let (stem, extension) = split_extension(name);
-    if !keeps_extension(extension, max) {
+    if !keeps_extension(extension) {
         return (name, "");
     }
     if extension.is_empty() {
@@ -308,7 +331,7 @@ fn split_for_numbering(name: &str, max: usize) -> (&str, &str) {
     }
     let (inner_stem, inner_extension) = split_extension(stem);
     let (compound_stem, compound) = name.split_at(inner_stem.len());
-    if inner_extension.eq_ignore_ascii_case(".tar") && keeps_extension(compound, max) {
+    if inner_extension.eq_ignore_ascii_case(".tar") && keeps_extension(compound) {
         (compound_stem, compound)
     } else {
         (stem, extension)

@@ -147,6 +147,52 @@ fn joiners_and_emoji_presentation_selectors_are_kept() {
 }
 
 #[test]
+fn joiners_and_selectors_are_removed_from_the_extension_and_the_end() {
+    // Inside or after the extension they would turn `.pdf` or `.exe` into an unknown type.
+    assert_eq!(sanitize_file_name("report.pdf\u{200d}"), "report.pdf");
+    assert_eq!(sanitize_file_name("setup.e\u{200d}xe"), "setup.exe");
+    assert_eq!(sanitize_file_name("setup.\u{200c}exe\u{fe0f}"), "setup.exe");
+    assert_eq!(sanitize_file_name("photo.j\u{fe0e}pg"), "photo.jpg");
+    assert_eq!(sanitize_file_name("notes\u{200d}"), "notes");
+    assert_eq!(sanitize_file_name("notes\u{200d}.\u{200d}"), "notes");
+    // Kept in the stem: a Persian word with a ZWNJ and an emoji ZWJ sequence.
+    assert_eq!(
+        sanitize_file_name("می\u{200c}خواهم.pdf"),
+        "می\u{200c}خواهم.pdf"
+    );
+    assert_eq!(
+        sanitize_file_name("👨\u{200d}👩\u{200d}👧 photo.jpg"),
+        "👨\u{200d}👩\u{200d}👧 photo.jpg"
+    );
+    assert_eq!(sanitize_file_name("❤\u{fe0f}.txt"), "❤\u{fe0f}.txt");
+}
+
+#[test]
+fn one_extension_limit_applies_to_cutting_and_numbering() {
+    // Long enough that the sanitiser has to cut, with extensions around the limit.
+    for extension_len in 58..=68 {
+        let extension = format!(".{}", "e".repeat(extension_len - 1));
+        let name = format!("{}{extension}", "s".repeat(300));
+        let sanitized = sanitize_file_name(&name);
+        let kept_by_sanitiser = sanitized.ends_with(&extension);
+        let numbered = unique_path(Path::new("/dl"), &name, |path: &Path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| !name.contains(" ("))
+        });
+        let numbered = numbered.file_name().unwrap().to_str().unwrap();
+        let kept_by_numbering = numbered.ends_with(&format!(" (1){extension}"));
+        assert_eq!(
+            kept_by_sanitiser, kept_by_numbering,
+            "extension of {extension_len} bytes: sanitised {sanitized:?}, numbered {numbered:?}"
+        );
+        if !kept_by_numbering {
+            assert!(numbered.ends_with(" (1)"), "{numbered}");
+        }
+    }
+}
+
+#[test]
 fn console_and_clock_device_names_are_prefixed() {
     assert_eq!(sanitize_file_name("CONIN$"), "_CONIN$");
     assert_eq!(sanitize_file_name("conout$.txt"), "_conout$.txt");
@@ -517,6 +563,42 @@ fn numbered_names_and_their_partial_files_always_fit() {
                 );
                 assert!(!refs.contains(&result), "{result} was taken");
                 assert_eq!(path.parent(), Some(dir));
+            }
+        }
+    }
+}
+
+#[test]
+fn numbered_multi_byte_names_stay_valid_and_within_the_limit() {
+    let dir = Path::new("/dl");
+    for unit in ["é", "😀"] {
+        // Stems and extensions whose length in bytes lands on and around every cut point.
+        for stem_chars in [
+            0, 1, 40, 59, 60, 61, 62, 63, 64, 120, 123, 124, 125, 126, 200,
+        ] {
+            for extension_chars in [0, 1, 2, 14, 15, 16, 30, 31, 32, 60, 100] {
+                let stem = unit.repeat(stem_chars);
+                let name = if extension_chars == 0 {
+                    stem
+                } else {
+                    format!("{stem}.{}", unit.repeat(extension_chars))
+                };
+                let mut taken_names: Vec<String> = Vec::new();
+                for _ in 0..3 {
+                    let refs: Vec<&str> = taken_names.iter().map(String::as_str).collect();
+                    let path = unique_path(dir, &name, taken(&refs));
+                    let result = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_else(|| panic!("not valid UTF-8 for {name:?}"));
+                    assert!(
+                        result.len() <= 250,
+                        "{unit} × {stem_chars}/{extension_chars}: {} bytes",
+                        result.len()
+                    );
+                    assert!(!refs.contains(&result), "{result} was taken");
+                    taken_names.push(result.to_owned());
+                }
             }
         }
     }

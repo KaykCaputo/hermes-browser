@@ -612,7 +612,8 @@ fn partial_path_for(target: &Path) -> PathBuf {
 ///
 /// On Unix, `O_NOFOLLOW` makes `open` itself refuse a symlink at the path, and `O_NONBLOCK`
 /// makes it fail at once on a FIFO with no reader instead of blocking a thread until one
-/// appears. Neither changes how a regular file is written.
+/// appears. `O_NONBLOCK` is cleared again (`clear_nonblocking`) once the file is known to be a
+/// regular file.
 fn partial_open_options() -> std::fs::OpenOptions {
     let mut options = std::fs::OpenOptions::new();
     options.write(true);
@@ -645,6 +646,11 @@ fn claim_partial(
         let part = partial_path_for(&target);
         match partial_open_options().create_new(true).open(&part) {
             Ok(file) => {
+                if let Err(error) = clear_nonblocking(&file) {
+                    // Nothing records this new file yet, so remove it here.
+                    let _ = std::fs::remove_file(&part);
+                    return Err(error.into());
+                }
                 in_use.insert(part.clone());
                 let lease = PartLease {
                     parts: Arc::clone(parts_in_use),
@@ -732,6 +738,10 @@ fn open_partial(part: &Path, appending: bool) -> Result<std::fs::File, TransferE
             return Err(TransferError::PartialGone);
         }
         Ok(file) => {
+            if let Err(error) = clear_nonblocking(&file) {
+                let _ = std::fs::remove_file(part);
+                return Err(error.into());
+            }
             return Ok(file);
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => partial_open_options()
@@ -746,12 +756,37 @@ fn open_partial(part: &Path, appending: bool) -> Result<std::fs::File, TransferE
     if !at_path.file_type().is_file() || !opened.is_file() || !same_file(&opened, &at_path) {
         return Err(TransferError::InvalidResume("the partial file changed"));
     }
+    clear_nonblocking(&file)?;
     if appending {
         file.seek(io::SeekFrom::End(0))?;
     } else {
         file.set_len(0)?;
     }
     Ok(file)
+}
+
+/// Clears the `O_NONBLOCK` used while opening, once the file is known to be a regular file, so
+/// it is not passed on to file systems (FUSE, network) that might honour it for regular files.
+#[cfg(unix)]
+fn clear_nonblocking(file: &std::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let descriptor = file.as_raw_fd();
+    // SAFETY: `descriptor` stays open for the lifetime of `file`; F_GETFL and F_SETFL only read
+    // and change its status flags.
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: as above.
+    if unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn clear_nonblocking(_file: &std::fs::File) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -957,6 +992,43 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(outcome, Ok(true), "opening the FIFO blocked or succeeded");
+    }
+
+    /// The non-blocking flag used while opening is not left on the descriptor that is written.
+    #[cfg(unix)]
+    #[test]
+    fn partial_files_are_written_without_o_nonblock() {
+        use std::os::fd::AsRawFd;
+        let is_nonblocking = |file: &std::fs::File| {
+            // SAFETY: `file` is open; F_GETFL only reads its status flags.
+            let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+            assert!(flags >= 0);
+            flags & libc::O_NONBLOCK != 0
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "mercury-downloads-nonblock-unit-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let parts: PartsInUse = Arc::default();
+
+        let (_, _, part, claimed, lease) = claim_partial(&dir, "file.bin", &parts).unwrap();
+        let claimed_nonblocking = is_nonblocking(&claimed);
+        drop((claimed, lease));
+        let reopened = open_partial(&part, true).unwrap();
+        let reopened_nonblocking = is_nonblocking(&reopened);
+        drop(reopened);
+        std::fs::remove_file(&part).unwrap();
+        let created = open_partial(&part, false).unwrap();
+        let created_nonblocking = is_nonblocking(&created);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!claimed_nonblocking, "claimed partial file is non-blocking");
+        assert!(
+            !reopened_nonblocking,
+            "reopened partial file is non-blocking"
+        );
+        assert!(!created_nonblocking, "created partial file is non-blocking");
     }
 
     /// A symlink at the partial path is refused by `open` itself, not only by the earlier check.
