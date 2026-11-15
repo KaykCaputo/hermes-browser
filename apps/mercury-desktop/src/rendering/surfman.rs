@@ -137,6 +137,8 @@ pub struct BrowserRenderingContext {
     pub(super) size: Cell<ViewportSize>,
     swap_chain: SwapChain<Device>,
     pub(super) surfman: SurfmanContext,
+    resize_failure: ReportOnce,
+    present_failure: ReportOnce,
     #[cfg(target_os = "macos")]
     pub(super) frame_bridge: super::metal::MacFrameBridge,
 }
@@ -189,6 +191,8 @@ impl BrowserRenderingContext {
             size: Cell::new(size),
             swap_chain,
             surfman,
+            resize_failure: ReportOnce::default(),
+            present_failure: ReportOnce::default(),
             #[cfg(target_os = "macos")]
             frame_bridge,
         })
@@ -248,20 +252,33 @@ impl RenderingContext for BrowserRenderingContext {
         if size == self.size.get() {
             return;
         }
-        let _ = self.swap_chain.resize(
+        if let Err(error) = self.swap_chain.resize(
             &self.surfman.device.borrow(),
             &mut self.surfman.context.borrow_mut(),
             Size2D::new(size.width() as i32, size.height() as i32),
-        );
+        ) {
+            // Keep the old size: it still describes the surface Servo draws into.
+            if self.resize_failure.first() {
+                log::warn!(
+                    "failed to resize Servo's offscreen surface to {}x{}: {error:?}",
+                    size.width(),
+                    size.height()
+                );
+            }
+            return;
+        }
         self.size.set(size);
     }
 
     fn present(&self) {
-        let _ = self.swap_chain.swap_buffers(
+        if let Err(error) = self.swap_chain.swap_buffers(
             &self.surfman.device.borrow(),
             &mut self.surfman.context.borrow_mut(),
             PreserveBuffer::No,
-        );
+        ) && self.present_failure.first()
+        {
+            log::warn!("failed to present Servo's offscreen surface: {error:?}");
+        }
     }
 
     fn make_current(&self) -> Result<(), surfman::Error> {
@@ -299,5 +316,29 @@ impl RenderingContext for BrowserRenderingContext {
 
     fn connection(&self) -> Option<Connection> {
         Some(self.surfman.device.borrow().connection())
+    }
+}
+
+/// Lets a failure that recurs every frame be logged once.
+#[derive(Default)]
+struct ReportOnce(Cell<bool>);
+
+impl ReportOnce {
+    /// `true` the first time only.
+    fn first(&self) -> bool {
+        !self.0.replace(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failure_is_reported_only_the_first_time() {
+        let report = ReportOnce::default();
+        assert!(report.first());
+        assert!(!report.first());
+        assert!(!report.first());
     }
 }
