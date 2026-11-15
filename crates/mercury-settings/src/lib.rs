@@ -12,6 +12,7 @@
 mod atomic;
 mod error;
 mod search;
+mod session;
 mod settings;
 mod store;
 
@@ -21,10 +22,18 @@ pub use search::{
     DEFAULT_ENGINE_ID, MAX_CUSTOM_ENGINES, MAX_ENGINE_ID_BYTES, MAX_ENGINE_NAME_BYTES,
     MAX_KEYWORD_BYTES, MAX_TEMPLATE_BYTES, SEARCH_TERMS_PLACEHOLDER, SearchEngine, builtin_engines,
 };
+pub use session::{
+    ClosedTab, MAX_CLOSED_TABS, MAX_RESTORED_TABS, MAX_TITLE_BYTES, MAX_WINDOW_COORDINATE,
+    MAX_WINDOW_SIDE, MIN_WINDOW_SIDE, SaveThrottle, SessionSnapshot, TabSnapshot, WindowBounds,
+    WindowSnapshot,
+};
 pub use settings::{
     AppearanceSettings, ClearOnExit, DownloadSettings, MAX_LANGUAGE_TAG_BYTES,
     MAX_NEVER_SAVE_ORIGINS, MAX_ORIGIN_BYTES, MAX_PATH_BYTES, MAX_URL_BYTES, MAX_ZOOM_PERCENT,
     MIN_ZOOM_PERCENT, PasswordSettings, PrivacySettings, Repair, SearchSettings, Settings,
     StartupBehavior, Theme, WebSettings,
 };
-pub use store::{Loaded, MAX_SETTINGS_FILE_BYTES, SETTINGS_FORMAT_VERSION, SettingsStore};
+pub use store::{
+    Loaded, MAX_SESSION_FILE_BYTES, MAX_SETTINGS_FILE_BYTES, PreviousSession,
+    SESSION_FORMAT_VERSION, SETTINGS_FORMAT_VERSION, SessionStore, SettingsStore,
+};

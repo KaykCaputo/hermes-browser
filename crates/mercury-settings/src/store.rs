@@ -20,6 +20,7 @@ use serde_json::{Map, Value};
 
 use crate::atomic::write_private_atomic;
 use crate::error::SettingsError;
+use crate::session::SessionSnapshot;
 use crate::settings::{Repair, Settings};
 
 /// The format version this crate writes into `settings.json`.
@@ -384,6 +385,144 @@ impl SettingsStore {
     }
 }
 
+/// The format version this crate writes into `session.json`.
+pub const SESSION_FORMAT_VERSION: u32 = 1;
+/// The largest `session.json` that is read; a larger one is treated as damaged.
+pub const MAX_SESSION_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// The session of the previous run, as [`SessionStore::begin_run`] found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviousSession {
+    /// The windows and tabs, sanitized.
+    pub snapshot: SessionSnapshot,
+    /// Whether that run quit in order. False after a crash or a kill.
+    pub exited_cleanly: bool,
+}
+
+/// Reads and writes `<profile>/session.json` and keeps `<profile>/session.previous.json`.
+#[derive(Clone, Debug)]
+pub struct SessionStore {
+    path: PathBuf,
+    previous_path: PathBuf,
+}
+
+impl SessionStore {
+    /// A store for `<profile_dir>/session.json` and `session.previous.json`. Touches nothing.
+    pub fn new(profile_dir: &Path) -> Self {
+        Self {
+            path: profile_dir.join("session.json"),
+            previous_path: profile_dir.join("session.previous.json"),
+        }
+    }
+
+    /// Call once at start-up: returns the last run's session, if any, and keeps a copy of it
+    /// as the "previous" file so it stays recoverable after this run starts saving.
+    ///
+    /// The session returned is [sanitized](SessionSnapshot::sanitized). If the last run quit in
+    /// order, `session.json` is marked as running again, so that a crash of this run before its
+    /// first save is still reported as a crash next time. A damaged file is moved aside like
+    /// damaged settings and gives `None`; a file from a newer version is left untouched and
+    /// gives `None`, and [`save`](Self::save) will refuse to replace it. Failing to write the
+    /// "previous" copy or the running mark is logged, not returned, so the session is never
+    /// lost to a full disk. A directory or other non-file at the path, an unreadable file, or a
+    /// damaged file that cannot be moved aside is an error.
+    pub fn begin_run(&self) -> Result<Option<PreviousSession>, SettingsError> {
+        let (snapshot, exited_cleanly) = match inspect(&self.path, &SESSION_FORMAT, decode_session)?
+        {
+            Inspection::Missing => return Ok(None),
+            Inspection::Newer(found) => {
+                log::warn!(
+                    "{} was written by a newer version (format {found}); not restoring it \
+                         and not saving over it",
+                    self.path.display()
+                );
+                return Ok(None);
+            }
+            Inspection::Damaged(reason) => {
+                let backup = move_aside(&self.path)?;
+                log::warn!(
+                    "{} could not be understood ({reason}); moved to {}",
+                    self.path.display(),
+                    backup.display()
+                );
+                return Ok(None);
+            }
+            Inspection::Current(found) => found,
+        };
+        let snapshot = snapshot.sanitized();
+
+        let previous = write_document(
+            &self.previous_path,
+            &SESSION_FORMAT,
+            Some((EXITED_CLEANLY_KEY, exited_cleanly)),
+            &snapshot,
+        );
+        if let Err(error) = previous {
+            log::warn!("could not keep a copy of the previous session: {error}");
+        }
+        if exited_cleanly {
+            let running = write_document(
+                &self.path,
+                &SESSION_FORMAT,
+                Some((EXITED_CLEANLY_KEY, false)),
+                &snapshot,
+            );
+            if let Err(error) = running {
+                log::warn!("could not mark the session as running: {error}");
+            }
+        }
+
+        Ok(Some(PreviousSession {
+            snapshot,
+            exited_cleanly,
+        }))
+    }
+
+    /// Saves the running session. `exited_cleanly` is false while running and true only for
+    /// the final save of an orderly quit.
+    ///
+    /// The snapshot is written [sanitized](SessionSnapshot::sanitized), privately and
+    /// atomically. Refused with [`SettingsError::NewerVersion`], changing nothing, when the file
+    /// on disk was written by a newer version; a file there that cannot be understood is moved
+    /// aside first.
+    pub fn save(
+        &self,
+        snapshot: &SessionSnapshot,
+        exited_cleanly: bool,
+    ) -> Result<(), SettingsError> {
+        write_document(
+            &self.path,
+            &SESSION_FORMAT,
+            Some((EXITED_CLEANLY_KEY, exited_cleanly)),
+            &snapshot.clone().sanitized(),
+        )
+    }
+}
+
+const EXITED_CLEANLY_KEY: &str = "exited_cleanly";
+
+/// Version 0 is a session document without `format_version`, in the version 1 layout.
+fn session_v0_to_v1(_document: &mut Map<String, Value>) {}
+
+/// `SESSION_MIGRATIONS[n]` migrates version `n` to `n + 1`; its length is the current version.
+const SESSION_MIGRATIONS: [Migration; SESSION_FORMAT_VERSION as usize] = [session_v0_to_v1];
+
+const SESSION_FORMAT: Format = Format {
+    what: "session",
+    max_bytes: MAX_SESSION_FILE_BYTES,
+    migrations: &SESSION_MIGRATIONS,
+};
+
+/// The snapshot and the clean-exit mark; a missing mark means the run did not quit in order.
+fn decode_session(mut document: Map<String, Value>) -> Result<(SessionSnapshot, bool), String> {
+    let exited_cleanly = match document.remove(EXITED_CLEANLY_KEY) {
+        None => false,
+        Some(Value::Bool(clean)) => clean,
+        Some(_) => return Err(format!("{EXITED_CLEANLY_KEY} is not true or false")),
+    };
+    Ok((decode::<SessionSnapshot>(document)?, exited_cleanly))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,8 +562,9 @@ mod tests {
     }
 
     #[test]
-    fn the_ladder_has_one_step_per_version() {
+    fn the_ladders_have_one_step_per_version() {
         assert_eq!(SETTINGS_FORMAT.current_version(), SETTINGS_FORMAT_VERSION);
+        assert_eq!(SESSION_FORMAT.current_version(), SESSION_FORMAT_VERSION);
     }
 
     #[test]
