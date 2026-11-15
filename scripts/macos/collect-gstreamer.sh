@@ -9,11 +9,24 @@
 # `<destination lib dir>/../mercury-browser`.
 #
 # Starting from the executable's own non-system dependencies plus the plugin files
-# named in the resolved `servo` crate's gstreamer_plugin_lists/{common,macos}.rs.in,
-# every non-system dependency is followed with `otool -L` and copied flat into the
-# destination. When the executable has a single architecture, each copied library is
-# thinned to it with `lipo`. A marker file records what was collected, so an
-# up-to-date directory is not copied again.
+# that scripts/macos/gstreamer-plugins.sh names (Servo's list minus the excluded
+# plugins; see that script), every non-system dependency is followed with
+# `otool -L` and copied flat into the destination, thinned to the executable's
+# architecture with `lipo`. A marker file records what was collected (inputs, file
+# count and a digest of the contents), so an intact, up-to-date directory is not
+# copied again and a damaged one is rebuilt. A directory without a marker is never
+# deleted. Finally the bundled-library table in THIRD-PARTY-NOTICES.md is checked
+# against the collected set (scripts/macos/gstreamer-notices.sh).
+#
+# Inside an application bundle (a destination ending in .app/Contents/MacOS/lib)
+# no marker is written: a signed bundle may hold only code in Contents/MacOS, and
+# the bundle is rebuilt from scratch each time, so the destination must not exist.
+#
+# Environment:
+#   MERCURY_GSTREAMER_EXCLUDE_PLUGINS, MERCURY_SERVO_PLUGIN_LISTS
+#                                      read by scripts/macos/gstreamer-plugins.sh
+#   MERCURY_GSTREAMER_UPDATE_NOTICES   1 = rewrite the THIRD-PARTY-NOTICES.md table
+#                                      instead of checking it
 #
 # Adapted from Servo's `package_gstreamer_dylibs` and
 # `load_plugin_libraries_from_text_file`:
@@ -24,9 +37,12 @@
 #   https://github.com/Goddv/Zervo, commit 86cb7126, scripts/bundle-macos.sh, MPL-2.0.
 
 set -euo pipefail
+# Paths are kept in arrays and quoted; globbing is off so that a `*` or `?` in a
+# path can never expand.
+set -f
 
 say() {
-    printf '%s\n' "$*" >&2
+    printf 'collect-gstreamer: %s\n' "$*" >&2
 }
 
 die() {
@@ -37,58 +53,63 @@ die() {
 [ "$#" -ge 2 ] && [ "$#" -le 3 ] \
     || die "usage: $0 <gstreamer prefix> <destination lib dir> [executable]"
 
-prefix="$1"
-destination="${2%/}"
-executable="${3:-$(dirname "$destination")/mercury-browser}"
-repository="$(cd "$(dirname "$0")/../.." && pwd -P)"
+PREFIX="$1"
+DESTINATION="${2%/}"
+EXECUTABLE="${3:-$(dirname -- "$DESTINATION")/mercury-browser}"
+REPOSITORY="$(cd "$(dirname -- "$0")/../.." && pwd -P)"
 
-[ -f "${prefix}/lib/libgstreamer-1.0.0.dylib" ] \
-    || die "${prefix} is not a GStreamer prefix (no lib/libgstreamer-1.0.0.dylib)"
-[ -f "$executable" ] || die "executable ${executable} does not exist; build it first"
-prefix="$(cd "$prefix" && pwd -P)"
-prefix_lib="${prefix}/lib"
+[ -n "$DESTINATION" ] || die "the destination must not be empty"
+[ -f "$PREFIX/lib/libgstreamer-1.0.0.dylib" ] \
+    || die "$PREFIX is not a GStreamer prefix (no lib/libgstreamer-1.0.0.dylib)"
+[ -f "$EXECUTABLE" ] || die "executable $EXECUTABLE does not exist; build it first"
+PREFIX="$(cd -- "$PREFIX" && pwd -P)"
+PREFIX_LIB="$PREFIX/lib"
 
-gstreamer_version="$(sed -n 's/^Version: *//p' "${prefix_lib}/pkgconfig/gstreamer-1.0.pc")"
-[ -n "$gstreamer_version" ] || die "cannot read the GStreamer version from ${prefix_lib}/pkgconfig"
+PC_FILE="$PREFIX_LIB/pkgconfig/gstreamer-1.0.pc"
+[ -f "$PC_FILE" ] || die "$PC_FILE is missing (the development package is needed)"
+GSTREAMER_VERSION="$(sed -n 's/^Version: *//p' "$PC_FILE")"
+[ -n "$GSTREAMER_VERSION" ] || die "cannot read the GStreamer version from $PC_FILE"
 
-# The plugin lists ship inside the `servo` crate; use the copy Cargo resolved.
-servo_manifest() {
-    local metadata
-    metadata="$(cd "$repository" && cargo metadata --format-version 1 --locked --offline \
-        --filter-platform aarch64-apple-darwin 2>/dev/null)" \
-        || metadata="$(cd "$repository" && cargo metadata --format-version 1 --locked)"
-    if command -v jq >/dev/null 2>&1; then
-        printf '%s' "$metadata" \
-            | jq -r '.packages[] | select(.name == "servo") | .manifest_path'
-    else
-        printf '%s' "$metadata" | python3 -c '
-import json, sys
-for package in json.load(sys.stdin)["packages"]:
-    if package["name"] == "servo":
-        print(package["manifest_path"])'
-    fi
+# ── Which plugins: one definition, shared with the bundle checks ──────────
+PLUGIN_SCRIPT="$REPOSITORY/scripts/macos/gstreamer-plugins.sh"
+plugin_files="$(bash "$PLUGIN_SCRIPT")" || die "cannot determine the plugin list ($PLUGIN_SCRIPT)"
+excluded_files="$(bash "$PLUGIN_SCRIPT" --excluded)" \
+    || die "cannot determine the excluded plugins ($PLUGIN_SCRIPT --excluded)"
+PLUGINS=()
+while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    plugin="${file#lib}"
+    PLUGINS+=("${plugin%.dylib}")
+done <<<"$plugin_files"
+[ "${#PLUGINS[@]}" -gt 0 ] || die "$PLUGIN_SCRIPT listed no plugins"
+EXCLUDED_FILES=()
+while IFS= read -r file; do
+    if [ -n "$file" ]; then EXCLUDED_FILES+=("$file"); fi
+done <<<"$excluded_files"
+
+contains() { # needle, haystack...
+    local needle="$1" item
+    shift
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
 }
 
-if [ -n "${MERCURY_SERVO_PLUGIN_LISTS:-}" ]; then
-    plugin_lists="$MERCURY_SERVO_PLUGIN_LISTS"
-else
-    manifest="$(servo_manifest)"
-    [ -n "$manifest" ] && [ "$(printf '%s\n' "$manifest" | wc -l)" -eq 1 ] \
-        || die "could not find exactly one resolved 'servo' crate with cargo metadata"
-    plugin_lists="$(dirname "$manifest")/gstreamer_plugin_lists"
-fi
+for plugin in "${PLUGINS[@]}"; do
+    [ -f "$PREFIX_LIB/gstreamer-1.0/lib$plugin.dylib" ] \
+        || die "plugin $plugin is missing from $PREFIX_LIB/gstreamer-1.0"
+done
 
-# Each list is a Rust array of string literals with `//` comment lines.
-plugin_names() {
-    local list
-    for list in common.rs.in macos.rs.in; do
-        [ -f "${plugin_lists}/${list}" ] || die "missing ${plugin_lists}/${list}"
-        grep -v '^[[:space:]]*//' "${plugin_lists}/${list}" | grep -o '"[^"]*"' | tr -d '"'
+# Fails if an excluded plugin is in the directory (a stale copy must not ride along).
+require_no_excluded() {
+    local file
+    for file in ${EXCLUDED_FILES[@]+"${EXCLUDED_FILES[@]}"}; do
+        [ ! -e "$1/$file" ] || die "$1/$file is an excluded plugin and must not be shipped"
     done
 }
-plugins="$(plugin_names)"
-[ -n "$plugins" ] || die "no plugins listed in ${plugin_lists}"
 
+# ── Mach-O helpers ────────────────────────────────────────────────────────
 is_system_library() {
     case "$1" in
         /System/Library/* | /usr/lib/*) return 0 ;;
@@ -96,93 +117,182 @@ is_system_library() {
     esac
 }
 
-architectures="$(lipo -archs "$executable")"
-case "$architectures" in
-    *" "*) thin_to="" ; otool_arch=() ;;
-    *) thin_to="$architectures" ; otool_arch=(-arch "$architectures") ;;
+ARCH="$(lipo -archs "$EXECUTABLE")" || die "lipo cannot read $EXECUTABLE"
+case "$ARCH" in
+    *" "*) die "$EXECUTABLE is universal ($ARCH); build for one architecture" ;;
 esac
 
-# Non-system dependencies of a Mach-O file, without its own install name.
-dependencies_of() {
-    local file="$1" own_id
-    own_id="$(otool "${otool_arch[@]}" -D "$file" | sed -n '2p')"
-    otool "${otool_arch[@]}" -L "$file" \
-        | sed -n 's/^[[:space:]]\{1,\}\([^ ]*\) (compatibility.*/\1/p' \
-        | while IFS= read -r dependency; do
-              [ "$dependency" = "$own_id" ] && continue
-              is_system_library "$dependency" && continue
-              printf '%s\n' "$dependency"
-          done | sort -u
-}
-
-# Resolve an otool dependency line to a file in the prefix.
-resolve() {
-    local dependency="$1" relative directory
-    case "$dependency" in
-        @rpath/*)
-            relative="${dependency#@rpath/}"
-            for directory in "$prefix_lib" "${prefix_lib}/.." "${prefix_lib}/gstreamer-1.0"; do
-                if [ -f "${directory}/${relative}" ]; then
-                    (cd "$(dirname "${directory}/${relative}")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$relative")")
-                    return 0
-                fi
-            done
-            die "cannot resolve ${dependency} in ${prefix}" ;;
-        "${prefix}"/*)
-            printf '%s\n' "$dependency" ;;
-        *)
-            die "unexpected non-system dependency ${dependency}; only the GStreamer framework's @rpath libraries can be collected" ;;
+# Fails unless the file has a slice for $ARCH.
+require_arch() {
+    local archs
+    archs="$(lipo -archs "$1")" || die "lipo cannot read $1"
+    case " $archs " in
+        *" $ARCH "*) ;;
+        *) die "$1 has no $ARCH code (it has: $archs)" ;;
     esac
 }
 
-executable_dependencies="$(dependencies_of "$executable")"
-marker_name=".gstreamer-${gstreamer_version}"
-marker_contents="$(
-    printf 'gstreamer %s\narchitectures %s\n' "$gstreamer_version" "$architectures"
-    printf 'plugin %s\n' $plugins
-    printf 'dependency %s\n' $executable_dependencies
-)"
+# Sets DEPS to the non-system dependencies of $1 (its own install name excluded).
+DEPS=()
+dependencies_of() {
+    local file="$1" id_listing own listing line dependency
+    require_arch "$file"
+    id_listing="$(otool -arch "$ARCH" -D "$file")" || die "otool -D failed on $file"
+    own="$(sed -n '2p' <<<"$id_listing")"
+    listing="$(otool -arch "$ARCH" -L "$file")" || die "otool -L failed on $file"
+    DEPS=()
+    while IFS= read -r line; do
+        case "$line" in
+            $'\t'*) ;;
+            *) continue ;;
+        esac
+        dependency="${line#$'\t'}"
+        dependency="${dependency% (compatibility version*}"
+        [ "$dependency" = "$own" ] && continue
+        is_system_library "$dependency" && continue
+        DEPS+=("$dependency")
+    done <<<"$listing"
+}
 
-if [ -f "${destination}/${marker_name}" ] \
-    && [ "$(cat "${destination}/${marker_name}")" = "$marker_contents" ]; then
-    say "ok: GStreamer libraries in ${destination} are up to date"
-    exit 0
+# Sets RESOLVED to the file in the prefix that a dependency line names.
+RESOLVED=""
+resolve() {
+    local dependency="$1" relative directory parent
+    case "$dependency" in
+        @rpath/*)
+            relative="${dependency#@rpath/}"
+            for directory in "$PREFIX_LIB" "$PREFIX_LIB/.." "$PREFIX_LIB/gstreamer-1.0"; do
+                if [ -f "$directory/$relative" ]; then
+                    parent="$(cd -- "$(dirname -- "$directory/$relative")" && pwd -P)" \
+                        || die "cannot enter the directory of $directory/$relative"
+                    RESOLVED="$parent/$(basename -- "$relative")"
+                    return 0
+                fi
+            done
+            die "cannot resolve $dependency in $PREFIX"
+            ;;
+        "$PREFIX"/*)
+            RESOLVED="$dependency"
+            ;;
+        *)
+            die "unexpected non-system dependency $dependency; only the GStreamer framework's libraries can be collected"
+            ;;
+    esac
+}
+
+# ── Marker ────────────────────────────────────────────────────────────────
+dependencies_of "$EXECUTABLE"
+EXECUTABLE_DEPS=(${DEPS[@]+"${DEPS[@]}"})
+MARKER=".gstreamer-$GSTREAMER_VERSION"
+
+marker_inputs() {
+    printf 'gstreamer %s\n' "$GSTREAMER_VERSION"
+    printf 'architecture %s\n' "$ARCH"
+    printf 'plugin %s\n' "${PLUGINS[@]}"
+    if [ "${#EXCLUDED_FILES[@]}" -gt 0 ]; then printf 'excluded %s\n' "${EXCLUDED_FILES[@]}"; fi
+    if [ "${#EXECUTABLE_DEPS[@]}" -gt 0 ]; then printf 'dependency %s\n' "${EXECUTABLE_DEPS[@]}"; fi
+}
+
+# The number of files and a digest of their names and contents (marker excluded).
+contents_summary() {
+    local directory="$1" names count digest name
+    names="$(cd -- "$directory" && find . -type f ! -name '.gstreamer-*' | LC_ALL=C sort)" \
+        || die "cannot list $directory"
+    count=0
+    digest="$(
+        while IFS= read -r name; do
+            [ -n "$name" ] || continue
+            shasum -a 256 -- "$directory/$name" | sed "s|  .*|  $name|"
+        done <<<"$names" | shasum -a 256 | cut -d ' ' -f 1
+    )"
+    [ -n "$names" ] && count="$(wc -l <<<"$names" | tr -d ' ')"
+    printf 'files %s\ndigest %s\n' "$count" "$digest"
+}
+
+check_notices() {
+    if [ "${MERCURY_GSTREAMER_UPDATE_NOTICES:-0}" = 1 ]; then
+        bash "$REPOSITORY/scripts/macos/gstreamer-notices.sh" --write "$PREFIX" "$1"
+    else
+        bash "$REPOSITORY/scripts/macos/gstreamer-notices.sh" --check "$PREFIX" "$1" \
+            || die "THIRD-PARTY-NOTICES.md does not list what was collected; rerun with MERCURY_GSTREAMER_UPDATE_NOTICES=1 to regenerate the table, and commit it"
+    fi
+}
+
+INPUTS="$(marker_inputs)"
+BUNDLE_MODE=0
+case "$DESTINATION" in
+    *.app/Contents/MacOS/lib) BUNDLE_MODE=1 ;;
+esac
+if [ "$BUNDLE_MODE" = 1 ]; then
+    if [ -e "$DESTINATION" ] || [ -L "$DESTINATION" ]; then
+        die "$DESTINATION already exists; an application bundle's lib directory is collected once, into a fresh bundle"
+    fi
+elif [ -e "$DESTINATION" ] || [ -L "$DESTINATION" ]; then
+    [ -d "$DESTINATION" ] || die "$DESTINATION exists and is not a directory"
+    markers="$(find "$DESTINATION/" -maxdepth 1 -name '.gstreamer-*' -type f)"
+    [ -n "$markers" ] \
+        || die "$DESTINATION exists but was not made by this script (no .gstreamer-* marker); refusing to replace it"
+    if [ -f "$DESTINATION/$MARKER" ]; then
+        recorded="$(cat "$DESTINATION/$MARKER")"
+        if [ "$recorded" = "$INPUTS"$'\n'"$(contents_summary "$DESTINATION")" ]; then
+            require_no_excluded "$DESTINATION"
+            check_notices "$DESTINATION"
+            say "ok: $DESTINATION is up to date"
+            exit 0
+        fi
+    fi
+    say "$DESTINATION is out of date or damaged; rebuilding it"
 fi
 
-staging="${destination}.partial"
-rm -rf "$staging"
-mkdir -p "$staging"
+STAGING="$DESTINATION.partial"
+rm -rf -- "$STAGING"
+mkdir -p -- "$STAGING"
+trap 'rm -rf -- "$STAGING"' EXIT
 
-pending="$(
-    for dependency in $executable_dependencies; do printf '%s\n' "$dependency"; done
-    for plugin in $plugins; do printf '%s\n' "${prefix_lib}/gstreamer-1.0/lib${plugin}.dylib"; done
-)"
-seen=""
-copied=0
-while [ -n "$pending" ]; do
-    next=""
-    for dependency in $pending; do
-        source_file="$(resolve "$dependency")"
-        [ -f "$source_file" ] || die "${source_file} (needed as ${dependency}) does not exist"
-        name="$(basename "$source_file")"
-        if printf '%s\n' "$seen" | grep -Fqx "$name"; then
+# ── Dependency walk ───────────────────────────────────────────────────────
+PENDING=(${EXECUTABLE_DEPS[@]+"${EXECUTABLE_DEPS[@]}"})
+for plugin in "${PLUGINS[@]}"; do
+    PENDING+=("$PREFIX_LIB/gstreamer-1.0/lib$plugin.dylib")
+done
+SEEN=()
+COPIED=0
+while [ "${#PENDING[@]}" -gt 0 ]; do
+    NEXT=()
+    for dependency in "${PENDING[@]}"; do
+        resolve "$dependency"
+        source_file="$RESOLVED"
+        [ -f "$source_file" ] || die "$source_file (needed as $dependency) does not exist"
+        name="$(basename -- "$source_file")"
+        if [ "${#SEEN[@]}" -gt 0 ] && contains "$name" "${SEEN[@]}"; then
             continue
         fi
-        seen="$(printf '%s\n%s' "$seen" "$name")"
-        if [ -n "$thin_to" ] && lipo "$source_file" -verify_arch "$thin_to" 2>/dev/null \
-            && [ "$(lipo -archs "$source_file")" != "$thin_to" ]; then
-            lipo -thin "$thin_to" "$source_file" -output "${staging}/${name}"
+        SEEN+=("$name")
+        require_arch "$source_file"
+        archs="$(lipo -archs "$source_file")" || die "lipo cannot read $source_file"
+        if [ "$archs" = "$ARCH" ]; then
+            cp -- "$source_file" "$STAGING/$name"
         else
-            cp "$source_file" "${staging}/${name}"
+            lipo -thin "$ARCH" "$source_file" -output "$STAGING/$name" \
+                || die "lipo could not thin $source_file to $ARCH"
         fi
-        chmod u+w "${staging}/${name}"
-        copied=$((copied + 1))
-        next="$(printf '%s\n%s' "$next" "$(dependencies_of "$source_file")")"
+        chmod u+w "$STAGING/$name"
+        COPIED=$((COPIED + 1))
+        dependencies_of "$source_file"
+        NEXT+=(${DEPS[@]+"${DEPS[@]}"})
     done
-    pending="$(printf '%s\n' "$next" | sed '/^$/d' | sort -u)"
+    PENDING=(${NEXT[@]+"${NEXT[@]}"})
 done
 
-printf '%s\n' "$marker_contents" > "${staging}/${marker_name}"
-rm -rf "$destination"
-mv "$staging" "$destination"
-say "ok: collected ${copied} GStreamer libraries into ${destination} ($(du -sh "$destination" | cut -f 1))"
+require_no_excluded "$STAGING"
+check_notices "$STAGING"
+if [ "$BUNDLE_MODE" = 0 ]; then
+    {
+        printf '%s\n' "$INPUTS"
+        contents_summary "$STAGING"
+    } >"$STAGING/$MARKER"
+fi
+rm -rf -- "$DESTINATION"
+mv -- "$STAGING" "$DESTINATION"
+trap - EXIT
+summary="$(du -sh -- "$DESTINATION" | cut -f 1)"
+say "ok: collected $COPIED GStreamer libraries into $DESTINATION ($summary)"
