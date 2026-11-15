@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Colour-scheme opt-in</title>
+<style>
+  /* Only sizes are set here, never a colour: every colour comes from the used colour scheme. */
+  body { margin: 8px; font: 14px sans-serif; }
+  .block { font: 32px monospace; margin: 0; }
+  iframe { width: 300px; height: 150px; margin: 4px; }
+</style>
+</head>
+<body>
+<!-- This document opts in with the meta tag "light dark": standard rendering is dark text on a
+     light page when the system is light, and light text on a dark page when it is dark.
+     Each frame opts in another way; its label gives the standard rendering. -->
+<p class="block">████████</p>
+<p>meta "light dark": follows the system</p>
+<p><input value="████████"> <button>████████</button> <a href="https://unvisited.invalid/">link ████</a></p>
+<iframe title="property dark" srcdoc="<!doctype html><style>:root{color-scheme:dark}</style><p style='font:32px monospace;margin:0'>████████</p><p>property dark: always dark</p>"></iframe>
+<iframe title="property light dark" srcdoc="<!doctype html><style>:root{color-scheme:light dark}</style><p style='font:32px monospace;margin:0'>████████</p><p>property light dark: follows the system</p>"></iframe>
+<br>
+<iframe title="meta dark" srcdoc="<!doctype html><meta name='color-scheme' content='dark'><p style='font:32px monospace;margin:0'>████████</p><p>meta dark: always dark</p>"></iframe>
+<iframe title="property light" srcdoc="<!doctype html><style>:root{color-scheme:light}</style><p style='font:32px monospace;margin:0'>████████</p><p>property light: always light</p>"></iframe>
+<br>
+<!-- Known limits in Mercury (see the dark-mode lane report): only the body has a background
+     here, so the frame's margins show the dark Canvas colour instead of #123456; and an opt-in
+     through the meta tag alone is not seen by the style system, so the text stays black. -->
+<iframe title="property dark, body background only" srcdoc="<!doctype html><style>:root{color-scheme:dark} body{background:#123456}</style><p style='font:32px monospace;margin:0'>████████</p><p>property dark, body #123456: light on #123456</p>"></iframe>
+<iframe title="meta light dark, dark background from a media query" srcdoc="<!doctype html><meta name='color-scheme' content='light dark'><style>@media (prefers-color-scheme: dark){body{background:#111111}}</style><p style='font:32px monospace;margin:0'>████████</p><p>meta light dark + dark-query background: light on #111111 when dark</p>"></iframe>
+</body>
+</html>

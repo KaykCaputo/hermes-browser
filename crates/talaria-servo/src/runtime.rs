@@ -19,6 +19,7 @@ use url::Url;
 use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
+use crate::page_defaults::page_defaults_user_content;
 use crate::screen::ScreenMetrics;
 use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
 use crate::{ServoWebView, ServoWebViewError};
@@ -90,8 +91,12 @@ pub struct ServoRuntime {
     redraw_waker: EventLoopWaker,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
-    /// Declared after `inner`, so it is dropped after this handle to Servo. Every web view's
-    /// delegate holds a clone too; see `AfterEngineCleanup`.
+    /// The user-origin style sheet every web view shares. Servo's `UserContentManager` holds a
+    /// handle to Servo of its own, so this field must stay before `after_engine_cleanup`.
+    user_content: Rc<servo::UserContentManager>,
+    /// Declared after `inner` and `user_content`, the two fields that hold a handle to Servo,
+    /// so it is dropped after the last of them. Every web view's delegate holds a clone too;
+    /// see `AfterEngineCleanup`.
     after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }
 
@@ -136,12 +141,14 @@ impl ServoRuntime {
         inner.set_delegate(Rc::new(BrowserServoDelegate {
             content_blocker: Rc::clone(&content_blocker),
         }));
+        let user_content = page_defaults_user_content(&inner);
 
         Self {
             inner,
             redraw_waker,
             content_blocker,
             screen_metrics: Rc::default(),
+            user_content,
             after_engine_cleanup,
         }
     }
@@ -175,6 +182,7 @@ impl ServoRuntime {
             .url(initial_url)
             .hidpi_scale_factor(Scale::new(scale_factor))
             .delegate(delegate)
+            .user_content_manager(Rc::clone(&self.user_content))
             .build();
 
         for event in new_web_view_feedback(inner.cursor(), inner.status_text()) {

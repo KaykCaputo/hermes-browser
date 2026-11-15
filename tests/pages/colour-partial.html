@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Partly coloured pages</title>
+<style>
+  /* Only the frames are styled here; each framed document sets as much colour as its label says. */
+  body { margin: 8px; font: 14px sans-serif; }
+  iframe { width: 300px; height: 150px; border: 1px solid #808080; margin: 4px; }
+</style>
+</head>
+<body>
+<!-- Four documents in iframes. Each sets only the text colour, only the background, both, or
+     neither; the default fills in the rest. Standard rendering for a page that has not opted in
+     to a colour scheme: the missing text colour is black and the missing background is white
+     (inside an iframe the missing background is transparent and the white of this page shows). -->
+<iframe title="text only" srcdoc="<!doctype html><body style='color:#0000c0;margin:8px'><p style='font:32px monospace;margin:0'>████████</p><p style='margin:0'>text only (#0000c0)</p>"></iframe>
+<iframe title="background only" srcdoc="<!doctype html><body style='background:#ffe0a0;margin:8px'><p style='font:32px monospace;margin:0'>████████</p><p style='margin:0'>background only (#ffe0a0)</p>"></iframe>
+<br>
+<iframe title="both" srcdoc="<!doctype html><body style='color:#ffff00;background:#003000;margin:8px'><p style='font:32px monospace;margin:0'>████████</p><p style='margin:0'>both (#ffff00 on #003000)</p>"></iframe>
+<iframe title="neither" srcdoc="<!doctype html><body style='margin:8px'><p style='font:32px monospace;margin:0'>████████</p><p style='margin:0'>neither</p>"></iframe>
+</body>
+</html>
