@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury animation test page</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; font: 24px sans-serif; }
+  .track { position: fixed; left: 0; right: 0; top: 120px; height: 120px; }
+  .box {
+    position: absolute; left: 0; top: 0; width: 120px; height: 120px;
+    background: #ff0000; animation: slide 2s linear infinite alternate;
+  }
+  .spinner {
+    position: fixed; left: 50%; top: 300px; width: 160px; height: 160px; margin-left: -80px;
+    background: linear-gradient(90deg, #0000ff 50%, #00ff00 50%);
+    animation: spin 1s linear infinite;
+  }
+  #counter { position: fixed; left: 16px; top: 16px; }
+  @keyframes slide { from { transform: translateX(0); } to { transform: translateX(600px); } }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div id="counter">frame 0</div>
+  <div class="track"><div class="box"></div></div>
+  <div class="spinner"></div>
+  <script>
+    const counter = document.getElementById("counter");
+    let frames = 0;
+    function tick() {
+      frames += 1;
+      counter.textContent = "frame " + frames;
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

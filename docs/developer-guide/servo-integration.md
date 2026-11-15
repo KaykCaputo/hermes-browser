@@ -31,6 +31,25 @@ Servo owns a dedicated offscreen Surfman context. On Linux, Mercury copies the c
 
 The Linux bridge requires Slint's Vulkan WGPU backend. The transfer stays on the GPU and explicitly waits for the OpenGL copy to finish before Slint samples the texture, preventing partially updated frames.
 
+### Frame bridges
+
+The bridges live in `apps/mercury-desktop/src/rendering/`. All of them give Slint an `Rgba8Unorm` WGPU texture or a pixel buffer through the same two calls, `BrowserRenderingContext::new(size, device, queue)` and `current_frame_as_image(device)`.
+
+| File | Platform | Role |
+|---|---|---|
+| `surfman.rs` | Linux, macOS | The Surfman OpenGL context, its swap chain, and Servo's `RenderingContext` trait. |
+| `vulkan.rs` | Linux | Vulkan external memory, filled by an OpenGL blit. |
+| `metal.rs` | macOS | IOSurface → Metal → one WGPU pass, with an OpenGL read-back fallback. |
+| `software.rs` | other platforms | Servo's `SoftwareRenderingContext` with a CPU read-back. |
+
+On macOS, Surfman renders Servo's frames with hardware OpenGL into an IOSurface. After Servo paints, Mercury waits for OpenGL to finish (`glFinish`), unbinds the surface, wraps its IOSurface as a `BGRA8Unorm` Metal texture on Slint's own Metal device, and runs one small render pass that flips the image vertically and writes the `Rgba8Unorm` texture Slint draws. No pixel crosses the CPU. The pipeline for that pass is created once per rendering context.
+
+If Slint's WGPU device is not a Metal device, or an import fails, Mercury logs the reason once at `warn` level and from then on reads each frame back with `glReadPixels` from the same OpenGL context. Web views are not recreated. Setting `MERCURY_FORCE_FRAME_READBACK=1` selects the read-back path from the start. The active path and the OpenGL version and renderer are logged once at `info` level when the context is created. With `RUST_LOG=mercury_browser=debug`, the time spent importing each frame is summarised (count, median, 95th percentile) every few hundred frames and when the context is dropped.
+
+If resizing Servo's surface fails, the bridge logs it once and keeps the previous size, which still matches the surface Servo draws into; Slint stretches that frame to the new viewport. The resize is not retried by itself: the desktop resizes the web view only when the viewport size or the active tab changes, so the next attempt happens with the next window resize or tab switch.
+
+The Linux and macOS bridges follow the structure of Slint's Servo example (`examples/servo/src/webview/rendering_context/` in https://github.com/slint-ui/slint, tag `v1.17.1`, MIT). `metal.rs` is adapted from that example's `metal.rs`; see `THIRD-PARTY-NOTICES.md` and `LICENSES/MIT-slint-examples.txt`.
+
 This callback is the important distinction between a page that loaded and one that became visible. URL or title events alone do not prove that rendering succeeded.
 
 ## Input translation
