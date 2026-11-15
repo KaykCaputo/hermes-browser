@@ -128,11 +128,17 @@
     }
 
     // Classifies the colour band at the top of each test clip: red for 0-2 s, blue for 2-4 s.
+    // A read-back the page may not do (a file:// clip taints the canvas) gives name "unreadable",
+    // so that only the colour check fails and the timing checks still run.
     function bandColour(video) {
-      context.drawImage(video, 0, 0, 320, 240);
-      const [r, g, b] = context.getImageData(160, 40, 1, 1).data;
-      const name = r > 150 && g < 90 && b < 90 ? "red" : b > 150 && r < 90 && g < 90 ? "blue" : "other";
-      return { name, rgb: r + "," + g + "," + b };
+      try {
+        context.drawImage(video, 0, 0, 320, 240);
+        const [r, g, b] = context.getImageData(160, 40, 1, 1).data;
+        const name = r > 150 && g < 90 && b < 90 ? "red" : b > 150 && r < 90 && g < 90 ? "blue" : "other";
+        return { name, rgb: r + "," + g + "," + b };
+      } catch (error) {
+        return { name: "unreadable", rgb: error.message };
+      }
     }
 
     async function videoChecks(id, url, duration) {
