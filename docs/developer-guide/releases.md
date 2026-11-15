@@ -1,11 +1,11 @@
 ---
 title: Releases
-description: Build and publish the Mercury Browser Linux preview archive.
+description: Build and publish the Mercury Browser Linux preview archive and the macOS application and disk image.
 ---
 
 # Releases
 
-Mercury publishes a Linux preview archive from an Ubuntu 22.04 GitHub-hosted runner. It is a portable test artifact, not a signed installer.
+Mercury publishes a Linux preview archive from an Ubuntu 22.04 GitHub-hosted runner. It is a portable test artifact, not a signed installer. On macOS (Apple Silicon) the same version is packaged as `Mercury Browser.app` inside a disk image; see [Package for macOS](#package-for-macos).
 
 ## Build a Linux package locally
 
@@ -27,6 +27,104 @@ Change `PROJECT_VERSION` when testing another version:
 ```bash
 make package-linux PROJECT_VERSION=0.3.0
 ```
+
+## Package for macOS
+
+Run these on an Apple Silicon Mac with the Xcode command-line tools installed (`xcode-select --install`); full Xcode is not needed.
+
+```bash
+make app-macos       # release build, then dist/Mercury Browser.app
+make package-macos   # the same, plus the disk image and its checksum
+```
+
+Both targets run `scripts/macos/bundle.sh`, which can also be called directly on an existing build:
+
+```bash
+scripts/macos/bundle.sh [--binary target/release/mercury-browser] [--out dist] \
+    [--identity -] [--gstreamer-prefix <dir>] [--dmg]
+```
+
+The script writes only inside the output directory and can be re-run; it rebuilds the bundle from scratch each time and removes it again if any step fails. It produces:
+
+```text
+dist/Mercury Browser.app/Contents/
+  Info.plist            from apps/mercury-desktop/resources/macos/Info.plist.in
+  PkgInfo
+  MacOS/mercury-browser the release executable (arm64 only)
+  MacOS/lib/            media libraries, when they are bundled (see below)
+  Resources/AppIcon.icns
+  Resources/LICENSE
+  Resources/THIRD-PARTY-NOTICES.md
+  _CodeSignature/
+dist/mercury-browser-0.2.0-macos-arm64.dmg         with --dmg
+dist/mercury-browser-0.2.0-macos-arm64.dmg.sha256
+```
+
+The version comes from `[workspace.package]` in `Cargo.toml` and `LSMinimumSystemVersion` from `MACOSX_DEPLOYMENT_TARGET` in `.cargo/config.toml`. The script refuses a binary that is not arm64 or that was linked for a different minimum macOS version than the configuration says.
+
+### Info.plist in the executable
+
+`apps/mercury-desktop/build.rs` fills the same `Info.plist.in` when building for macOS and `src/platform_macos.rs` places it in the executable's `__TEXT,__info_plist` section. A binary started from `target/release/` therefore has the application name and HiDPI behaviour of the bundle. Check it with:
+
+```bash
+otool -s __TEXT __info_plist target/release/mercury-browser | head -3
+```
+
+### Signing
+
+Signing goes inside out and never uses `codesign --deep`: every Mach-O file in `Contents/MacOS/lib`, then the executable, then the bundle. The executable is signed with the hardened runtime (`--options runtime`) and `apps/mercury-desktop/resources/macos/entitlements.plist`, which grants only `com.apple.security.cs.allow-jit` and `com.apple.security.cs.allow-unsigned-executable-memory`. SpiderMonkey needs both to run JavaScript under the hardened runtime; without them no page loads.
+
+The default identity is `-`, an ad-hoc signature: valid for running on the machine that built it, but not trusted by Gatekeeper on other Macs. Set `--identity` or `MERCURY_SIGN_IDENTITY` to sign with a certificate from your keychain (`security find-identity -v -p codesigning` lists them). A real identity also gets a secure timestamp (`--timestamp`), and the disk image is signed too.
+
+Check a bundle with:
+
+```bash
+codesign --verify --deep --strict --verbose=2 "dist/Mercury Browser.app"
+codesign -dv "dist/Mercury Browser.app"                    # flags=…(runtime)
+codesign -d --entitlements - "dist/Mercury Browser.app"
+spctl --assess --type execute -vv "dist/Mercury Browser.app" # "rejected" for ad hoc
+"dist/Mercury Browser.app/Contents/MacOS/mercury-browser" --screenshot /path/to/js.png \
+    "file://$PWD/tests/pages/js.html"                        # every line ends in PASS
+```
+
+### Media libraries
+
+Servo loads its GStreamer libraries from `Contents/MacOS/lib`, found through the executable's `@executable_path/lib/` rpath (the script adds it when the build did not). When `scripts/macos/collect-gstreamer.sh` exists and a GStreamer prefix is given with `--gstreamer-prefix` or `MERCURY_GSTREAMER_PREFIX`, the script runs `collect-gstreamer.sh <prefix> "Contents/MacOS/lib"` before signing. Otherwise it prints that media libraries were not bundled.
+
+The hardened runtime only lets a process load libraries signed by the same team, and ad-hoc signatures have no team. An ad-hoc bundle with libraries in `Contents/MacOS/lib` would therefore fail at launch, so the script stops with an error in that case: bundle media libraries only with a Developer ID identity.
+
+### Developer ID and notarisation
+
+To publish a build that opens without warnings, a release manager with an Apple Developer ID Application certificate in the keychain signs with it:
+
+```bash
+make package-macos MERCURY_SIGN_IDENTITY="Developer ID Application: NAME (TEAMID)"
+```
+
+The bundle then carries the Developer ID signature, the hardened runtime, the entitlements and a secure timestamp, which is what notarisation requires. Submit the disk image and staple the ticket to it (credentials are stored once with `xcrun notarytool store-credentials mercury-notary`):
+
+```bash
+xcrun notarytool submit dist/mercury-browser-0.2.0-macos-arm64.dmg --keychain-profile mercury-notary --wait
+xcrun stapler staple dist/mercury-browser-0.2.0-macos-arm64.dmg
+```
+
+Stapling changes the disk image, so write the checksum again afterwards:
+
+```bash
+(cd dist && shasum -a 256 mercury-browser-0.2.0-macos-arm64.dmg > mercury-browser-0.2.0-macos-arm64.dmg.sha256)
+```
+
+Notarisation has not been run for Mercury yet; current macOS builds are ad hoc.
+
+### Application icon
+
+`AppIcon.icns` and the PNGs in `apps/mercury-desktop/resources/macos/AppIcon.iconset/` are generated from `apps/mercury-desktop/resources/mercury-browser.svg` and committed, so packaging does not need to render them. After changing the logo, regenerate both with:
+
+```bash
+scripts/macos/make-icns.sh
+```
+
+It compiles `scripts/macos/render-icon.swift`, which draws the logo onto a rounded square following Apple's macOS icon grid at each of the ten iconset sizes, then runs `iconutil`.
 
 ## Continuous integration
 
