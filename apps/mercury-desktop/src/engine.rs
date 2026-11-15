@@ -16,6 +16,10 @@ use talaria_servo::{
 };
 
 use crate::rendering::BrowserRenderingContext;
+use crate::shutdown::{
+    ENGINE_SHUTDOWN_TIMEOUT, EngineParts, Watchdog, drop_catching_panic, release_in_order,
+    settle_period, spin_for,
+};
 use crate::ui_sync::sync_ui;
 
 pub(crate) const MAX_COMMANDS_PER_FRAME: usize = 128;
@@ -34,7 +38,8 @@ thread_local! {
 /// keep loading while the window is covered and the GPU surface skips frames.
 struct Engine {
     window: slint::Weak<MainWindow>,
-    state: RefCell<EngineState>,
+    /// `None` once `shut_down_engine` has run; every later pump or render then does nothing.
+    state: RefCell<Option<EngineState>>,
     bootstrap_failure_logged: Cell<bool>,
 }
 
@@ -50,6 +55,8 @@ struct EngineState {
     visible_tab_id: Option<TabId>,
     current_viewport_size: Option<ViewportSize>,
     current_scale_factor: Option<f32>,
+    /// Whether shutdown has content processes (and WebGL contexts) to wait for.
+    web_view_created: bool,
 }
 
 enum GraphicsStatus {
@@ -57,6 +64,8 @@ enum GraphicsStatus {
     Missing,
     /// The engine state is borrowed; nothing can be concluded right now.
     Busy,
+    /// The engine has been shut down; there is nothing left to set up.
+    ShutDown,
 }
 
 pub(crate) fn connect_servo_runtime(
@@ -71,7 +80,7 @@ pub(crate) fn connect_servo_runtime(
 
     let engine = Rc::new(Engine {
         window: window.as_weak(),
-        state: RefCell::new(EngineState {
+        state: RefCell::new(Some(EngineState {
             runtime: ServoRuntime::new(event_loop_waker, runtime_options),
             controller,
             web_view_focused,
@@ -82,7 +91,8 @@ pub(crate) fn connect_servo_runtime(
             visible_tab_id: None,
             current_viewport_size: None,
             current_scale_factor: None,
-        }),
+            web_view_created: false,
+        })),
         bootstrap_failure_logged: Cell::new(false),
     });
     ENGINE.with(|current| *current.borrow_mut() = Rc::downgrade(&engine));
@@ -94,6 +104,34 @@ pub(crate) fn connect_servo_runtime(
         .set_rendering_notifier(move |state, graphics_api| {
             rendering_engine.on_rendering_state(state, graphics_api);
         })
+}
+
+/// Shuts the engine down in order. Call once, after the event loop has ended and before the
+/// window is dropped: otherwise the engine is dropped with the rendering notifier, from inside
+/// the renderer's own destruction, after the device Servo renders through has gone.
+///
+/// If Servo has not finished shutting down within `ENGINE_SHUTDOWN_TIMEOUT`, the process exits
+/// with `exit_code_if_stuck` rather than hang.
+pub(crate) fn shut_down_engine(exit_code_if_stuck: u8) {
+    // Queued re-pumps and Servo's waker reach the engine only through this; from now on they
+    // find nothing.
+    let Some(engine) = ENGINE.with(|current| current.replace(Weak::new()).upgrade()) else {
+        return;
+    };
+    // The bootstrap timers and the rendering notifier see `None` from here on and do nothing.
+    let Some(state) = engine.state.borrow_mut().take() else {
+        return;
+    };
+    let window = engine.window.upgrade();
+    if let Some(window) = &window {
+        // Quitting looks instant while the engine winds down. `run()` has usually hidden the
+        // window already. The state is taken first because hiding can tear rendering down
+        // (Wayland destroys the window), and that teardown must not touch the engine now.
+        if let Err(error) = window.hide() {
+            log::warn!("could not hide the window before shutting down: {error}");
+        }
+    }
+    state.shut_down(window.as_ref(), exit_code_if_stuck);
 }
 
 fn pump_after_wake() {
@@ -121,6 +159,7 @@ fn schedule_graphics_bootstrap(engine: Weak<Engine>, delay: Duration) {
                 strong_engine.bootstrap_failure_logged.set(false);
                 return;
             }
+            GraphicsStatus::ShutDown => return,
             GraphicsStatus::Busy => {
                 schedule_graphics_bootstrap(engine, GRAPHICS_BOOTSTRAP_DELAY);
                 return;
@@ -139,6 +178,7 @@ fn schedule_graphics_bootstrap(engine: Weak<Engine>, delay: Duration) {
                 strong_engine.bootstrap_failure_logged.set(false);
                 return;
             }
+            GraphicsStatus::ShutDown => return,
             GraphicsStatus::Busy => {}
             GraphicsStatus::Missing => {
                 if !strong_engine.bootstrap_failure_logged.replace(true) {
@@ -161,9 +201,10 @@ fn schedule_graphics_bootstrap(engine: Weak<Engine>, delay: Duration) {
 
 impl Engine {
     fn graphics_status(&self) -> GraphicsStatus {
-        match self.state.try_borrow() {
-            Ok(state) if state.rendering_context.is_some() => GraphicsStatus::Ready,
-            Ok(_) => GraphicsStatus::Missing,
+        match self.state.try_borrow().as_deref() {
+            Ok(Some(state)) if state.rendering_context.is_some() => GraphicsStatus::Ready,
+            Ok(Some(_)) => GraphicsStatus::Missing,
+            Ok(None) => GraphicsStatus::ShutDown,
             Err(_) => GraphicsStatus::Busy,
         }
     }
@@ -177,6 +218,9 @@ impl Engine {
             log::debug!("skipping a re-entrant engine pump");
             return;
         };
+        let Some(state) = state.as_mut() else {
+            return;
+        };
         state.pump(&window);
     }
 
@@ -184,8 +228,11 @@ impl Engine {
         let Some(window) = self.window.upgrade() else {
             return;
         };
-        let Ok(mut state) = self.state.try_borrow_mut() else {
+        let Ok(mut state_slot) = self.state.try_borrow_mut() else {
             log::warn!("skipping {rendering_state:?}: the engine is busy");
+            return;
+        };
+        let Some(state) = state_slot.as_mut() else {
             return;
         };
 
@@ -201,7 +248,7 @@ impl Engine {
             }
             RenderingState::RenderingTeardown => {
                 state.tear_down_rendering(&window);
-                drop(state);
+                drop(state_slot);
                 // A later setup needs bootstrapping again if the window is covered by then.
                 let engine = ENGINE.with(|current| current.borrow().clone());
                 schedule_graphics_bootstrap(engine, GRAPHICS_BOOTSTRAP_DELAY);
@@ -316,6 +363,7 @@ impl EngineState {
                 Ok(created_web_view) => {
                     created_web_view.hide();
                     self.web_views.insert(tab_id, created_web_view);
+                    self.web_view_created = true;
                     self.event_receivers.insert(tab_id, event_receiver);
                 }
                 Err(error) => {
@@ -398,15 +446,73 @@ impl EngineState {
         }
     }
 
+    /// Slint is giving up its device (the window is suspended or its renderer destroyed). The
+    /// runtime stays, so this never starts Servo's shutdown from inside the renderer; the web
+    /// views close while the context and the device they paint through are still alive.
     fn tear_down_rendering(&mut self, window: &MainWindow) {
         window.set_web_view_texture(Image::default());
-        self.web_views.clear();
-        self.event_receivers.clear();
-        drop(self.rendering_context.take());
-        drop(self.wgpu_device.take());
+        release_in_order(
+            EngineParts {
+                web_views: (
+                    std::mem::take(&mut self.web_views),
+                    std::mem::take(&mut self.event_receivers),
+                ),
+                runtime: None::<ServoRuntime>,
+                rendering_context: self.rendering_context.take(),
+                wgpu_device: self.wgpu_device.take(),
+            },
+            drop,
+        );
         self.visible_tab_id = None;
         self.current_viewport_size = None;
         self.current_scale_factor = None;
+    }
+
+    /// Closes the web views, then the runtime, then the rendering context, then the device.
+    /// The order is spelled out in `release_in_order` rather than left to field order.
+    fn shut_down(self, window: Option<&MainWindow>, exit_code_if_stuck: u8) {
+        if let Some(window) = window {
+            // The window's texture was imported from Servo's frames; let it go first.
+            window.set_web_view_texture(Image::default());
+        }
+        let EngineState {
+            runtime,
+            rendering_context,
+            wgpu_device,
+            web_views,
+            event_receivers,
+            web_view_created,
+            ..
+        } = self;
+
+        release_in_order(
+            EngineParts {
+                web_views: (web_views, event_receivers),
+                runtime: Some(runtime),
+                rendering_context,
+                wgpu_device,
+            },
+            |runtime| {
+                let watchdog = Watchdog::start(ENGINE_SHUTDOWN_TIMEOUT, move || {
+                    log::error!(
+                        "Servo did not shut down within {} seconds; exiting without it",
+                        ENGINE_SHUTDOWN_TIMEOUT.as_secs()
+                    );
+                    std::process::exit(i32::from(exit_code_if_stuck));
+                });
+                // Let content processes release their WebGL contexts before the constellation
+                // is told to exit; see `WEBGL_SETTLE_PERIOD` for the race this works around.
+                spin_for(settle_period(web_view_created), || {
+                    runtime.spin_event_loop()
+                });
+                // Dropping the last `Servo` handle exits the constellation and the WebGL
+                // thread and waits for them.
+                if !drop_catching_panic(runtime) {
+                    log::error!("the engine did not shut down cleanly (it panicked while exiting)");
+                }
+                watchdog.disarm();
+            },
+        );
     }
 }
 

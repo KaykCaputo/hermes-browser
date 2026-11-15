@@ -19,6 +19,10 @@ A new model tab causes the desktop layer to create a Servo WebView at `about:bla
 
 Only the active WebView is visible and unthrottled. Hidden tabs remain alive but receive Servo's throttled state.
 
+## Shutdown
+
+After the event loop ends and before the window is dropped, `shut_down_engine` (in `apps/mercury-desktop/src/engine.rs`) stops everything that could pump or render. It hides the window, then closes the WebViews and drops the runtime, then the rendering context, then the WGPU device. In Servo 0.8, closing a WebView and then immediately dropping the last `Servo` handle causes a race. The content process needs time to send `RemoveContext` for each WebGL context. If the constellation exits first, the WebGL thread's `recv()` returns an error, and its loop (`servo-webgl-0.8.0/webgl_thread.rs:319-327`) ends before `WebGLMsg::Exit` arrives. The thread then drops contexts that are still alive, and surfman panics. Mercury works around this by spinning Servo for `WEBGL_SETTLE_PERIOD` (500 ms) between the two steps, and catches a panic from the runtime drop as a last guard. The real fix is for the WebGL thread to destroy leftover contexts when its channel closes, which needs a Servo patch.
+
 ## Frame delivery
 
 Servo calls `notify_new_frame_ready` on the WebView delegate. Mercury records the first-frame milestone and marks the tab's frame-ready signal. Servo's runtime waker schedules the native redraw, and the desktop then calls `paint()` once for that frame without issuing a duplicate wake.
