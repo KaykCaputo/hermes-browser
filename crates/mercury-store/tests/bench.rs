@@ -11,12 +11,15 @@
 //! skewed vocabulary. The visits end three weeks before "now", so every stored score is stale.
 //!
 //! It then times `suggest` for the first keystrokes people type (`h` … `https`, `w` … `www`,
-//! `c` … `com`), a common path word, common and rare title words, an 8-character word and an
-//! input that matches nothing. The inputs are interleaved, one call each per round as
-//! successive keystrokes would arrive, for 50 rounds; it prints the median and the worst call
-//! per input (and the 90th percentile, to tell a slow call from a descheduled one). It does so with every stored score stale and again after refreshing them. It
-//! also times `record_visit` and `refresh_frecencies(_, 1000)` with everything stale,
-//! everything fresh and one page in a thousand stale, and prints the database size.
+//! `c` … `com`), a common path word, common and rare title words, an 8-character word, an
+//! input that matches nothing, a pasted URL and a pasted block of 60,000 bytes. The inputs are
+//! interleaved, one call each per round as successive keystrokes would arrive, for 50 rounds,
+//! with `limit` 10 and with `MAX_SUGGESTIONS`. It prints the first round on its own (cold
+//! caches) and the median, 90th percentile and worst of the other rounds, per input: the
+//! percentile tells a slow call from a descheduled one. It does so with every stored score
+//! stale and again after refreshing them. It also times `record_visit` and
+//! `refresh_frecencies(_, 1000)` with everything stale, everything fresh and one page in a
+//! thousand stale, and prints the database size.
 //!
 //! With `MERCURY_BENCH_DB=<path>` the database is kept at that path (delete it before a run).
 
@@ -270,24 +273,39 @@ fn summary3(samples: &mut [Duration]) -> (String, String, String) {
 }
 
 fn time_suggestions(store: &Store, inputs: &[(String, String)], label: &str) {
-    let mut samples: Vec<Vec<Duration>> = vec![Vec::new(); inputs.len()];
-    let mut results = vec![0; inputs.len()];
-    for _ in 0..ROUNDS {
-        for (i, (_, input)) in inputs.iter().enumerate() {
-            let start = Instant::now();
-            results[i] = store.suggest(input, 10, NOW).unwrap().len();
-            samples[i].push(start.elapsed());
+    for limit in [10, mercury_store::MAX_SUGGESTIONS] {
+        let mut first = vec![Duration::ZERO; inputs.len()];
+        let mut samples: Vec<Vec<Duration>> = vec![Vec::new(); inputs.len()];
+        let mut results = vec![0; inputs.len()];
+        for round in 0..ROUNDS {
+            for (i, (_, input)) in inputs.iter().enumerate() {
+                let start = Instant::now();
+                results[i] = store.suggest(input, limit, NOW).unwrap().len();
+                let elapsed = start.elapsed();
+                if round == 0 {
+                    first[i] = elapsed;
+                } else {
+                    samples[i].push(elapsed);
+                }
+            }
         }
-    }
-    println!("\n{label}\n");
-    println!("| input | median ms | p90 ms | worst ms | results |");
-    println!("| --- | --- | --- | --- | --- |");
-    for (i, (name, input)) in inputs.iter().enumerate() {
-        let (median, p90, worst) = summary3(&mut samples[i]);
-        println!(
-            "| {name} `{input}` | {median} | {p90} | {worst} | {} |",
-            results[i]
-        );
+        println!("\n{label}, limit {limit} (first round, then rounds 2-{ROUNDS})\n");
+        println!("| input | first ms | median ms | p90 ms | worst ms | results |");
+        println!("| --- | --- | --- | --- | --- | --- |");
+        for (i, (name, input)) in inputs.iter().enumerate() {
+            let (median, p90, worst) = summary3(&mut samples[i]);
+            let shown: String = input.chars().take(40).collect();
+            let shown = if shown.len() < input.len() {
+                format!("{shown}… ({} bytes)", input.len())
+            } else {
+                shown
+            };
+            println!(
+                "| {name} `{shown}` | {:.2} | {median} | {p90} | {worst} | {} |",
+                first[i].as_secs_f64() * 1000.0,
+                results[i]
+            );
+        }
     }
 }
 
@@ -329,6 +347,8 @@ fn bench_suggest_record_and_refresh() {
     inputs.push(("rare title word".into(), data.rare_word.clone()));
     inputs.push(("8-character word".into(), data.long_word.clone()));
     inputs.push(("no match".into(), "zqxjv".into()));
+    inputs.push(("pasted URL".into(), data.pages[0].0.clone()));
+    inputs.push(("pasted block".into(), "lorem ".repeat(10_000)));
     time_suggestions(&store, &inputs, "suggest, every stored score stale");
 
     let mut samples = Vec::new();
