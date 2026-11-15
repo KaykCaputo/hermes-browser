@@ -1,8 +1,12 @@
 [package]
-name = "hermes-desktop"
+name = "mercury-desktop"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[[bin]]
+name = "mercury-browser"
+path = "src/main.rs"
 
 [dependencies]
 ash.workspace = true
@@ -10,8 +14,8 @@ dpi.workspace = true
 euclid.workspace = true
 gleam.workspace = true
 glow.workspace = true
-hermes-ui = { path = "../../crates/hermes-ui" }
 log.workspace = true
+mercury-ui = { path = "../../crates/mercury-ui" }
 servo.workspace = true
 slint.workspace = true
 surfman.workspace = true

@@ -1,11 +1,11 @@
 ---
 title: Testing and Quality
-description: Run Hermes unit, adapter, vendored dependency, formatting, and Clippy checks.
+description: Run Mercury unit, adapter, vendored dependency, formatting, and Clippy checks.
 ---
 
 # Testing and quality
 
-Hermes uses small deterministic tests for browser policy and adapter translation, then reserves manual runs for native integration that needs a real window, GPU, media stack, or website.
+Mercury uses small deterministic tests for browser policy and adapter translation, then reserves manual runs for native integration that needs a real window, GPU, media stack, or website.
 
 ## The standard checks
 
@@ -56,7 +56,7 @@ Desktop tests exercise event routing, bounded command dispatch, shortcuts, key c
 
 ### Vendored dependencies
 
-Each Hermes-specific upstream regression needs a focused test close to the patch. The `gaol` shared-memory test protects the `memfd` and `ftruncate` behavior that originally killed isolated Servo children with `SIGXFSZ`.
+Each Mercury-specific upstream regression needs a focused test close to the patch. The `gaol` shared-memory test protects the `memfd` and `ftruncate` behavior that originally killed isolated Servo children with `SIGXFSZ`.
 
 ## Manual browser checks
 

@@ -117,7 +117,7 @@ jobs:
       - name: Run quality checks
         shell: bash
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/hermes-qa-target
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mercury-qa-target
         run: |
           set -euo pipefail
 
@@ -129,7 +129,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cargo clean --target-dir "${RUNNER_TEMP}/hermes-qa-target"
+          cargo clean --target-dir "${RUNNER_TEMP}/mercury-qa-target"
           df -h /
 
       - name: Build release executable
@@ -140,14 +140,14 @@ jobs:
           cargo build \
             --locked \
             --release \
-            --package hermes-desktop
+            --package mercury-desktop
 
       - name: Verify Linux compatibility
         shell: bash
         run: |
           set -euo pipefail
 
-          executable="target/release/hermes-desktop"
+          executable="target/release/mercury-browser"
           maximum_glibc="GLIBC_2.35"
 
           ldd "${executable}"
@@ -184,8 +184,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          package="hermes-browser-linux-x86_64"
-          executable="target/release/hermes-desktop"
+          package="mercury-browser-linux-x86_64"
+          executable="target/release/mercury-browser"
           output_directory="dist/${package}"
           archive="dist/${package}.tar.gz"
           checksum="${archive}.sha256"
@@ -197,10 +197,10 @@ jobs:
           install \
             -m 0755 \
             "${executable}" \
-            "${output_directory}/hermes-browser"
+            "${output_directory}/mercury-browser"
 
           strip --strip-unneeded \
-            "${output_directory}/hermes-browser"
+            "${output_directory}/mercury-browser"
 
           cp README.md \
             "${output_directory}/README.md"
@@ -228,10 +228,10 @@ jobs:
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: hermes-browser-linux-x86_64
+          name: mercury-browser-linux-x86_64
           path: |
-            dist/hermes-browser-linux-x86_64.tar.gz
-            dist/hermes-browser-linux-x86_64.tar.gz.sha256
+            dist/mercury-browser-linux-x86_64.tar.gz
+            dist/mercury-browser-linux-x86_64.tar.gz.sha256
           if-no-files-found: error
           retention-days: 14
 

@@ -7,12 +7,12 @@ MKDOCS ?= mkdocs
 PYTHON ?= python3
 RUSTUP ?= rustup
 STRIP ?= strip
-APP_PACKAGE ?= hermes-desktop
+APP_PACKAGE ?= mercury-desktop
 ARGS ?=
 RUST_LOG ?= talaria_servo=info,servo=warn
 DIST_DIR ?= dist
-PROJECT_VERSION ?= 0.1.2
-LINUX_PACKAGE_NAME := hermes-browser-v$(PROJECT_VERSION)-linux-x86_64
+PROJECT_VERSION ?= 0.2.0
+LINUX_PACKAGE_NAME := mercury-browser-v$(PROJECT_VERSION)-linux-x86_64
 LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 
 .PHONY: \
@@ -57,8 +57,8 @@ help:
 		'build' 'Build the complete workspace in debug mode.' \
 		'build-release' 'Build the complete workspace in release mode.' \
 		'package-linux' 'Build and package the Linux x86-64 release.' \
-		'run' 'Run the optimized Hermes Desktop build.' \
-		'run-debug' 'Run Hermes Desktop with development debug information.' \
+		'run' 'Run the optimized Mercury Desktop build.' \
+		'run-debug' 'Run Mercury Desktop with development debug information.' \
 		'run-release' 'Alias for the optimized run target.' \
 		'docs-install' 'Install the MkDocs documentation dependencies.' \
 		'docs' 'Build the MkDocs site with strict validation.' \
@@ -161,8 +161,8 @@ build-release:
 
 package-linux: build-release
 	mkdir -p "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)"
-	cp "target/release/$(APP_PACKAGE)" "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/hermes-browser"
-	"$(STRIP)" --strip-unneeded "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/hermes-browser"
+	cp "target/release/mercury-browser" "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/mercury-browser"
+	"$(STRIP)" --strip-unneeded "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/mercury-browser"
 	cp README.md "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/README.md"
 	cp LICENSE "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/LICENSE"
 	tar -C "$(DIST_DIR)" -czf "$(DIST_DIR)/$(LINUX_ARCHIVE)" "$(LINUX_PACKAGE_NAME)"

@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="apps/hermes-desktop/resources/hermes-browser.svg" width="112" alt="Hermes Browser winged sandal logo">
+  <img src="apps/mercury-desktop/resources/mercury-browser.svg" width="112" alt="Mercury Browser winged sandal logo">
 </p>
 
-<h1 align="center">Hermes Browser</h1>
+<h1 align="center">Mercury Browser</h1>
 
 <p align="center">
   <strong>A focused, independent browser powered by Rust and Servo.</strong>
@@ -13,24 +13,26 @@
 </p>
 
 <p align="center">
-  <a href="https://kaykcaputo.github.io/hermes-browser/"><strong>Documentation</strong></a>
+  <a href="https://thepigdestroyer.github.io/mercury-browser/"><strong>Documentation</strong></a>
   ·
-  <a href="https://github.com/KaykCaputo/hermes-browser/releases"><strong>Releases</strong></a>
+  <a href="https://github.com/thepigdestroyer/mercury-browser/releases"><strong>Releases</strong></a>
 </p>
 
+**Origins.** Mercury Browser is a fork of [Hermes Browser](https://github.com/KaykCaputo/hermes-browser) by Kayk Caputo, continued under the same MPL-2.0 licence.
+
 <p align="center">
-  <img src="docs/screenshots/hermes-new-tab.png" width="100%" alt="Hermes Browser new tab page">
+  <img src="docs/screenshots/hermes-new-tab.png" width="100%" alt="Mercury Browser new tab page">
 </p>
 
 > [!IMPORTANT]
-> Hermes is an early technical preview. It is ready for experimentation and development, but not yet for daily use or sensitive browsing.
+> Mercury is an early technical preview. It is ready for experimentation and development, but not yet for daily use or sensitive browsing.
 
 > [!WARNING]
 > Web content runs in isolated Servo content processes, but those processes do not yet have operating-system sandbox restrictions. Treat this release as a technical preview and avoid sensitive browsing until the Linux sandbox path is reliable.
 
 ## A lighter path to the web
 
-Hermes is a desktop browser that combines the memory safety of Rust, the parallel architecture of the [Servo Web Engine](https://servo.org/), and a lightweight native interface built with [Slint](https://slint.dev/).
+Mercury is a desktop browser that combines the memory safety of Rust, the parallel architecture of the [Servo Web Engine](https://servo.org/), and a lightweight native interface built with [Slint](https://slint.dev/).
 
 The project is designed around three principles:
 
@@ -38,16 +40,16 @@ The project is designed around three principles:
 | --- | --- | --- |
 | Asynchronous loading, GPU rendering, and aggressive background-tab throttling. | Native network-level ad and tracker blocking using Brave filter snapshots. | A browser shell with clean boundaries around Servo instead of deep engine coupling. |
 
-Hermes takes its name from the Greek messenger associated with speed and travel. Its browser core is called **Talaria**, after Hermes' winged sandals.
+Mercury takes its name from the Roman messenger god associated with speed and travel. Its browser core is called **Talaria**, after Mercury's winged sandals.
 
-## See Hermes in action
+## See Mercury in action
 
 <p align="center">
-  <img src="docs/screenshots/hermes-servo.png" width="100%" alt="Servo website rendered in Hermes Browser with multiple tabs">
+  <img src="docs/screenshots/hermes-servo.png" width="100%" alt="Servo website rendered in Mercury Browser with multiple tabs">
 </p>
 
 <p align="center">
-  <em>Real web content rendered by Servo inside the Hermes tab and navigation experience.</em>
+  <em>Real web content rendered by Servo inside the Mercury tab and navigation experience.</em>
 </p>
 
 ## Highlights
@@ -65,7 +67,7 @@ Hermes takes its name from the Greek messenger associated with speed and travel.
 ## Technology
 
 ```text
-Hermes UI · Slint
+Mercury UI · Slint
         │
         │  commands and presentation state
         ▼
@@ -81,8 +83,8 @@ Servo Web Engine
 
 | Component | Responsibility |
 | --- | --- |
-| `apps/hermes-desktop` | Application lifecycle, desktop window, and runtime composition |
-| `crates/hermes-ui` | Native Slint interface and presentation types |
+| `apps/mercury-desktop` | Application lifecycle, desktop window, and runtime composition |
+| `crates/mercury-ui` | Native Slint interface and presentation types |
 | `crates/talaria-core` | Tabs, browser state, commands, events, and navigation policies |
 | `crates/talaria-servo` | Servo WebViews, browser events, Linux multimedia, metrics, and content blocking |
 
@@ -90,7 +92,7 @@ The browser core can be tested with fake WebViews without starting Servo. UI cod
 
 ### Runtime compatibility patches
 
-Hermes currently carries focused patches for two dependencies used by Servo 0.7.0:
+Mercury currently carries focused patches for two dependencies used by Servo 0.7.0:
 
 - `gaol`, to support current Linux system calls and allow Servo's shared-memory IPC regions to be sized correctly;
 - `surfman`, to avoid process-global GPU selection through `DRI_PRIME`.
@@ -99,11 +101,11 @@ Each vendored directory documents why the patch exists and when it can be remove
 
 ## Quick start
 
-Hermes uses the current stable Rust toolchain and the Rust 2024 edition.
+Mercury uses the current stable Rust toolchain and the Rust 2024 edition.
 
 ```bash
-git clone https://github.com/KaykCaputo/hermes-browser.git
-cd hermes-browser
+git clone https://github.com/thepigdestroyer/mercury-browser.git
+cd mercury-browser
 make install-linux-deps
 make setup
 make run
@@ -111,7 +113,7 @@ make run
 
 `make install-linux-deps` currently supports Debian- and Ubuntu-based Linux distributions and installs the same packages CI uses (`.github/workflows/ci.yml`), including `cmake`, `ninja-build`, and the CI-pinned `clang-14`/`libclang-14-dev` pair (the naming on Ubuntu 22.04 and Debian 12; releases that ship a different clang need the matching package names). Other distributions need equivalent compiler, Fontconfig, X11, Wayland, GStreamer development libraries, and the Base, Good, Bad, Ugly, and libav GStreamer plugin sets.
 
-On Linux, Hermes lets Mesa and DRM select the system's default GPU automatically and ignores an inherited `DRI_PRIME` override. No per-GPU launch configuration is required. Multimedia support depends on the GStreamer plugins installed by `make install-linux-deps`.
+On Linux, Mercury lets Mesa and DRM select the system's default GPU automatically and ignores an inherited `DRI_PRIME` override. No per-GPU launch configuration is required. Multimedia support depends on the GStreamer plugins installed by `make install-linux-deps`.
 
 `make run` uses the optimized profile because real-world pages and media are not representative in
 an unoptimized browser-engine build. For a development build with full debug information:
@@ -154,9 +156,9 @@ make run RUST_LOG="talaria_servo=debug,servo=warn"
 
 ## Documentation
 
-Hermes keeps user and developer documentation together in one searchable MkDocs site:
+Mercury keeps user and developer documentation together in one searchable MkDocs site:
 
-**Read the documentation at [kaykcaputo.github.io/hermes-browser](https://kaykcaputo.github.io/hermes-browser/).**
+**Read the documentation at [thepigdestroyer.github.io/mercury-browser](https://thepigdestroyer.github.io/mercury-browser/).**
 
 - the **User Guide** covers installation, everyday browsing, media support, privacy, security, and troubleshooting;
 - the **Developer Guide** covers setup, architecture, Servo integration, testing, dependency patches, releases, and contributions.
@@ -201,11 +203,11 @@ The complete documentation starts at [`docs/index.md`](docs/index.md). Rust API 
 Linux packages are built on an Ubuntu 22.04 GitHub-hosted runner. Version tags create a GitHub Release automatically:
 
 ```bash
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-The release workflow produces `hermes-browser-linux-x86_64.tar.gz` with a SHA-256 checksum.
+The release workflow produces `mercury-browser-linux-x86_64.tar.gz` with a SHA-256 checksum.
 
 The Linux executable is built on Ubuntu 22.04 and targets glibc 2.35 or newer.
 The workflow verifies this compatibility baseline before publishing the package.
@@ -236,11 +238,11 @@ The current version is an engineering preview with known limitations:
 - Background tabs are throttled but are not yet suspended or discarded.
 - Linux packages currently target x86-64, glibc 2.35 or newer, and compatible system libraries.
 
-When a page exposes an engine-level failure, reproduce it in Servo's `servoshell` before maintaining a Hermes-specific engine patch.
+When a page exposes an engine-level failure, reproduce it in Servo's `servoshell` before maintaining a Mercury-specific engine patch.
 
 ## Contributing
 
-Hermes is a practical space for exploring browser engineering in Rust. Focused bug reports, compatibility reproductions, tests, documentation improvements, and well-scoped pull requests are welcome.
+Mercury is a practical space for exploring browser engineering in Rust. Focused bug reports, compatibility reproductions, tests, documentation improvements, and well-scoped pull requests are welcome.
 
 Before submitting a change, run:
 
@@ -250,6 +252,6 @@ make qa
 
 ## License
 
-Hermes Browser's original source code and project assets are available under the [Mozilla Public License 2.0](LICENSE).
+Mercury Browser's source code and project assets are available under the [Mozilla Public License 2.0](LICENSE).
 
 The MPL-2.0 allows commercial use and combination with code under other licenses while requiring modifications to MPL-covered files to remain available under the same license. Third-party dependencies and bundled filter lists remain subject to their respective licenses and notices.

@@ -96,7 +96,7 @@ component BrowserTabButton inherits Rectangle {
         }
 
         if !root.tab.has-icon: TabIcon {
-            source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
+            source: @image-url("../../../apps/mercury-desktop/resources/mercury-browser.svg");
         }
 
         Text {
@@ -183,8 +183,8 @@ export component MainWindow inherits Window {
         );
     }
 
-    title: page-title + " — Hermes Browser";
-    icon: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
+    title: page-title + " — Mercury Browser";
+    icon: @image-url("../../../apps/mercury-desktop/resources/mercury-browser.svg");
     preferred-width: 1180px;
     preferred-height: 760px;
     min-width: 0px;
@@ -353,13 +353,13 @@ export component MainWindow inherits Window {
                             Image {
                                 width: 80px;
                                 height: 80px;
-                                source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
+                                source: @image-url("../../../apps/mercury-desktop/resources/mercury-browser.svg");
                                 image-fit: contain;
                             }
                         }
 
                         Text {
-                            text: "Hermes Browser";
+                            text: "Mercury Browser";
                             color: #edf4fa;
                             font-size: 28px;
                             font-weight: 650;

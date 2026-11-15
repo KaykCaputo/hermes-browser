@@ -1,15 +1,15 @@
 [workspace]
 resolver = "3"
 members = [
-    "apps/hermes-desktop",
-    "crates/hermes-ui",
+    "apps/mercury-desktop",
+    "crates/mercury-ui",
     "crates/talaria-core",
     "crates/talaria-servo",
 ]
 exclude = ["third_party/gaol"]
 
 [workspace.package]
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 license = "MPL-2.0"
 
@@ -47,7 +47,7 @@ surfman = { path = "third_party/surfman" }
 [profile.dev.package.adblock]
 opt-level = 2
 
-[profile.dev.package.hermes-desktop]
+[profile.dev.package.mercury-desktop]
 opt-level = 2
 
 [profile.dev.package.servo]

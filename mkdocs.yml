@@ -1,21 +1,24 @@
-site_name: Hermes Browser
-site_description: User and developer documentation for the Hermes Browser technical preview.
+site_name: Mercury Browser
+site_description: User and developer documentation for the Mercury Browser technical preview.
 site_author: Kayk Caputo
-site_url: https://kaykcaputo.github.io/hermes-browser/
-copyright: Copyright (c) 2026 Kayk Caputo
+site_url: https://thepigdestroyer.github.io/mercury-browser/
+copyright: Copyright (c) 2026 Kayk Caputo and Mercury Browser contributors
 
-repo_name: KaykCaputo/hermes-browser
-repo_url: https://github.com/KaykCaputo/hermes-browser
+repo_name: thepigdestroyer/mercury-browser
+repo_url: https://github.com/thepigdestroyer/mercury-browser
 edit_uri: edit/master/docs/
 
 docs_dir: docs
 site_dir: target/mkdocs
 
+exclude_docs: |
+  superpowers/
+
 theme:
   name: material
   language: en
-  logo: assets/hermes-browser.svg
-  favicon: assets/hermes-browser.svg
+  logo: assets/mercury-browser.svg
+  favicon: assets/mercury-browser.svg
   icon:
     repo: fontawesome/brands/github
   palette:
@@ -56,7 +59,7 @@ nav:
   - Home: index.md
   - User Guide:
       - user-guide/index.md
-      - Install Hermes: user-guide/installation.md
+      - Install Mercury: user-guide/installation.md
       - Start browsing: user-guide/getting-started.md
       - Tabs and shortcuts: user-guide/browsing.md
       - Media playback: user-guide/media.md
@@ -98,4 +101,4 @@ extra:
   generator: false
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/KaykCaputo/hermes-browser
+      link: https://github.com/thepigdestroyer/mercury-browser

@@ -129,7 +129,7 @@ jobs:
       - name: Run formatting, lint, and tests
         shell: bash
         env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/hermes-ci-target
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mercury-ci-target
         run: |
           set -euo pipefail
 

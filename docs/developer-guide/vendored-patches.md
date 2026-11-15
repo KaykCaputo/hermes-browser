@@ -1,29 +1,31 @@
 ---
 title: Vendored Patches
-description: Maintain and eventually remove Hermes' focused gaol and Surfman compatibility patches.
+description: Maintain and eventually remove Mercury's focused gaol and Surfman compatibility patches.
 ---
 
 # Vendored patches
 
-Hermes vendors code when a pinned Servo dependency needs a small, reviewable compatibility fix that cannot be expressed through the public API. Vendoring is a temporary maintenance cost, not a general fork strategy.
+Mercury vendors code when a pinned Servo dependency needs a small, reviewable compatibility fix that cannot be expressed through the public API. Vendoring is a temporary maintenance cost, not a general fork strategy.
 
 ## Patch inventory
 
-| Directory | Upstream version | Why Hermes carries it |
+| Directory | Upstream version | Why Mercury carries it |
 | --- | --- | --- |
 | `third_party/gaol` | 0.2.1 | Modern Linux syscall compatibility and a non-zero file-size limit for Servo shared-memory IPC |
 | `third_party/surfman` | 0.14.0 | Avoid process-global `DRI_PRIME=1` selection and its race with media initialization |
+
+Both patches were introduced by [Hermes Browser](https://github.com/KaykCaputo/hermes-browser), the project Mercury is derived from, and Mercury continues to carry them.
 
 The root `[patch.crates-io]` section redirects Servo's dependency graph to these directories.
 
 ## Rules for changing a patch
 
 1. Reproduce the failure against the exact upstream version.
-2. Keep the diff limited to the behavior Hermes needs.
+2. Keep the diff limited to the behavior Mercury needs.
 3. Add a regression test when the behavior can be tested locally.
-4. Update the directory's `HERMES.md` or `README.md` with the reason for the patch.
+4. Update the directory's `MERCURY.md` or `README.md` with the reason for the patch.
 5. Preserve the upstream license files and attribution.
-6. Prefer a fix that can be proposed upstream without Hermes-specific concepts.
+6. Prefer a fix that can be proposed upstream without Mercury-specific concepts.
 
 Avoid opportunistic formatting, dependency upgrades, or unrelated cleanup inside a vendored tree. They make future comparison and removal needlessly difficult.
 
@@ -42,7 +44,7 @@ Media uses Servo's upstream GStreamer backend without a local patch. It still ne
 
 ## Remove a patch
 
-When an equivalent fix reaches the Servo dependency graph used by Hermes:
+When an equivalent fix reaches the Servo dependency graph used by Mercury:
 
 1. Update the pinned dependency version.
 2. Remove the relevant `[patch.crates-io]` entry.

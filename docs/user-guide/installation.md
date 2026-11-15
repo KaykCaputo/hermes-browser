@@ -1,9 +1,9 @@
 ---
-title: Install Hermes
-description: Build and run Hermes Browser on Linux, with the required Rust, graphics, and GStreamer dependencies.
+title: Install Mercury
+description: Build and run Mercury Browser on Linux, with the required Rust, graphics, and GStreamer dependencies.
 ---
 
-# Install Hermes
+# Install Mercury
 
 The fastest supported route is a source build on Debian or Ubuntu. The repository includes a command that installs the native packages needed by Servo, Slint, graphics, and GStreamer.
 
@@ -22,8 +22,8 @@ Packaged Linux builds target glibc 2.35 or newer.
 ## Build from source
 
 ```bash
-git clone https://github.com/KaykCaputo/hermes-browser.git
-cd hermes-browser
+git clone https://github.com/thepigdestroyer/mercury-browser.git
+cd mercury-browser
 make install-linux-deps
 make setup
 make run
@@ -67,7 +67,7 @@ Package names vary between distributions. Once `pkg-config` can find the require
 
 ## Verify GStreamer
 
-If the browser starts but media does not play, check the runtime before debugging Hermes:
+If the browser starts but media does not play, check the runtime before debugging Mercury:
 
 ```bash
 gst-inspect-1.0 playbin3
@@ -79,5 +79,5 @@ All three commands should describe a plugin instead of reporting that it is miss
 
 ## Windows status
 
-Hermes has a native Windows source-build configuration, but the project does not currently publish Windows release artifacts. Native GStreamer and its plugins are not bundled, so Windows builds use Servo's fallback media backend. Linux remains the complete supported path for the preview.
+Mercury has a native Windows source-build configuration, but the project does not currently publish Windows release artifacts. Native GStreamer and its plugins are not bundled, so Windows builds use Servo's fallback media backend. Linux remains the complete supported path for the preview.
 

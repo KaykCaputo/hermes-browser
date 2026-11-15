@@ -1,13 +1,13 @@
 ---
 title: Developer Guide
-description: Understand the Hermes Browser codebase and prepare a focused contribution.
+description: Understand the Mercury Browser codebase and prepare a focused contribution.
 ---
 
 # Developer Guide
 
-Hermes is a browser shell with deliberately visible boundaries. The UI should not need to understand Servo internals, and the core tab model should remain testable without creating a window or graphics context.
+Mercury is a browser shell with deliberately visible boundaries. The UI should not need to understand Servo internals, and the core tab model should remain testable without creating a window or graphics context.
 
-The codebase is small enough to read, but the engine underneath it is not. This guide shows where Hermes ends, where Servo begins, and how to test the seam between them.
+The codebase is small enough to read, but the engine underneath it is not. This guide shows where Mercury ends, where Servo begins, and how to test the seam between them.
 
 ## A useful reading order
 
@@ -21,8 +21,8 @@ The codebase is small enough to read, but the engine underneath it is not. This 
 
 | Path | Purpose |
 | --- | --- |
-| `apps/hermes-desktop` | Desktop lifecycle, Slint callbacks, the native event loop, and runtime composition |
-| `crates/hermes-ui` | Slint components and UI-facing presentation types |
+| `apps/mercury-desktop` | Desktop lifecycle, Slint callbacks, the native event loop, and runtime composition |
+| `crates/mercury-ui` | Slint components and UI-facing presentation types |
 | `crates/talaria-core` | Engine-independent browser state, commands, events, tabs, and address resolution |
 | `crates/talaria-servo` | Servo WebViews, browser events, media selection, metrics, and content blocking |
 | `third_party` | Focused compatibility patches for dependencies pinned by Servo |

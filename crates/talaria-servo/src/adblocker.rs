@@ -74,7 +74,7 @@ impl ContentBlocker {
         method: &str,
         is_for_main_frame: bool,
     ) -> bool {
-        // Brave can show a dedicated interstitial for blocked top-level navigations. Hermes does
+        // Brave can show a dedicated interstitial for blocked top-level navigations. Mercury does
         // not have that UI yet, so allowing the main document avoids turning a matched navigation
         // into an unexplained blank tab while still blocking its ads and trackers.
         if is_for_main_frame {

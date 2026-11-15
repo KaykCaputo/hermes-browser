@@ -69,12 +69,12 @@ impl ServoRuntime {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
-        let options = hermes_options();
+        let options = mercury_options();
         let multiprocess_enabled = options.multiprocess;
         let sandbox_enabled = options.sandbox;
         let inner = ServoBuilder::default()
             .opts(options)
-            .preferences(hermes_preferences())
+            .preferences(mercury_preferences())
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
@@ -136,9 +136,9 @@ impl ServoRuntime {
     }
 }
 
-fn hermes_options() -> Opts {
+fn mercury_options() -> Opts {
     Opts {
-        // Servo 0.7.0 content-process isolation renders correctly in Hermes.
+        // Servo 0.7.0 content-process isolation renders correctly in Mercury.
         // Keep the operating-system sandbox disabled independently: the
         // current Linux gaol path is not yet reliable enough for a release.
         multiprocess: true,
@@ -157,7 +157,7 @@ impl servo::ServoDelegate for BrowserServoDelegate {
     }
 }
 
-fn hermes_preferences() -> Preferences {
+fn mercury_preferences() -> Preferences {
     Preferences {
         dom_script_asynch: true,
         dom_canvas_backend: "vello".to_owned(),
@@ -344,23 +344,23 @@ fn ensure_crypto_provider() {
 
 #[cfg(test)]
 mod tests {
-    use super::hermes_options;
+    use super::mercury_options;
 
     #[test]
     fn enables_content_process_isolation() {
-        assert!(hermes_options().multiprocess);
+        assert!(mercury_options().multiprocess);
     }
 
     #[test]
     fn keeps_the_unreliable_os_sandbox_disabled() {
-        assert!(!hermes_options().sandbox);
+        assert!(!mercury_options().sandbox);
     }
 
     use super::*;
 
     #[test]
-    fn hermes_enables_async_scripts_and_gpu_canvas_by_default() {
-        let preferences = hermes_preferences();
+    fn mercury_enables_async_scripts_and_gpu_canvas_by_default() {
+        let preferences = mercury_preferences();
 
         assert!(preferences.dom_script_asynch);
         assert!(!preferences.dom_servoparser_async_html_tokenizer_enabled);

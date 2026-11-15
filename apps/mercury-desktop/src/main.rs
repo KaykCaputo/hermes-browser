@@ -4,7 +4,7 @@ use std::error::Error;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 
-use hermes_ui::{BrowserTab, MainWindow, WebViewPointerButton};
+use mercury_ui::{BrowserTab, MainWindow, WebViewPointerButton};
 use rendering::BrowserRenderingContext;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{

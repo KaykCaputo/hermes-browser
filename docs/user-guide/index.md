@@ -1,17 +1,17 @@
 ---
 title: User Guide
-description: Install Hermes, browse the web, play media, and understand the current preview limitations.
+description: Install Mercury, browse the web, play media, and understand the current preview limitations.
 ---
 
 # User Guide
 
-Hermes is deliberately small: it gives you tabs, an address bar, native input, content blocking, and Servo's view of the web without pretending to be a finished everyday browser.
+Mercury is deliberately small: it gives you tabs, an address bar, native input, content blocking, and Servo's view of the web without pretending to be a finished everyday browser.
 
 This guide helps you get useful results from the technical preview and recognize the difference between a site problem, a missing media component, and a known engine limitation.
 
 ## Start here
 
-1. [Install Hermes](installation.md) and its native Linux dependencies.
+1. [Install Mercury](installation.md) and its native Linux dependencies.
 2. [Start browsing](getting-started.md) with a URL or DuckDuckGo search.
 3. Keep the [privacy and security model](privacy-and-security.md) in mind.
 4. If a page is blank or incomplete, work through [Troubleshooting](troubleshooting.md).
@@ -29,7 +29,7 @@ This guide helps you get useful results from the technical preview and recognize
 
 ## The short version
 
-Hermes is a good fit for:
+Mercury is a good fit for:
 
 - Exploring Servo on real websites
 - Testing browser-shell ideas in a native Rust application

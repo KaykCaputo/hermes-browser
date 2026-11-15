@@ -1,6 +1,6 @@
 ---
 title: Development Setup
-description: Prepare a local Hermes Browser development environment on Linux or Windows.
+description: Prepare a local Mercury Browser development environment on Linux or Windows.
 ---
 
 # Development setup
@@ -10,8 +10,8 @@ Linux is the primary development environment because it exercises the full Servo
 ## Clone and prepare the repository
 
 ```bash
-git clone https://github.com/KaykCaputo/hermes-browser.git
-cd hermes-browser
+git clone https://github.com/thepigdestroyer/mercury-browser.git
+cd mercury-browser
 make install-linux-deps
 make setup
 ```
@@ -26,7 +26,7 @@ make doctor
 
 The command reports the active Rust toolchain and verifies that Cargo, Rust, and rustup are available.
 
-Servo also builds native code. On Linux, Hermes expects Clang, CMake, a C/C++ toolchain, Fontconfig, X11 development libraries, and the GStreamer development stack installed by `make install-linux-deps`.
+Servo also builds native code. On Linux, Mercury expects Clang, CMake, a C/C++ toolchain, Fontconfig, X11 development libraries, and the GStreamer development stack installed by `make install-linux-deps`.
 
 ## Build and run
 
@@ -49,7 +49,7 @@ make run
 
 `make run-release` is retained as an alias for `make run`. The development profile still optimizes
 major Servo, WebRender, Vello, and ad-blocking crates while retaining useful debug information for
-Hermes code, but it is intended for diagnosis rather than performance evaluation.
+Mercury code, but it is intended for diagnosis rather than performance evaluation.
 
 ## Build the documentation
 

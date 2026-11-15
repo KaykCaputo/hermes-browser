@@ -1,21 +1,21 @@
 ---
 title: Architecture
-description: Follow state, commands, input, and rendered frames through the Hermes Browser layers.
+description: Follow state, commands, input, and rendered frames through the Mercury Browser layers.
 ---
 
 # Architecture
 
-Hermes separates product state from engine integration. That boundary lets most browser behavior run in fast Rust tests without initializing Servo, Slint, WGPU, or a desktop event loop.
+Mercury separates product state from engine integration. That boundary lets most browser behavior run in fast Rust tests without initializing Servo, Slint, WGPU, or a desktop event loop.
 
 ## Layers
 
 ```text
-Hermes Desktop
+Mercury Desktop
   Slint window, winit events, WGPU composition, runtime integration
           │
           │ UI callbacks and presentation state
           ▼
-Hermes UI
+Mercury UI
   Slint components and UI-facing models
           │
           │ browser commands and events
@@ -46,7 +46,7 @@ The controller coalesces adjacent pointer movement, scrolling, and focus command
 
 ## Desktop composition
 
-`hermes-desktop` creates the Slint window, selects the graphics backend, creates a `ServoRuntime`, and owns one `ServoWebView` per browser tab.
+`mercury-desktop` creates the Slint window, selects the graphics backend, creates a `ServoRuntime`, and owns one `ServoWebView` per browser tab.
 
 During each event-loop turn it:
 
@@ -86,6 +86,6 @@ The same stable `TabId` routes asynchronous title, favicon, load, and history up
 
 ## Rendering ownership
 
-Slint owns the native window and event loop. Servo renders into a separate offscreen Surfman context; on Linux, Hermes imports each completed frame through Vulkan external memory and gives the resulting WGPU texture to Slint. The two renderers never share OpenGL state or the window framebuffer. A consumable frame-ready signal also prevents repainting a page when Servo has not produced a new frame.
+Slint owns the native window and event loop. Servo renders into a separate offscreen Surfman context; on Linux, Mercury imports each completed frame through Vulkan external memory and gives the resulting WGPU texture to Slint. The two renderers never share OpenGL state or the window framebuffer. A consumable frame-ready signal also prevents repainting a page when Servo has not produced a new frame.
 
-On Linux, Mesa and the desktop session choose the default graphics adapter. Hermes removes inherited `DRI_PRIME` overrides before graphics or media threads start, and the vendored Surfman patch avoids applying a process-global GPU preference during context creation.
+On Linux, Mesa and the desktop session choose the default graphics adapter. Mercury removes inherited `DRI_PRIME` overrides before graphics or media threads start, and the vendored Surfman patch avoids applying a process-global GPU preference during context creation.

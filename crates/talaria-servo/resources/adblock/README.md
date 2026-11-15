@@ -1,6 +1,6 @@
 # Bundled adblock filters
 
-Hermes builds its network blocker from the same validated filter snapshots distributed to Brave
+Mercury builds its network blocker from the same validated filter snapshots distributed to Brave
 clients. The files are pinned to commit `06c4b9dd43a7132c7a563d6a6b02db6c9ec8f0b3` on the `lists`
 branch of <https://github.com/brave/adblock-lists-mirror>.
 

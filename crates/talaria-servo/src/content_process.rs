@@ -62,7 +62,7 @@ mod tests {
     #[test]
     fn regular_browser_invocation_has_no_content_process_token() {
         assert_eq!(
-            content_process_token(arguments(&["hermes-browser"])),
+            content_process_token(arguments(&["mercury-browser"])),
             Ok(None)
         );
     }
@@ -71,7 +71,7 @@ mod tests {
     fn extracts_the_servo_content_process_token() {
         assert_eq!(
             content_process_token(arguments(&[
-                "hermes-browser",
+                "mercury-browser",
                 "--unrelated",
                 "--content-process",
                 "ipc-token",
@@ -83,11 +83,11 @@ mod tests {
     #[test]
     fn rejects_a_missing_content_process_token() {
         assert_eq!(
-            content_process_token(arguments(&["hermes-browser", "--content-process"])),
+            content_process_token(arguments(&["mercury-browser", "--content-process"])),
             Err(ContentProcessArgumentError)
         );
         assert_eq!(
-            content_process_token(arguments(&["hermes-browser", "--content-process", "",])),
+            content_process_token(arguments(&["mercury-browser", "--content-process", "",])),
             Err(ContentProcessArgumentError)
         );
     }

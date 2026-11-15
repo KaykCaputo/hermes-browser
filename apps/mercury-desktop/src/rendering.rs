@@ -320,7 +320,7 @@ mod platform {
                     hal_device.texture_from_raw(
                         image,
                         &hal::TextureDescriptor {
-                            label: Some("Hermes Servo frame"),
+                            label: Some("Mercury Servo frame"),
                             size: wgpu::Extent3d {
                                 width: size.width(),
                                 height: size.height(),
@@ -341,7 +341,7 @@ mod platform {
                         hal::vulkan::TextureMemory::External,
                     ),
                     &wgpu::TextureDescriptor {
-                        label: Some("Hermes Servo frame"),
+                        label: Some("Mercury Servo frame"),
                         size: wgpu::Extent3d {
                             width: size.width(),
                             height: size.height(),

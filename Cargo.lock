@@ -3278,34 +3278,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "hermes-desktop"
-version = "0.1.2"
-dependencies = [
- "ash",
- "dpi",
- "euclid",
- "gl_generator",
- "gleam",
- "glow",
- "hermes-ui",
- "log",
- "servo",
- "slint",
- "surfman",
- "talaria-core",
- "talaria-servo",
- "thiserror 2.0.19",
-]
-
-[[package]]
-name = "hermes-ui"
-version = "0.1.2"
-dependencies = [
- "slint",
- "slint-build",
-]
-
-[[package]]
 name = "hermit-abi"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4887,6 +4859,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "mercury-desktop"
+version = "0.2.0"
+dependencies = [
+ "ash",
+ "dpi",
+ "euclid",
+ "gl_generator",
+ "gleam",
+ "glow",
+ "log",
+ "mercury-ui",
+ "servo",
+ "slint",
+ "surfman",
+ "talaria-core",
+ "talaria-servo",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "mercury-ui"
+version = "0.2.0"
+dependencies = [
+ "slint",
+ "slint-build",
 ]
 
 [[package]]
@@ -9654,14 +9654,14 @@ dependencies = [
 
 [[package]]
 name = "talaria-core"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "url",
 ]
 
 [[package]]
 name = "talaria-servo"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "adblock",
  "content-security-policy",

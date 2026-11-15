@@ -1,11 +1,11 @@
 ---
 title: Contributing
-description: Prepare focused, reviewable contributions to Hermes Browser.
+description: Prepare focused, reviewable contributions to Mercury Browser.
 ---
 
 # Contributing
 
-Good Hermes contributions make one behavior easier to understand, test, or trust. Browser work can spread across UI, platform, engine, graphics, media, and networking quickly, so a narrow change is a real advantage.
+Good Mercury contributions make one behavior easier to understand, test, or trust. Browser work can spread across UI, platform, engine, graphics, media, and networking quickly, so a narrow change is a real advantage.
 
 ## Before writing code
 
@@ -17,7 +17,7 @@ Good Hermes contributions make one behavior easier to understand, test, or trust
 
 ## Keep boundaries intact
 
-Put engine-independent browser behavior in `talaria-core`. Keep Slint presentation in `hermes-ui`, desktop event translation and composition in `hermes-desktop`, and Servo-specific types in `talaria-servo`.
+Put engine-independent browser behavior in `talaria-core`. Keep Slint presentation in `mercury-ui`, desktop event translation and composition in `mercury-desktop`, and Servo-specific types in `talaria-servo`.
 
 If a change requires Servo internals to leak into the core model, pause and look for a smaller command, event, or adapter abstraction.
 
@@ -64,4 +64,4 @@ A useful pull request describes:
 - Known limitations left intentionally unresolved
 - Any upstream issue or patch that should eventually replace local code
 
-Honest limits are welcome. Hermes is an engineering preview, and clear evidence is more valuable than broad compatibility claims.
+Honest limits are welcome. Mercury is an engineering preview, and clear evidence is more valuable than broad compatibility claims.
