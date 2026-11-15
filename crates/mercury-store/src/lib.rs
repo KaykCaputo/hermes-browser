@@ -36,7 +36,8 @@ pub use limits::{
     MAX_VALIDATOR_BYTES,
 };
 pub use suggest::{
-    CANDIDATES_PER_RESULT, FRECENCY_REFRESH_AGE_MS, SUBSTRING_SCAN_ROWS, Suggestion,
+    BEST_PAGES_EXAMINED, CANDIDATES_PER_RESULT, FRECENCY_REFRESH_AGE_MS, INDEX_ROWS_EXAMINED,
+    MAX_SUGGESTIONS, Suggestion,
 };
 
 /// The profile database. Owns one SQLite connection.

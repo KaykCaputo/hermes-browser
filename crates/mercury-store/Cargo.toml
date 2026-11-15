@@ -8,3 +8,4 @@ license.workspace = true
 log.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
+url.workspace = true

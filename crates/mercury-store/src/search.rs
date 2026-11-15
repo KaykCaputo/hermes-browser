@@ -65,29 +65,60 @@ pub(crate) fn is_token_char(c: char) -> bool {
     (c.is_alphanumeric() && !combining) || private_use
 }
 
-/// The form of a URL, or of what the user typed, that host-prefix matching compares: ASCII
-/// lower case, without a leading `scheme://`. For a stored URL a leading `www.` is dropped as
-/// well, so `exam` finds `https://www.example.com/`; typed input keeps its `www.`, which the
-/// full-text match handles.
+/// The form of a URL, or of what the user typed, that host-prefix matching and the page
+/// full-text index use: without a leading `scheme://` and user info (`user:pass@`), the host in
+/// lower-case Unicode (`xn--bcher-kva.example` becomes `bücher.example`, using the `url`
+/// crate's IDNA conversion), the rest in ASCII lower case. With `strip_www`, a leading `www.`
+/// is dropped too.
 pub(crate) fn url_key(url: &str, strip_www: bool) -> String {
-    let lower = url.trim().to_ascii_lowercase();
-    let rest = match lower.find("://") {
+    let url = url.trim();
+    let rest = match url.find("://") {
         Some(end)
             if end > 0
-                && lower[..end]
+                && url[..end]
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')) =>
         {
-            &lower[end + 3..]
+            &url[end + 3..]
         }
-        _ => lower.as_str(),
+        _ => url,
     };
-    let rest = if strip_www {
-        rest.strip_prefix("www.").unwrap_or(rest)
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let host_port = host_port.to_lowercase();
+    let host_port = if host_port.contains("xn--") && !host_port.starts_with('[') {
+        let (host, port) = match host_port.rsplit_once(':') {
+            Some((host, port)) if port.chars().all(|c| c.is_ascii_digit()) => (host, Some(port)),
+            _ => (host_port.as_str(), None),
+        };
+        match url::quirks::domain_to_unicode(host) {
+            unicode if unicode.is_empty() => host_port.clone(),
+            unicode => match port {
+                Some(port) => format!("{unicode}:{port}"),
+                None => unicode,
+            },
+        }
     } else {
-        rest
+        host_port
     };
-    rest.to_owned()
+    let host_port = if strip_www {
+        host_port
+            .strip_prefix("www.")
+            .map_or(host_port.clone(), str::to_owned)
+    } else {
+        host_port
+    };
+    host_port + &tail.to_ascii_lowercase()
+}
+
+/// The words of `text` as the tokenizer sees them, in lower case.
+pub(crate) fn words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| !is_token_char(c))
+        .filter(|w| !w.is_empty())
+        .map(str::to_lowercase)
 }
 
 #[cfg(test)]
@@ -102,6 +133,20 @@ mod tests {
         assert_eq!(url_key("HTTPS://www.exa", false), "www.exa");
         assert_eq!(url_key("exam", false), "exam");
         assert_eq!(url_key("://x", true), "://x");
+        assert_eq!(
+            url_key("https://u:p@www.Example.com:8080/P?q#f", true),
+            "example.com:8080/p?q#f"
+        );
+        assert_eq!(
+            url_key("https://www.xn--bcher-kva.example/X", true),
+            "bücher.example/x"
+        );
+        assert_eq!(
+            url_key("http://xn--bcher-kva.example:81", true),
+            "bücher.example:81"
+        );
+        assert_eq!(url_key("BÜCH", false), "büch");
+        assert_eq!(url_key("https://[::1]:8080/", true), "[::1]:8080/");
     }
 
     #[test]

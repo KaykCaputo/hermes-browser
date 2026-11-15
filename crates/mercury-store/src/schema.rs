@@ -20,13 +20,14 @@ const MIGRATIONS: &[&str] = &[
         last_visit_at INTEGER,
         frecency      INTEGER NOT NULL DEFAULT -1,
         hidden        INTEGER NOT NULL DEFAULT 0,
-        url_key       TEXT NOT NULL,             -- lower-case URL without scheme and www.
-        frecency_at   INTEGER,                   -- when `frecency` was computed
+        url_key       TEXT NOT NULL,             -- see search::url_key
+        frecency_at   INTEGER NOT NULL DEFAULT 0, -- when `frecency` was computed
         title_at      INTEGER                    -- when the visit that gave `title` happened
     ) STRICT;
     CREATE INDEX places_by_url_key  ON places(url_key, frecency);
     CREATE INDEX places_by_frecency ON places(frecency);
     CREATE INDEX places_frecency_by_id ON places(id, frecency);
+    CREATE INDEX places_by_frecency_at ON places(frecency_at, frecency);
 
     CREATE TABLE visits (
         id         INTEGER PRIMARY KEY,
@@ -70,20 +71,22 @@ const MIGRATIONS: &[&str] = &[
         ended_at       INTEGER
     ) STRICT;
 
+    -- The page mirror indexes `url_key` (no scheme, user info or leading www.; Unicode host)
+    -- rather than `url`, so that the first keystrokes of a URL are not words of every page.
     CREATE VIRTUAL TABLE places_fts USING fts5(
-        url, title, content='places', content_rowid='id', prefix='1 2 3'
+        url_key, title, content='places', content_rowid='id', prefix='1 2 3'
     );
     CREATE TRIGGER places_fts_ai AFTER INSERT ON places BEGIN
-        INSERT INTO places_fts(rowid, url, title) VALUES (new.id, new.url, new.title);
+        INSERT INTO places_fts(rowid, url_key, title) VALUES (new.id, new.url_key, new.title);
     END;
     CREATE TRIGGER places_fts_ad AFTER DELETE ON places BEGIN
-        INSERT INTO places_fts(places_fts, rowid, url, title)
-        VALUES ('delete', old.id, old.url, old.title);
+        INSERT INTO places_fts(places_fts, rowid, url_key, title)
+        VALUES ('delete', old.id, old.url_key, old.title);
     END;
-    CREATE TRIGGER places_fts_au AFTER UPDATE OF url, title ON places BEGIN
-        INSERT INTO places_fts(places_fts, rowid, url, title)
-        VALUES ('delete', old.id, old.url, old.title);
-        INSERT INTO places_fts(rowid, url, title) VALUES (new.id, new.url, new.title);
+    CREATE TRIGGER places_fts_au AFTER UPDATE OF url_key, title ON places BEGIN
+        INSERT INTO places_fts(places_fts, rowid, url_key, title)
+        VALUES ('delete', old.id, old.url_key, old.title);
+        INSERT INTO places_fts(rowid, url_key, title) VALUES (new.id, new.url_key, new.title);
     END;
 
     CREATE VIRTUAL TABLE bookmarks_fts USING fts5(

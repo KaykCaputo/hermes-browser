@@ -6,15 +6,23 @@
 //! ```
 //!
 //! It builds, in a temporary directory, a database of 100,000 pages with about 300,000 visits
-//! and 2,000 bookmarks from deterministic synthetic data. The visits end three weeks before
-//! "now", so every stored score is stale, as after a holiday away from the browser. It then
-//! times 50 calls of `suggest` for inputs of 1, 2, 4 and 8 characters (a common and a rare
-//! word, plus one that matches nothing), of `record_visit`, and of `refresh_frecencies(_, 1000)`,
-//! and prints the median and the worst call. With `MERCURY_BENCH_DB=<path>` the database is kept
-//! at that path and reused by later runs (the timed calls change it, so delete it for a clean run).
+//! and 2,000 bookmarks from deterministic synthetic data shaped like a real history: most URLs
+//! are `https://www.<site>.com/<path>`, a few sites hold many pages, and page titles share a
+//! skewed vocabulary. The visits end three weeks before "now", so every stored score is stale.
+//!
+//! It then times `suggest` for the first keystrokes people type (`h` … `https`, `w` … `www`,
+//! `c` … `com`), a common path word, common and rare title words, an 8-character word and an
+//! input that matches nothing. The inputs are interleaved, one call each per round as
+//! successive keystrokes would arrive, for 50 rounds; it prints the median and the worst call
+//! per input. It does so with every stored score stale and again after refreshing them. It
+//! also times `record_visit` and `refresh_frecencies(_, 1000)` with everything stale,
+//! everything fresh and one page in a thousand stale, and prints the database size.
+//!
+//! With `MERCURY_BENCH_DB=<path>` the database is kept at that path (delete it before a run).
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use common::{DAY_MS, NOW, TempDir};
@@ -22,7 +30,7 @@ use mercury_store::{BookmarkImport, BookmarkRoot, Store, VisitImport, VisitTrans
 
 const PAGES: usize = 100_000;
 const BOOKMARKS: usize = 2_000;
-const CALLS: usize = 50;
+const ROUNDS: usize = 50;
 
 /// SplitMix64: a small deterministic generator.
 struct Rng(u64);
@@ -52,13 +60,44 @@ const SYLLABLES: &[&str] = &[
     "se", "ga", "fu", "he", "ju", "wi", "co", "ze", "qu", "xo",
 ];
 
+const PATH_WORDS: &[&str] = &[
+    "index", "news", "article", "search", "products", "blog", "watch", "wiki", "docs", "help",
+    "user", "post", "category", "about", "item",
+];
+
+const TLDS: &[(&str, usize)] = &[
+    ("com", 60),
+    ("org", 10),
+    ("net", 7),
+    ("de", 6),
+    ("io", 5),
+    ("co.uk", 4),
+    ("fr", 3),
+    ("edu", 2),
+    ("gov", 2),
+    ("nl", 1),
+];
+
 struct Data {
-    words: Vec<String>,
     pages: Vec<(String, String)>,
     /// (page index, visited at, transition), oldest first.
     visits: Vec<(usize, i64, VisitTransition)>,
     /// (folder, title, url)
     bookmarks: Vec<(usize, String, String)>,
+    common_word: String,
+    rare_word: String,
+    long_word: String,
+}
+
+fn pick_tld(rng: &mut Rng) -> &'static str {
+    let mut n = rng.below(100);
+    for &(tld, weight) in TLDS {
+        if n < weight {
+            return tld;
+        }
+        n -= weight;
+    }
+    "com"
 }
 
 fn generate() -> Data {
@@ -71,27 +110,30 @@ fn generate() -> Data {
                 .collect()
         })
         .collect();
-    let tlds = ["com", "org", "net", "io", "de"];
-    let hosts: Vec<String> = (0..4000)
-        .map(|i| {
-            let www = if rng.below(10) < 4 { "www." } else { "" };
+    let sites: Vec<String> = (0..5000)
+        .map(|_| {
+            let scheme = if rng.below(10) == 0 { "http" } else { "https" };
+            let www = if rng.below(100) < 65 { "www." } else { "" };
             format!(
-                "{www}{}{}.{}",
-                words[rng.skewed(words.len())],
+                "{scheme}://{www}{}{}.{}",
                 words[rng.below(words.len())],
-                tlds[i % tlds.len()]
+                words[rng.below(words.len())],
+                pick_tld(&mut rng)
             )
         })
         .collect();
     let pages: Vec<(String, String)> = (0..PAGES)
         .map(|i| {
-            let host = &hosts[rng.skewed(hosts.len())];
-            let url = format!(
-                "https://{host}/{}/{}-{i}",
-                words[rng.skewed(words.len())],
-                words[rng.below(words.len())]
-            );
-            let title = (0..3 + rng.below(4))
+            let site = &sites[rng.skewed(sites.len())];
+            let url = match rng.below(4) {
+                0 => format!("{site}/index.html"),
+                _ => format!(
+                    "{site}/{}/{}-{i}",
+                    PATH_WORDS[rng.skewed(PATH_WORDS.len())],
+                    words[rng.below(words.len())]
+                ),
+            };
+            let title = (0..3 + rng.below(6))
                 .map(|_| words[rng.skewed(words.len())].as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -128,11 +170,38 @@ fn generate() -> Data {
             (i % 20, title, url)
         })
         .collect();
+
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for (_, title) in &pages {
+        for word in title.split(' ') {
+            *counts.entry(word).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
+    ranked.sort_by_key(|&(w, n)| (std::cmp::Reverse(n), w));
+    let common_word = ranked[0].0.to_string();
+    let rare_word = ranked
+        .iter()
+        .rev()
+        .find(|(w, _)| w.starts_with("qu") && w.len() >= 6)
+        .unwrap()
+        .0
+        .to_string();
+    // An 8-character word of middling frequency.
+    let long_word = ranked
+        .iter()
+        .filter(|(w, _)| w.len() == 8)
+        .nth(50)
+        .unwrap()
+        .0
+        .to_string();
     Data {
-        words,
         pages,
         visits,
         bookmarks,
+        common_word,
+        rare_word,
+        long_word,
     }
 }
 
@@ -183,43 +252,32 @@ fn load(store: &mut Store, data: &Data) {
         .unwrap();
 }
 
-fn time<F: FnMut(usize)>(mut f: F) -> (Duration, Duration) {
-    let mut samples: Vec<Duration> = (0..CALLS)
-        .map(|i| {
-            let start = Instant::now();
-            f(i);
-            start.elapsed()
-        })
-        .collect();
+fn summary(mut samples: Vec<Duration>) -> (String, String) {
     samples.sort();
-    (samples[CALLS / 2], samples[CALLS - 1])
+    let ms = |d: Duration| format!("{:.2}", d.as_secs_f64() * 1000.0);
+    (
+        ms(samples[samples.len() / 2]),
+        ms(samples[samples.len() - 1]),
+    )
 }
 
-fn ms(d: Duration) -> String {
-    format!("{:.2}", d.as_secs_f64() * 1000.0)
-}
-
-/// The most and least frequent title words of at least 8 characters.
-fn common_and_rare(data: &Data) -> (String, String) {
-    let mut counts = std::collections::HashMap::<&str, usize>::new();
-    for (_, title) in &data.pages {
-        for word in title.split(' ') {
-            *counts.entry(word).or_default() += 1;
+fn time_suggestions(store: &Store, inputs: &[(String, String)], label: &str) {
+    let mut samples: Vec<Vec<Duration>> = vec![Vec::new(); inputs.len()];
+    let mut results = vec![0; inputs.len()];
+    for _ in 0..ROUNDS {
+        for (i, (_, input)) in inputs.iter().enumerate() {
+            let start = Instant::now();
+            results[i] = store.suggest(input, 10, NOW).unwrap().len();
+            samples[i].push(start.elapsed());
         }
     }
-    let mut long: Vec<(&str, usize)> = counts.into_iter().filter(|(w, _)| w.len() >= 8).collect();
-    long.sort_by_key(|&(w, n)| (std::cmp::Reverse(n), w));
-    let common = long[0].0.to_string();
-    // "q" starts few words (the syllable "qu" is the second rarest).
-    let rare = long
-        .iter()
-        .rev()
-        .find(|(w, _)| w.starts_with("qu"))
-        .unwrap()
-        .0
-        .to_string();
-    let _ = &data.words;
-    (common, rare)
+    println!("\n{label}\n");
+    println!("| input | median ms | worst ms | results |");
+    println!("| --- | --- | --- | --- |");
+    for (i, (name, input)) in inputs.iter().enumerate() {
+        let (median, worst) = summary(std::mem::take(&mut samples[i]));
+        println!("| {name} `{input}` | {median} | {worst} | {} |", results[i]);
+    }
 }
 
 #[test]
@@ -227,14 +285,10 @@ fn common_and_rare(data: &Data) -> (String, String) {
 fn bench_suggest_record_and_refresh() {
     let dir = TempDir::new("bench");
     let data = generate();
-    // MERCURY_BENCH_DB=<path> keeps the database there and reuses it on the next run.
     let path = std::env::var_os("MERCURY_BENCH_DB").map_or_else(|| dir.db(), Into::into);
-    let reuse = path.exists();
     let mut store = Store::open(&path).unwrap();
     let start = Instant::now();
-    if !reuse {
-        load(&mut store, &data);
-    }
+    load(&mut store, &data);
     println!(
         "loaded {} pages, {} visits, {} bookmarks in {:.1} s",
         data.pages.len(),
@@ -242,37 +296,30 @@ fn bench_suggest_record_and_refresh() {
         data.bookmarks.len(),
         start.elapsed().as_secs_f64()
     );
-
-    let (common, rare) = common_and_rare(&data);
-    println!("| call | median ms | worst ms | results |");
-    println!("| --- | --- | --- | --- |");
-    for (kind, word) in [("common", &common), ("rare", &rare)] {
-        for n in [1, 2, 4, 8] {
-            let input = &word[..n];
-            let results = store.suggest(input, 10, NOW).unwrap().len();
-            let (median, worst) = time(|_| {
-                store.suggest(input, 10, NOW).unwrap();
-            });
-            println!(
-                "| suggest {kind} {n} `{input}` | {} | {} | {results} |",
-                ms(median),
-                ms(worst)
-            );
-        }
-    }
-    let input = "zqxjv";
-    let results = store.suggest(input, 10, NOW).unwrap().len();
-    let (median, worst) = time(|_| {
-        store.suggest(input, 10, NOW).unwrap();
-    });
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    raw.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))
+        .unwrap();
     println!(
-        "| suggest no match `{input}` | {} | {} | {results} |",
-        ms(median),
-        ms(worst)
+        "database size after load: {:.1} MiB",
+        std::fs::metadata(&path).unwrap().len() as f64 / (1024.0 * 1024.0)
     );
 
-    let (median, worst) = time(|i| {
+    let mut inputs: Vec<(String, String)> = [
+        "h", "ht", "htt", "https", "w", "ww", "www", "c", "co", "com", "index",
+    ]
+    .iter()
+    .map(|s| ("keystroke".to_string(), s.to_string()))
+    .collect();
+    inputs.push(("common title word".into(), data.common_word.clone()));
+    inputs.push(("rare title word".into(), data.rare_word.clone()));
+    inputs.push(("8-character word".into(), data.long_word.clone()));
+    inputs.push(("no match".into(), "zqxjv".into()));
+    time_suggestions(&store, &inputs, "suggest, every stored score stale");
+
+    let mut samples = Vec::new();
+    for i in 0..ROUNDS {
         let page = &data.pages[(i * 7919) % data.pages.len()];
+        let start = Instant::now();
         store
             .record_visit(
                 &page.0,
@@ -281,15 +328,42 @@ fn bench_suggest_record_and_refresh() {
                 NOW + i as i64,
             )
             .unwrap();
-    });
-    println!("| record_visit | {} | {} | |", ms(median), ms(worst));
+        samples.push(start.elapsed());
+    }
+    let (median, worst) = summary(samples);
+    println!("\n| call | median ms | worst ms | returned |\n| --- | --- | --- | --- |");
+    println!("| record_visit | {median} | {worst} | |");
 
-    let (median, worst) = time(|_| {
-        store.refresh_frecencies(NOW, 1000).unwrap();
-    });
-    println!(
-        "| refresh_frecencies(1000) | {} | {} | |",
-        ms(median),
-        ms(worst)
-    );
+    let mut samples = Vec::new();
+    let mut returned = 0;
+    for _ in 0..ROUNDS {
+        let start = Instant::now();
+        returned = store.refresh_frecencies(NOW, 1000).unwrap();
+        samples.push(start.elapsed());
+    }
+    let (median, worst) = summary(samples);
+    println!("| refresh_frecencies(1000), everything stale | {median} | {worst} | {returned} |");
+    while store.refresh_frecencies(NOW, 1000).unwrap() == 1000 {}
+
+    let mut samples = Vec::new();
+    for _ in 0..ROUNDS {
+        let start = Instant::now();
+        returned = store.refresh_frecencies(NOW, 1000).unwrap();
+        samples.push(start.elapsed());
+    }
+    let (median, worst) = summary(samples);
+    println!("| refresh_frecencies(1000), everything fresh | {median} | {worst} | {returned} |");
+
+    let mut samples = Vec::new();
+    for _ in 0..ROUNDS {
+        raw.execute("UPDATE places SET frecency_at = 0 WHERE id % 1000 = 0", [])
+            .unwrap();
+        let start = Instant::now();
+        returned = store.refresh_frecencies(NOW, 1000).unwrap();
+        samples.push(start.elapsed());
+    }
+    let (median, worst) = summary(samples);
+    println!("| refresh_frecencies(1000), 1 in 1000 stale | {median} | {worst} | {returned} |");
+
+    time_suggestions(&store, &inputs, "suggest, after refreshing every score");
 }

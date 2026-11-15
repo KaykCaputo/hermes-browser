@@ -378,3 +378,159 @@ fn a_future_dated_visit_counts_as_a_visit_now() {
     let s = store.suggest("future", 10, NOW).unwrap();
     assert_eq!(s[0].frecency, 100);
 }
+
+// ---- round 3: bounds, ties, titles, host keys ----
+
+#[test]
+fn limit_is_clamped_to_the_maximum() {
+    let mut store = Store::open_in_memory().unwrap();
+    for i in 0..(mercury_store::MAX_SUGGESTIONS + 10) {
+        store
+            .record_visit(
+                &format!("https://page{i}.example/"),
+                None,
+                VisitTransition::Link,
+                NOW,
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        store.suggest("page", u32::MAX, NOW).unwrap().len(),
+        mercury_store::MAX_SUGGESTIONS as usize
+    );
+}
+
+#[test]
+fn the_first_keystrokes_of_a_url_still_suggest_pages() {
+    let store = store();
+    for input in [
+        "h", "ht", "https", "https://", "w", "www", "www.", "c", "co", "com",
+    ] {
+        assert!(
+            !store.suggest(input, 10, NOW).unwrap().is_empty(),
+            "{input:?} found nothing"
+        );
+    }
+    assert_eq!(
+        urls(&store.suggest("https://www.exa", 10, NOW).unwrap()),
+        ["https://www.example.com/"]
+    );
+}
+
+#[test]
+fn a_rare_word_finds_its_page_however_low_its_score() {
+    let mut store = Store::open_in_memory().unwrap();
+    // 3,000 well-used pages, more than any source examines by score.
+    let urls: Vec<String> = (0..3000)
+        .map(|i| format!("https://busy{i}.example/"))
+        .collect();
+    let imports: Vec<mercury_store::VisitImport<'_>> = urls
+        .iter()
+        .map(|url| mercury_store::VisitImport {
+            url,
+            title: Some("Busy page"),
+            visited_at_ms: NOW,
+            transition: VisitTransition::Typed,
+        })
+        .collect();
+    store.import_visits(&imports, NOW).unwrap();
+    store
+        .record_visit(
+            "https://quiet.example/old",
+            Some("Zebrafish anatomy"),
+            VisitTransition::Reload,
+            NOW - 400 * DAY_MS,
+        )
+        .unwrap();
+    let hit = store.suggest("zebrafish", 10, NOW).unwrap();
+    assert_eq!(urls_of(&hit), ["https://quiet.example/old"]);
+    assert_eq!(hit[0].frecency, -1);
+    assert_eq!(
+        urls_of(&store.suggest("quiet.exa", 10, NOW).unwrap()),
+        ["https://quiet.example/old"]
+    );
+}
+
+fn urls_of(suggestions: &[Suggestion]) -> Vec<String> {
+    suggestions.iter().map(|s| s.url.clone()).collect()
+}
+
+#[test]
+fn equal_scores_enter_the_window_in_a_fixed_order() {
+    // 200 never-visited bookmarks, all scored 140, matching only through their titles. They
+    // are added in descending URL order, so id order and URL order disagree.
+    let run = || {
+        let mut store = Store::open_in_memory().unwrap();
+        let toolbar = store.bookmark_root(BookmarkRoot::Toolbar).unwrap();
+        for i in (0..200).rev() {
+            store
+                .add_bookmark(
+                    toolbar,
+                    None,
+                    &format!("Gadget {i}"),
+                    &format!("https://site-{i:03}.example/"),
+                    &format!("g-{i}"),
+                    NOW,
+                )
+                .unwrap();
+        }
+        urls_of(&store.suggest("gadget", 1, NOW).unwrap())
+    };
+    // Ties are broken by the newest row first, so the window holds the last four added
+    // (site-000 … site-003), and the final ranking picks the smallest URL among them.
+    assert_eq!(run(), ["https://site-000.example/"]);
+    assert_eq!(run(), run());
+}
+
+#[test]
+fn a_bookmarked_page_shows_its_bookmark_title() {
+    let mut store = store();
+    let toolbar = store.bookmark_root(BookmarkRoot::Toolbar).unwrap();
+    store
+        .add_bookmark(
+            toolbar,
+            None,
+            "My shop",
+            "https://exampleshop.net/",
+            "bm-shop",
+            NOW,
+        )
+        .unwrap();
+    let hit = store.suggest("my shop", 10, NOW).unwrap();
+    assert_eq!(urls_of(&hit), ["https://exampleshop.net/"]);
+    assert_eq!(hit[0].title.as_deref(), Some("My shop"));
+    let by_url = store.suggest("exampleshop", 10, NOW).unwrap();
+    assert_eq!(by_url[0].title.as_deref(), Some("My shop"));
+}
+
+#[test]
+fn host_keys_ignore_user_info_and_read_international_hosts() {
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .record_visit(
+            "https://user:secret@example.com/a",
+            None,
+            VisitTransition::Link,
+            NOW,
+        )
+        .unwrap();
+    store
+        .record_visit(
+            "https://www.xn--bcher-kva.test/",
+            None,
+            VisitTransition::Link,
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(
+        urls_of(&store.suggest("exam", 10, NOW).unwrap()),
+        ["https://user:secret@example.com/a"]
+    );
+    for input in ["bü", "BÜCH", "bücher.test"] {
+        assert_eq!(
+            urls_of(&store.suggest(input, 10, NOW).unwrap()),
+            ["https://www.xn--bcher-kva.test/"],
+            "{input}"
+        );
+    }
+}
