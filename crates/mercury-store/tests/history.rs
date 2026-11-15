@@ -546,7 +546,10 @@ fn long_titles_are_cut_and_long_urls_refused() {
             }],
             NOW
         ),
-        Err(StoreError::InvalidArgument(_))
+        Err(StoreError::ImportEntryRefused {
+            index: 0,
+            reason: mercury_store::ImportRefusal::UrlTooLong
+        })
     ));
     assert_eq!(f.count("SELECT count(*) FROM places"), 2);
 }

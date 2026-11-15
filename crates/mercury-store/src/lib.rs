@@ -28,7 +28,7 @@ use rusqlite::Connection;
 
 pub use bookmarks::{BookmarkId, BookmarkKind, BookmarkNode, BookmarkRoot};
 pub use downloads::{DownloadRecord, DownloadRecordId, DownloadState, NewDownload};
-pub use error::{Result, StoreError};
+pub use error::{ImportRefusal, Result, StoreError};
 pub use history::{ClearRange, HistoryCursor, HistoryEntry, VisitId, VisitTransition};
 pub use import::{BOOKMARK_IMPORT_MAX_DEPTH, BookmarkImport, VisitImport};
 pub use limits::{

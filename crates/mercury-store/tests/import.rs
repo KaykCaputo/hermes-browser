@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use common::{DAY_MS, Fixture, NOW};
 use mercury_store::{
-    BOOKMARK_IMPORT_MAX_DEPTH, BookmarkImport, BookmarkKind, BookmarkRoot, Store, StoreError,
-    VisitImport, VisitTransition,
+    BOOKMARK_IMPORT_MAX_DEPTH, BookmarkImport, BookmarkKind, BookmarkRoot, ImportRefusal, Store,
+    StoreError, VisitImport, VisitTransition,
 };
 
 // ---- visits ----
@@ -368,8 +368,12 @@ fn a_duplicate_guid_in_the_last_node_rolls_everything_back() {
     let mut nodes = tree();
     nodes.push(bookmark("Last", "https://last.example/", "taken"));
     match f.store.import_bookmarks(toolbar, &nodes, NOW) {
-        Err(StoreError::DuplicateGuid(guid)) => assert_eq!(guid, "taken"),
-        other => panic!("expected DuplicateGuid, got {other:?}"),
+        // The tree has 8 nodes, so the added one is entry 8 in pre-order.
+        Err(StoreError::ImportEntryRefused {
+            index: 8,
+            reason: ImportRefusal::DuplicateGuid(guid),
+        }) => assert_eq!(guid, "taken"),
+        other => panic!("expected a refused entry, got {other:?}"),
     }
     // A GUID repeated within the import fails the same way.
     let twice = vec![
@@ -385,7 +389,10 @@ fn a_duplicate_guid_in_the_last_node_rolls_everything_back() {
     ];
     assert!(matches!(
         f.store.import_bookmarks(toolbar, &twice, NOW),
-        Err(StoreError::DuplicateGuid(_))
+        Err(StoreError::ImportEntryRefused {
+            index: 2,
+            reason: ImportRefusal::DuplicateGuid(_)
+        })
     ));
 
     assert_eq!(f.count("SELECT count(*) FROM bookmarks"), before_bookmarks);
@@ -415,7 +422,11 @@ fn nesting_is_limited() {
     let other = store.bookmark_root(BookmarkRoot::Other).unwrap();
     assert!(matches!(
         store.import_bookmarks(other, &nested(BOOKMARK_IMPORT_MAX_DEPTH + 1), NOW),
-        Err(StoreError::InvalidArgument(_))
+        // MAX folders (entries 0 to MAX - 1), then the leaf one level too deep.
+        Err(StoreError::ImportEntryRefused {
+            index: BOOKMARK_IMPORT_MAX_DEPTH,
+            reason: ImportRefusal::NestedTooDeeply
+        })
     ));
     assert!(store.bookmark_children(other).unwrap().is_empty());
     assert_eq!(
@@ -438,4 +449,79 @@ fn importing_under_a_non_folder_is_refused() {
         Err(StoreError::NotAFolder)
     ));
     assert_eq!(store.import_bookmarks(toolbar, &[], NOW).unwrap(), 0);
+}
+
+#[test]
+fn a_refused_visit_is_named_by_its_index() {
+    let mut f = Fixture::new("import-visit-index");
+    let long_url = format!(
+        "https://example.com/{}",
+        "a".repeat(mercury_store::MAX_URL_BYTES)
+    );
+    let visits = [
+        titled("https://a.example/", Some("A"), 1),
+        titled("https://b.example/", None, 2),
+        titled(&long_url, None, 3),
+    ];
+    match f.store.import_visits(&visits, NOW) {
+        Err(StoreError::ImportEntryRefused {
+            index: 2,
+            reason: ImportRefusal::UrlTooLong,
+        }) => {}
+        other => panic!("expected entry 2 refused, got {other:?}"),
+    }
+    assert_eq!(f.count("SELECT count(*) FROM places"), 0);
+    let message = f.store.import_visits(&visits, NOW).unwrap_err().to_string();
+    assert!(message.contains("entry 2"), "{message}");
+}
+
+// ---- several trees in one transaction ----
+
+#[test]
+fn several_trees_are_imported_together() {
+    let mut store = Store::open_in_memory().unwrap();
+    let toolbar = store.bookmark_root(BookmarkRoot::Toolbar).unwrap();
+    let other = store.bookmark_root(BookmarkRoot::Other).unwrap();
+    let bar = vec![bookmark("On the bar", "https://bar.example/", "s-bar")];
+    let rest = tree();
+    let added = store
+        .import_bookmark_sets(&[(toolbar, &bar), (other, &rest)], NOW)
+        .unwrap();
+    assert_eq!(added, 9);
+    assert_eq!(
+        shape(&store, toolbar),
+        ["On the bar <https://bar.example/>"]
+    );
+    assert_eq!(shape(&store, other).len(), 8);
+    // Two sets under the same parent append in order.
+    let more = vec![bookmark("More", "https://more.example/", "s-more")];
+    store
+        .import_bookmark_sets(&[(toolbar, &more), (toolbar, &more[..0])], NOW)
+        .unwrap();
+    assert_eq!(shape(&store, toolbar).len(), 2);
+}
+
+#[test]
+fn a_failure_in_a_later_tree_rolls_back_the_earlier_ones() {
+    let mut f = Fixture::new("import-sets-rollback");
+    let toolbar = f.store.bookmark_root(BookmarkRoot::Toolbar).unwrap();
+    let other = f.store.bookmark_root(BookmarkRoot::Other).unwrap();
+    let before = f.count("SELECT count(*) FROM bookmarks");
+    let bar = vec![bookmark("On the bar", "https://bar.example/", "s-bar")];
+    let mut rest = tree();
+    rest.push(bookmark("Clash", "https://clash.example/", "s-bar"));
+    match f
+        .store
+        .import_bookmark_sets(&[(toolbar, &bar), (other, &rest)], NOW)
+    {
+        // Entry 0 is the toolbar bookmark; the other tree's 8 nodes are entries 1 to 8.
+        Err(StoreError::ImportEntryRefused {
+            index: 9,
+            reason: ImportRefusal::DuplicateGuid(guid),
+        }) => assert_eq!(guid, "s-bar"),
+        other => panic!("expected entry 9 refused, got {other:?}"),
+    }
+    assert_eq!(f.count("SELECT count(*) FROM bookmarks"), before);
+    assert_eq!(f.count("SELECT count(*) FROM places"), 0);
+    assert!(f.store.bookmark_children(toolbar).unwrap().is_empty());
 }

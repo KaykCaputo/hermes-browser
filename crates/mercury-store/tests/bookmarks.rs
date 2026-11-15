@@ -462,7 +462,10 @@ fn long_bookmark_titles_are_cut_and_long_urls_refused() {
             }],
             NOW
         ),
-        Err(StoreError::InvalidArgument(_))
+        Err(StoreError::ImportEntryRefused {
+            index: 0,
+            reason: mercury_store::ImportRefusal::UrlTooLong
+        })
     ));
     assert_eq!(titles(&store, toolbar).len(), 2);
 }

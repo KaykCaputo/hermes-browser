@@ -33,9 +33,32 @@ pub enum StoreError {
     /// report for a finished download).
     #[error("invalid state: {0}")]
     InvalidState(&'static str),
+    /// An import was refused because of one entry; nothing was imported.
+    #[error("import entry {index} refused: {reason}")]
+    ImportEntryRefused {
+        /// The entry's index: in the slice of visits, or for bookmarks in a depth-first
+        /// (pre-order) walk of all the trees of the call, in order, starting at 0.
+        index: usize,
+        /// Why it was refused.
+        reason: ImportRefusal,
+    },
     /// An argument is not valid for this operation.
     #[error("invalid argument: {0}")]
     InvalidArgument(&'static str),
+}
+
+/// Why an import entry was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ImportRefusal {
+    /// Its URL is longer than [`MAX_URL_BYTES`](crate::MAX_URL_BYTES).
+    #[error("the URL is longer than the limit")]
+    UrlTooLong,
+    /// It is nested deeper than [`BOOKMARK_IMPORT_MAX_DEPTH`](crate::BOOKMARK_IMPORT_MAX_DEPTH).
+    #[error("the bookmark is nested too deeply")]
+    NestedTooDeeply,
+    /// Its GUID is already in use, or used twice in the import.
+    #[error("the GUID {0:?} is already in use")]
+    DuplicateGuid(String),
 }
 
 /// The result type of every fallible store operation.
