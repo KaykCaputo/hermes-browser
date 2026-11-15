@@ -7,9 +7,13 @@
 name: Continuous integration
 
 on:
+  # The default and working branches, and pull requests. Not every branch: a
+  # push to a pull request's branch would otherwise run the multi-hour macOS
+  # job twice. Tags run the release workflow instead.
   push:
-    # Branches only: a tag runs the release workflow, which builds everything.
-    branches: ["**"]
+    branches:
+      - master
+      - mercury
   pull_request:
   workflow_dispatch:
 
@@ -264,8 +268,8 @@ jobs:
 
           sw_vers
           xcode-select -p
-          bash --version | head -n 1
-          cmake --version | head -n 1
+          bash --version | sed -n 1p
+          cmake --version | sed -n 1p
           pkg-config --version
           python3 --version
 
@@ -279,17 +283,29 @@ jobs:
           rustc --version
           cargo --version
 
+      # Only the downloaded .pkg files are cached (from a server outside
+      # GitHub); unpacking them takes a minute. The key is the script that pins
+      # the version and the checksums, so changing either starts a new cache.
       - name: Restore the GStreamer packages
-        # Only the downloaded .pkg files (a few hundred megabytes, from a
-        # server outside GitHub); unpacking them takes a minute. The key is the
-        # script that pins the version and the checksums, so changing either
-        # starts a new cache.
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: gstreamer-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/mercury-browser/gstreamer/**/*.pkg
           key: gstreamer-macos-arm64-${{ hashFiles('scripts/macos/gstreamer.sh') }}
 
-      - name: Fetch, unpack and check GStreamer
+      - name: Fetch and verify the GStreamer packages
+        run: scripts/macos/gstreamer.sh fetch
+
+      # Saved straight after the checksums pass, so a run that fails later
+      # does not make the next one download them again.
+      - name: Save the GStreamer packages
+        if: steps.gstreamer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/mercury-browser/gstreamer/**/*.pkg
+          key: ${{ steps.gstreamer-cache.outputs.cache-primary-key }}
+
+      - name: Unpack and check GStreamer
         run: make gstreamer-macos
 
       - name: Export the GStreamer build environment
@@ -297,29 +313,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Every variable `gstreamer.sh env` sets, passed to later steps
-          # through $GITHUB_ENV and $GITHUB_PATH without parsing its values.
+          # The variables `gstreamer.sh env` sets (an allow-list in the
+          # script, MERCURY_GSTREAMER_PREFIX among them), passed to later steps
+          # through $GITHUB_ENV and $GITHUB_PATH without parsing their values.
           scripts/ci/github-env.sh scripts/macos/gstreamer.sh env
 
-      - name: Tell the bundler where GStreamer is
+      - name: Check the GStreamer prefix
         shell: bash
         run: |
           set -euo pipefail
 
-          prefix="${MERCURY_GSTREAMER_PREFIX:-}"
-          if [ -z "${prefix}" ]; then
-            # The .pc files are relocatable (prefix=${pcfiledir}/../..), so
-            # this is the unpacked prefix the build is about to link against.
-            prefix="$(pkg-config --variable=prefix gstreamer-1.0)"
+          # bundle.sh refuses to build without MERCURY_GSTREAMER_PREFIX; it
+          # must be the prefix gstreamer.sh unpacked.
+          expected="$(scripts/macos/gstreamer.sh prefix)"
+          if [ -z "${MERCURY_GSTREAMER_PREFIX:-}" ] ||
+            [ "$(cd "${MERCURY_GSTREAMER_PREFIX}" && pwd -P)" != "$(cd "${expected}" && pwd -P)" ]; then
+            echo "MERCURY_GSTREAMER_PREFIX='${MERCURY_GSTREAMER_PREFIX:-}' is not ${expected}" >&2
+            exit 1
           fi
-          prefix="$(cd "${prefix}" && pwd -P)"
-          ls "${prefix}"/lib/libgstreamer-1.0*.dylib
+          test -f "${MERCURY_GSTREAMER_PREFIX}/lib/libgstreamer-1.0.0.dylib"
           pkg-config --modversion gstreamer-1.0
-          echo "MERCURY_GSTREAMER_PREFIX=${prefix}" >> "${GITHUB_ENV}"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      # Building compiles and links against GStreamer (found through
+      # pkg-config) but runs nothing that loads its libraries, so, like
+      # clippy, it needs no library path. Only the tests do; see "Test".
       - name: Build the release executable
         id: build
         run: cargo build --locked --release --package mercury-desktop
@@ -330,7 +350,7 @@ jobs:
         run: make app-macos
 
       - name: Check the bundle
-        run: scripts/ci/check-macos-bundle.sh --signature adhoc "dist/Mercury Browser.app"
+        run: scripts/ci/check-macos-bundle.sh --signature adhoc --require-media "dist/Mercury Browser.app"
 
       - name: Archive the bundle
         shell: bash
@@ -380,6 +400,7 @@ jobs:
       # Lint and tests run once the build has succeeded, even if a bundle or
       # smoke-test step failed, so one failure does not hide the others. The
       # job fails if any step did.
+      # Clippy only type-checks; it loads no GStreamer library.
       - name: Lint
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: cargo clippy --locked --release --workspace --all-targets -- -D warnings
@@ -390,16 +411,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Evaluated again here because macOS removes DYLD_* variables when a
-          # SIP-protected shell such as /bin/bash starts, so any library path
-          # the test binaries need cannot arrive through $GITHUB_ENV.
-          # Assigned first so that a failure of the script stops the step.
-          gstreamer_env="$(scripts/macos/gstreamer.sh env)"
-          eval "${gstreamer_env}"
-          cargo test --locked --release --workspace
+          # Test binaries have no rpath to the GStreamer libraries (only the
+          # app's executable gets @executable_path/lib/), so dyld finds them
+          # through DYLD_FALLBACK_LIBRARY_PATH. It is set on cargo's own command
+          # line: macOS strips DYLD_* from the environment of SIP-protected
+          # programs such as /bin/bash, so it cannot come from $GITHUB_ENV.
+          # cargo is not protected and passes it on to the test binaries.
+          DYLD_FALLBACK_LIBRARY_PATH="${MERCURY_GSTREAMER_PREFIX}/lib" \
+            cargo test --locked --release --workspace
 
   scripts:
-    name: Shell scripts
+    name: Scripts
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -424,6 +446,18 @@ jobs:
 
           shellcheck --version
           find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck -x
+
+      - name: Byte-compile the Python scripts
+        # A syntax error in the screenshot checker would otherwise surface
+        # only in the macOS job, hours in.
+        shell: bash
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+        run: |
+          set -euo pipefail
+
+          python3 --version
+          find scripts -type f -name '*.py' -print0 | xargs -0 python3 -m py_compile
 
   workflows:
     name: Workflows

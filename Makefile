@@ -63,7 +63,7 @@ help:
 		'qa' 'Run formatting, linting, and tests.' \
 		'qa-fast' 'Check formatting, lint and test the crates that need no engine.' \
 		'ci-tools' 'Download the pinned shellcheck, actionlint and cargo-deny.' \
-		'lint-scripts' 'Run shellcheck on scripts/ and actionlint on the workflows.' \
+		'lint-scripts' 'Lint scripts/ (shellcheck, py_compile) and the workflows (actionlint).' \
 		'deny' 'Check dependencies against the policy in deny.toml.' \
 		'build' 'Build the complete workspace in debug mode.' \
 		'build-release' 'Build the complete workspace in release mode.' \
@@ -190,8 +190,10 @@ lint-scripts:
 	fi; \
 	printf 'shellcheck %s (%s), actionlint %s (%s)\n' \
 		"$$(shellcheck --version | sed -n 's/^version: //p')" "$$(command -v shellcheck)" \
-		"$$(actionlint -version | head -n 1)" "$$(command -v actionlint)"; \
+		"$$(actionlint -version | sed -n 1p)" "$$(command -v actionlint)"; \
 	find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck -x && \
+	find scripts -type f -name '*.py' -print0 | \
+		PYTHONPYCACHEPREFIX="$(abspath target)/pycache" xargs -0 "$(PYTHON)" -m py_compile && \
 	actionlint && \
 	printf '%s\n' 'scripts and workflows: no findings'
 
