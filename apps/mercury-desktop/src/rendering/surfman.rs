@@ -245,6 +245,9 @@ impl RenderingContext for BrowserRenderingContext {
         PhysicalSize::new(size.width(), size.height())
     }
 
+    /// A failed resize keeps the old size and is not retried by itself: Servo calls this only
+    /// when the viewport size or the active tab changes, so the next attempt comes with the
+    /// next window resize or tab switch. Until then the old frame is stretched to fit.
     fn resize(&self, size: PhysicalSize<u32>) {
         let Some(size) = ViewportSize::new(size.width, size.height) else {
             return;

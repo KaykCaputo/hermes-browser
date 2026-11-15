@@ -78,8 +78,9 @@ pub(super) struct MacFrameBridge {
     /// `None` when every frame is read back.
     importer: Option<MetalFrameImporter>,
     import_failed: Cell<bool>,
-    /// The last imported IOSurface, kept until the next import so that it outlives the flip
-    /// pass that samples it even if Servo resizes (and destroys) its surface in between.
+    /// A precaution: an extra reference to the last imported IOSurface, held until the next
+    /// import. The `MTLTexture` created from it probably keeps it alive for the flip pass, but
+    /// that ownership is not documented. Released when the read-back latch engages.
     last_imported_surface: RefCell<Option<NativeSurface>>,
     timings: RefCell<ImportTimings>,
 }
@@ -147,7 +148,7 @@ impl BrowserRenderingContext {
         &self,
         wgpu_device: &wgpu::Device,
     ) -> Result<Image, RenderingBridgeError> {
-        let started = Instant::now();
+        let started = log::log_enabled!(log::Level::Debug).then(Instant::now);
         let bridge = &self.frame_bridge;
         let (path, result) = match bridge.active_importer() {
             Some(importer) => match self.import_frame_through_metal(importer, wgpu_device) {
@@ -160,6 +161,7 @@ impl BrowserRenderingContext {
                          reading frames back through the CPU from now on"
                     );
                     bridge.import_failed.set(true);
+                    bridge.last_imported_surface.replace(None);
                     (FramePath::ReadBack, self.read_back_frame())
                 }
                 result => (FramePath::Metal, result),
@@ -167,7 +169,8 @@ impl BrowserRenderingContext {
             None => (FramePath::ReadBack, self.read_back_frame()),
         };
 
-        if result.is_ok()
+        if let Some(started) = started
+            && result.is_ok()
             && let Some(summary) = bridge.timings.borrow_mut().record(path, started.elapsed())
         {
             log::debug!("{summary}");
@@ -306,18 +309,18 @@ impl MetalFrameImporter {
         let size = frame_extent(surfman_device.surface_info(surface).size)?;
         let io_surface = surfman_device.native_surface(surface);
 
-        // WGPU's default error handler panics; a validation error here must select the
-        // read-back path instead.
-        let error_scope = wgpu_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        // WGPU's default error handler panics; any WGPU error here must select the read-back
+        // path instead.
+        let error_scopes = ErrorScopes::push(wgpu_device);
         let converted = objc2_metal_texture_from_iosurface(size, wgpu_device, &io_surface).map(
             |metal_texture| {
                 let source = wgpu_hal_texture(size, wgpu_device, metal_texture);
                 self.create_flipped_texture_render(size, wgpu_device, wgpu_queue, &source)
             },
         );
-        let validation_error = ready_value(error_scope.pop()).flatten();
+        let wgpu_error = error_scopes.pop();
 
-        match (converted, validation_error) {
+        match (converted, wgpu_error) {
             (Err(error), _) => Err(error),
             (Ok(_), Some(error)) => Err(MetalImportError::Wgpu(error.to_string())),
             (Ok(texture), None) => Ok((texture, io_surface)),
@@ -591,6 +594,36 @@ fn frame_extent(size: Size2D<i32>) -> Result<wgpu::Extent3d, MetalImportError> {
     }
 }
 
+/// Captures every kind of WGPU error raised while it exists, so that none reaches WGPU's
+/// default handler, which panics. Fields are declared innermost first: struct fields drop in
+/// declaration order, so even an un-popped `ErrorScopes` pops its scopes in strict LIFO order.
+struct ErrorScopes {
+    validation: wgpu::ErrorScopeGuard,
+    internal: wgpu::ErrorScopeGuard,
+    out_of_memory: wgpu::ErrorScopeGuard,
+}
+
+impl ErrorScopes {
+    fn push(wgpu_device: &wgpu::Device) -> Self {
+        let out_of_memory = wgpu_device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal = wgpu_device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let validation = wgpu_device.push_error_scope(wgpu::ErrorFilter::Validation);
+        Self {
+            validation,
+            internal,
+            out_of_memory,
+        }
+    }
+
+    /// Pops all three scopes and returns the first error caught, if any.
+    fn pop(self) -> Option<wgpu::Error> {
+        let validation = ready_value(self.validation.pop()).flatten();
+        let internal = ready_value(self.internal.pop()).flatten();
+        let out_of_memory = ready_value(self.out_of_memory.pop()).flatten();
+        validation.or(internal).or(out_of_memory)
+    }
+}
+
 /// Polls `future` once. WGPU's native backend resolves error-scope futures immediately.
 fn ready_value<F: Future>(future: F) -> Option<F::Output> {
     let mut future = pin!(future);
@@ -730,6 +763,92 @@ mod tests {
     fn a_ready_future_yields_its_value_and_a_pending_one_nothing() {
         assert_eq!(ready_value(std::future::ready(7)), Some(7));
         assert_eq!(ready_value(std::future::pending::<u8>()), None);
+    }
+
+    /// A Metal device of its own, or `None` on a machine without one.
+    fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+        descriptor.backends = wgpu::Backends::METAL;
+        let instance = wgpu::Instance::new(descriptor);
+        let adapter = ready_value(instance.request_adapter(&Default::default()))?.ok()?;
+        ready_value(adapter.request_device(&Default::default()))?.ok()
+    }
+
+    fn texture(
+        wgpu_device: &wgpu::Device,
+        usage: TextureUsages,
+        size: wgpu::Extent3d,
+    ) -> wgpu::Texture {
+        wgpu_device.create_texture(&create_wgpu_texture_descriptor(
+            size,
+            "test",
+            usage,
+            TextureFormat::Rgba8Unorm,
+        ))
+    }
+
+    const SMALL: wgpu::Extent3d = wgpu::Extent3d {
+        width: 4,
+        height: 4,
+        depth_or_array_layers: 1,
+    };
+
+    #[test]
+    fn error_scopes_catch_an_error_instead_of_panicking() {
+        let Some((wgpu_device, wgpu_queue)) = test_device() else {
+            eprintln!("no Metal device; skipped");
+            return;
+        };
+        let scopes = ErrorScopes::push(&wgpu_device);
+        // Rendering into a texture without RENDER_ATTACHMENT is a validation error.
+        let target = texture(&wgpu_device, TextureUsages::TEXTURE_BINDING, SMALL);
+        let view = target.create_view(&Default::default());
+        let mut encoder = wgpu_device.create_command_encoder(&Default::default());
+        drop(encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            depth_stencil_attachment: None,
+            multiview_mask: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+        }));
+        wgpu_queue.submit(std::iter::once(encoder.finish()));
+        assert!(matches!(scopes.pop(), Some(wgpu::Error::Validation { .. })));
+    }
+
+    #[test]
+    fn error_scopes_report_nothing_for_valid_work() {
+        let Some((wgpu_device, _queue)) = test_device() else {
+            eprintln!("no Metal device; skipped");
+            return;
+        };
+        let scopes = ErrorScopes::push(&wgpu_device);
+        let _texture = texture(
+            &wgpu_device,
+            TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT,
+            SMALL,
+        );
+        assert!(scopes.pop().is_none());
+    }
+
+    #[test]
+    fn unpopped_error_scopes_unwind_in_order() {
+        let Some((wgpu_device, _queue)) = test_device() else {
+            eprintln!("no Metal device; skipped");
+            return;
+        };
+        // Dropping the guards in the wrong order would panic.
+        drop(ErrorScopes::push(&wgpu_device));
+        // The device has no scopes left: a new set pushes and pops cleanly.
+        assert!(ErrorScopes::push(&wgpu_device).pop().is_none());
     }
 
     #[test]
