@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury canvas animation test page</title>
+<style>
+  html, body { margin: 0; overflow: hidden; background: #ffffff; }
+  #results { position: absolute; left: 10px; top: 10px; font: bold 22px/1.3 monospace;
+             background: rgba(255,255,255,0.85); z-index: 1; white-space: pre; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+  <div id="results">starting</div>
+  <script>
+    // Animated 2D canvases for long runs. Query:
+    //   n       number of canvases (default 1)
+    //   size    "window" (the window at the device pixel ratio) or WxH (default window)
+    //   mode    "clear" (clear and redraw every frame) or "incremental" (add strokes, never clear)
+    //   shapes  shapes per frame and canvas (default 300)
+    //   seconds run time (default 60); interval: seconds per report line (default 60)
+    //   read    seconds between one-pixel read-backs, 0 for none (default 0)
+    // Every interval it appends the frames completed per second to the page and to the
+    // document title (which the window-title log carries out of the browser).
+    const q = new URLSearchParams(location.search);
+    const n = Number(q.get("n") || 1), mode = q.get("mode") || "clear";
+    const shapes = Number(q.get("shapes") || 300), seconds = Number(q.get("seconds") || 60);
+    const interval = Number(q.get("interval") || 60), readEvery = Number(q.get("read") || 0);
+    const dpr = window.devicePixelRatio || 1;
+    let w, h;
+    if ((q.get("size") || "window") === "window") {
+      w = Math.round(innerWidth * dpr); h = Math.round(innerHeight * dpr);
+    } else {
+      [w, h] = q.get("size").split("x").map(Number);
+    }
+    const contexts = [];
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement("canvas");
+      c.width = w; c.height = h;
+      c.style.width = (n === 1 ? w / dpr : Math.min(w / dpr, innerWidth / 2)) + "px";
+      c.style.height = (n === 1 ? h / dpr : (h / dpr) * Math.min(1, (innerWidth / 2) / (w / dpr))) + "px";
+      document.body.appendChild(c);
+      contexts.push(c.getContext("2d"));
+    }
+    const out = document.getElementById("results");
+    const lines = ["canvas " + n + " x " + w + "x" + h + " dpr " + dpr + " mode " + mode + " shapes " + shapes];
+    function show() { out.textContent = lines.join("\n"); document.title = "ANIM " + lines.join(" ;; "); }
+    show();
+
+    let frame = 0, framesInInterval = 0, start = 0, intervalStart = 0, nextRead = 0, reads = 0;
+    // Incremental mode: three strokes per canvas per frame on a lattice. The first EARLY
+    // strokes get a band of their own that later strokes never cover, and are checked at the
+    // end; later strokes cycle through the rest of the canvas.
+    const EARLY = 300, cols = Math.floor((w - 24) / 24);
+    const earlyRows = Math.ceil(EARLY / cols), laterRows = Math.max(1, Math.floor((h - 24) / 24) - earlyRows);
+    function strokeAt(k) {
+      if (k < EARLY) return [12 + (k % cols) * 24, 12 + Math.floor(k / cols) * 24];
+      const j = (k - EARLY) % (cols * laterRows);
+      return [12 + (j % cols) * 24, 12 + (earlyRows + Math.floor(j / cols)) * 24];
+    }
+    function strokeColour(k) { return [(k * 41) % 200 + 30, (k * 13) % 200 + 30, (k * 71) % 200 + 30]; }
+
+    function draw(c, t) {
+      if (mode === "clear") {
+        c.clearRect(0, 0, w, h);
+        for (let s = 0; s < shapes; s++) {
+          const a = t / 1000 + s;
+          const x = (Math.sin(a * 0.7 + s) * 0.45 + 0.5) * w, y = (Math.cos(a * 0.9 + s * 1.3) * 0.45 + 0.5) * h;
+          c.fillStyle = "hsl(" + ((s * 37) % 360) + ",70%,50%)";
+          if (s % 3 === 0) { c.fillRect(x, y, 30 * dpr, 20 * dpr); }
+          else { c.beginPath(); c.arc(x, y, 12 * dpr, 0, Math.PI * 2); c.fill(); }
+        }
+        c.fillStyle = "#000";
+        c.font = "bold " + 24 * dpr + "px sans-serif";
+        c.fillText("frame " + frame, 20 * dpr, h - 20 * dpr);
+      } else {
+        for (let s = 0; s < 3; s++) {
+          const k = frame * 3 + s, [x, y] = strokeAt(k);
+          c.strokeStyle = "rgb(" + strokeColour(k).join(",") + ")";
+          c.lineWidth = 6;
+          c.beginPath(); c.moveTo(x - 8, y); c.lineTo(x + 8, y); c.stroke();
+        }
+      }
+    }
+    function tick(now) {
+      if (!start) { start = now; intervalStart = now; nextRead = now + readEvery * 1000; }
+      for (const c of contexts) draw(c, now);
+      frame++; framesInInterval++;
+      if (readEvery && now >= nextRead) {
+        contexts[0].getImageData(1, 1, 1, 1); reads++; nextRead = now + readEvery * 1000;
+      }
+      if (now - intervalStart >= interval * 1000) {
+        lines.push("t=" + ((now - start) / 1000).toFixed(0) + "s fps " + (framesInInterval * 1000 / (now - intervalStart)).toFixed(1));
+        framesInInterval = 0; intervalStart = now; show();
+      }
+      if (now - start < seconds * 1000) { requestAnimationFrame(tick); } else { finish(now); }
+    }
+    function finish(now) {
+      let summary = "done: " + frame + " frames in " + ((now - start) / 1000).toFixed(1) + " s = "
+        + (frame * 1000 / (now - start)).toFixed(1) + " fps, reads " + reads;
+      if (mode === "incremental") {
+        let lost = 0, checked = 0;
+        for (let k = 0; k < Math.min(frame * 3, EARLY); k++) {
+          const [x, y] = strokeAt(k);
+          const d = contexts[0].getImageData(x, y, 1, 1).data, want = strokeColour(k);
+          checked++;
+          if (Math.abs(d[0] - want[0]) > 2 || Math.abs(d[1] - want[1]) > 2 || Math.abs(d[2] - want[2]) > 2) lost++;
+        }
+        summary += ", early strokes checked " + checked + " lost " + lost + (lost ? " FAIL" : " PASS");
+      }
+      lines.push(summary); show();
+    }
+    requestAnimationFrame(tick);
+  </script>
+</body>
+</html>

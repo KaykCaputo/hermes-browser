@@ -777,6 +777,72 @@
       }, 1000);
     }));
 
+    // ---- review round: clips with full clears, transforms, render boundaries
+    function roundedRect(c, x, y, w, h, r) {
+      c.beginPath();
+      c.moveTo(x + r, y); c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+      c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
+    }
+    run("clip-rounded-clearrect", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 100, 100);
+      c.save(); roundedRect(c, 0, 0, 100, 100, 20); c.clip();
+      c.clearRect(0, 0, 100, 100);
+      c.fillStyle = "rgb(0,0,255)"; c.fillRect(0, 0, 100, 100);
+      c.restore();
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(90, 0, 10, 10);
+      return [sample(c, "i", 1, 1, RED), sample(c, "i", 98, 98, RED), sample(c, "i", 50, 50, BLUE),
+        sample(c, "i", 95, 5, GREEN)];
+    });
+    run("clip-evenodd-ring-clearrect", () => {
+      const c = canvas().getContext("2d");
+      c.fillStyle = "rgb(255,0,0)"; c.fillRect(0, 0, 100, 100);
+      c.save(); c.beginPath(); c.rect(0, 0, 100, 100); c.rect(30, 30, 40, 40); c.clip("evenodd");
+      c.clearRect(0, 0, 100, 100);
+      c.fillStyle = "rgb(0,0,255)"; c.fillRect(0, 0, 100, 100);
+      c.restore();
+      return [sample(c, "i", 50, 50, RED), sample(c, "i", 10, 10, BLUE)];
+    });
+    run("clip-under-transform-then-change", () => {
+      const c = canvas().getContext("2d");
+      c.translate(50, 50); c.beginPath(); c.rect(0, 0, 30, 30); c.clip();
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      c.fillStyle = "rgb(0,128,0)"; c.fillRect(0, 0, 100, 100);
+      return [sample(c, "i", 65, 65, GREEN), sample(c, "i", 20, 20, T), sample(c, "i", 90, 90, T)];
+    });
+    const acrossWant = {
+      // [blue only, overlap, red only]
+      "copy": [T, RED, RED],
+      "source-in": [T, RED, T],
+      "destination-in": [T, BLUE, T],
+    };
+    for (const op of Object.keys(acrossWant)) {
+      run("composite-after-readback-" + op, () => {
+        const c = canvas().getContext("2d");
+        c.fillStyle = "rgb(0,0,255)"; c.fillRect(10, 10, 50, 50);
+        px(c, 0, 0);
+        c.globalCompositeOperation = op;
+        c.fillStyle = "rgb(255,0,0)"; c.fillRect(40, 40, 50, 50);
+        const want = acrossWant[op];
+        return [sample(c, "i", 20, 20, want[0]), sample(c, "i", 50, 50, want[1]), sample(c, "i", 80, 80, want[2])];
+      });
+    }
+    run("putimagedata-under-clip", () => {
+      const c = canvas().getContext("2d");
+      c.beginPath(); c.rect(0, 0, 50, 100); c.clip();
+      const d = c.createImageData(100, 100);
+      for (let i = 0; i < d.data.length; i += 4) { d.data.set([0, 128, 0, 255], i); }
+      c.putImageData(d, 0, 0);
+      return [sample(c, "i", 25, 50, GREEN), sample(c, "i", 75, 50, GREEN)];
+    });
+
+    run("beyond-256-bins", () => {
+      // 4352x4096 is 17x16 = 272 bins of 256x256 pixels, more than vello renders correctly.
+      const c = canvas(4352, 4096).getContext("2d");
+      c.fillStyle = "rgb(0,0,255)"; c.fillRect(0, 0, 4352, 4096);
+      return [sample(c, "i", 10, 10, BLUE), sample(c, "i", 4340, 2048, BLUE), sample(c, "i", 4340, 4090, BLUE)];
+    });
+
     function finish() {
       const out = document.getElementById("out");
       out.textContent = lines.join("\n");
