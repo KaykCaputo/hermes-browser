@@ -14,7 +14,7 @@ repository's MPL-2.0 `LICENSE` file applies to this directory.
 Mercury enables Servo's `vello` feature, the GPU 2D-canvas backend. The first
 commit that added this directory (`60ee59f`) holds the crate as published, so
 `git diff 60ee59f -- third_party/servo-canvas` shows every change below.
-Changes 2–5 are marked with `Mercury:` comments in the source.
+Changes 2–6 are marked with `Mercury:` comments in the source.
 
 ## 1. Build with wgpu 30 (`vello_backend.rs`, `VelloDrawTarget::map_read`)
 
@@ -107,8 +107,46 @@ drawn and read back 100 times the mean step was 2.2–2.8 ms with the fix and
 
 Drop it when Servo's backend marks the image itself.
 
+## 6. Share one GPU device and renderer between canvases (`vello_backend.rs`, `SHARED_GPU`, `start`, `create_device_and_renderer`)
+
+As published, every 2D canvas creates its own wgpu instance, device and vello
+renderer, synchronously on the Canvas thread while the constellation (and so
+every tab) waits. vello's renderer keeps its GPU buffers between renders
+(`vello_encoding` `BufferSizes`: tiles, lines, segments and segment counts of
+2^21 entries each, an 8 MiB-entry `ptcl`, a 1 MiB-entry blend spill), about
+175 MB per renderer, so fifty 200×100 canvases took about 9 GB of process
+memory on macOS and two hundred about 34 GB. Now the first GPU canvas on the
+Canvas thread creates the device, queue and renderer and keeps them in a
+thread-local; later canvases reuse them through `new_with_renderer`, the path
+the crate already used for a resized canvas. Measured on this change: fifty
+canvases about 0.46 GB and 0.07 s to create (the CPU backend: 0.28 GB,
+0.06 s); two hundred about 0.55 GB. The shared renderer (about 175 MB) is kept
+until the process exits, even after the last GPU canvas is gone.
+
+Failure isolation changes with sharing: a lost device now affects every GPU
+canvas, not one. A device-lost callback marks the device lost; the next canvas
+created then logs `GPU 2D canvas unavailable (GPU device lost); …`, drops the
+shared device and renderer, and is drawn on the CPU, as are all later canvases.
+Canvases already on the lost device stay blank. wgpu calls the callback
+synchronously when it sees a device error (`wgpu-core` `Device::lose`); if the
+loss is first seen while waiting for a read-back, wgpu panics instead (see
+"Known limitations").
+
+Drop it when Servo shares the device itself.
+
+## Known limitations (accepted)
+
+- A device lost while a read-back waits on the GPU panics inside
+  `vello::util::block_on_wgpu` (`device.poll(..).unwrap()`) or wgpu's own
+  `Device::poll`, which treats a lost device as fatal. That kills the Canvas
+  thread and so every 2D canvas for the rest of the session.
+- The CPU backend reads `rgba(0, 102, 204, 0.5)` back as `[0,101,203,128]`
+  (premultiplied 8-bit storage, truncated when un-premultiplied); the GPU
+  backend reads `[0,102,203,128]`. Both are within the ±1 tolerance of
+  `tests/pages/canvas-readback.html`, the CPU one at its edge.
+
 ## Removing this directory
 
 Remove the `[patch.crates-io]` entry and this directory once a Servo release
-compiles with the `vello` feature and contains equivalents of changes 2–5, or
+compiles with the `vello` feature and contains equivalents of changes 2–6, or
 once Mercury no longer needs them.

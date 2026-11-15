@@ -52,6 +52,17 @@ thread_local! {
 static GPU_CANVAS_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Mercury: set once a failed render has been logged.
 static RENDER_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
+/// Mercury: set by wgpu when the shared device is lost.
+static GPU_DEVICE_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Mercury: the GPU device, queue and vello renderer shared by all canvases on
+/// the Canvas thread. vello's renderer keeps about 170 MB of GPU buffers, so
+/// one per canvas exhausts memory on pages with many canvases.
+type SharedGpu = (Device, Queue, Rc<RefCell<vello::Renderer>>);
+
+thread_local! {
+    static SHARED_GPU: RefCell<Option<SharedGpu>> = const { RefCell::new(None) };
+}
 
 pub(crate) struct VelloDrawTarget {
     device: Device,
@@ -212,6 +223,13 @@ impl VelloDrawTarget {
         if GPU_CANVAS_UNAVAILABLE.load(Ordering::Relaxed) {
             return None;
         }
+        if GPU_DEVICE_LOST.load(Ordering::Relaxed) {
+            // Canvases already on the lost device stay blank; new ones use the CPU.
+            SHARED_GPU.set(None);
+            GPU_CANVAS_UNAVAILABLE.store(true, Ordering::Relaxed);
+            log::warn!("GPU 2D canvas unavailable (GPU device lost); drawing 2D canvases on the CPU");
+            return None;
+        }
         Self::start(size)
             .map_err(|reason| {
                 GPU_CANVAS_UNAVAILABLE.store(true, Ordering::Relaxed);
@@ -221,6 +239,18 @@ impl VelloDrawTarget {
     }
 
     fn start(size: Size2D<u32>) -> Result<Self, String> {
+        let (device, queue, renderer) = match SHARED_GPU.with_borrow(Clone::clone) {
+            Some(shared) => shared,
+            None => {
+                let shared = Self::create_device_and_renderer()?;
+                SHARED_GPU.set(Some(shared.clone()));
+                shared
+            },
+        };
+        Ok(Self::new_with_renderer(device, queue, renderer, size))
+    }
+
+    fn create_device_and_renderer() -> Result<SharedGpu, String> {
         // TODO: we should read prefs instead of env
 
         // we forbid GL because it clashes with servo's GL usage
@@ -247,6 +277,10 @@ impl VelloDrawTarget {
         device.on_uncaptured_error(Arc::new(|error| {
             log::error!("VELLO WGPU ERROR: {error}");
         }));
+        device.set_device_lost_callback(|reason, message| {
+            log::warn!("VELLO WGPU DEVICE LOST {reason:?} {message}");
+            GPU_DEVICE_LOST.store(true, Ordering::Relaxed);
+        });
         let error_scope = device.push_error_scope(ErrorFilter::Validation);
         let renderer = vello::Renderer::new(
             &device,
@@ -262,7 +296,7 @@ impl VelloDrawTarget {
             (Err(error), _) => return Err(format!("renderer creation failed: {error}")),
             (Ok(_), Some(error)) => return Err(format!("renderer creation failed: {error}")),
         };
-        Ok(Self::new_with_renderer(device, queue, Rc::new(RefCell::new(renderer)), size))
+        Ok((device, queue, Rc::new(RefCell::new(renderer))))
     }
 }
 
