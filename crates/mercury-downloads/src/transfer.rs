@@ -14,12 +14,12 @@
 
 //! One download, from the first request to the published file.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::io;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures_util::FutureExt;
@@ -69,12 +69,42 @@ impl Outcome {
     }
 }
 
+/// Part files held by running transfers, shared by all transfers of one manager.
+pub(crate) type PartsInUse = Arc<Mutex<HashSet<PathBuf>>>;
+
+fn lock_parts(parts: &PartsInUse) -> MutexGuard<'_, HashSet<PathBuf>> {
+    parts.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// One transfer's hold on a part file; released when the transfer is over (or unwinds).
+struct PartLease {
+    parts: PartsInUse,
+    path: PathBuf,
+}
+
+impl PartLease {
+    /// `None` if another running transfer holds `path`.
+    fn acquire(parts: &PartsInUse, path: PathBuf) -> Option<Self> {
+        lock_parts(parts).insert(path.clone()).then(|| Self {
+            parts: Arc::clone(parts),
+            path,
+        })
+    }
+}
+
+impl Drop for PartLease {
+    fn drop(&mut self) {
+        lock_parts(&self.parts).remove(&self.path);
+    }
+}
+
 pub(crate) struct Transfer {
     pub(crate) id: DownloadId,
     pub(crate) request: DownloadRequest,
     pub(crate) client: reqwest::Client,
     pub(crate) timeouts: Timeouts,
     pub(crate) emit: Arc<dyn Fn(DownloadEvent) + Send + Sync>,
+    pub(crate) parts_in_use: PartsInUse,
 }
 
 /// What is on disk so far. Lives outside the cancellable part so cleanup can always see it.
@@ -84,6 +114,8 @@ struct OnDisk {
     part: Option<PathBuf>,
     /// The server gave a validator and accepts byte ranges, so the partial file can be resumed.
     resumable: bool,
+    /// Keeps other transfers off the partial file until this one, cleanup included, is over.
+    lease: Option<PartLease>,
 }
 
 /// A body written completely to the partial file.
@@ -195,6 +227,10 @@ impl Transfer {
                 let destination_dir = request.destination_dir.clone();
                 let resume = resume.clone();
                 let plan = blocking(move || check_resume(&destination_dir, &resume)).await?;
+                // Before anything can touch the file: a part file has one writer at a time.
+                let lease = PartLease::acquire(&self.parts_in_use, plan.part.clone())
+                    .ok_or(TransferError::AlreadyResuming)?;
+                on_disk.lease = Some(lease);
                 if plan.offset.is_some() {
                     on_disk.part = Some(plan.part.clone());
                     on_disk.resumable = true;
@@ -278,7 +314,11 @@ impl Transfer {
                     request.suggested_name.as_deref(),
                 );
                 let destination_dir = request.destination_dir.clone();
-                blocking(move || claim_partial(&destination_dir, &name)).await?
+                let parts_in_use = Arc::clone(&self.parts_in_use);
+                let (dir, target, part, file, lease) =
+                    blocking(move || claim_partial(&destination_dir, &name, &parts_in_use)).await?;
+                on_disk.lease = Some(lease);
+                (dir, target, part, file)
             }
         };
         on_disk.part = Some(part.clone());
@@ -592,14 +632,26 @@ fn partial_open_options() -> std::fs::OpenOptions {
 fn claim_partial(
     destination_dir: &Path,
     name: &str,
-) -> Result<(PathBuf, PathBuf, PathBuf, std::fs::File), TransferError> {
+    parts_in_use: &PartsInUse,
+) -> Result<(PathBuf, PathBuf, PathBuf, std::fs::File, PartLease), TransferError> {
     std::fs::create_dir_all(destination_dir)?;
     let dir = std::fs::canonicalize(destination_dir)?;
+    // Held across choosing and creating, so a resume cannot lease the name in between.
+    let mut in_use = lock_parts(parts_in_use);
     for _ in 0..MAX_CLAIM_ATTEMPTS {
-        let target = naming::unique_path(&dir, name, exists_without_following);
+        let target = naming::unique_path(&dir, name, |path| {
+            exists_without_following(path) || in_use.contains(path)
+        });
         let part = partial_path_for(&target);
         match partial_open_options().create_new(true).open(&part) {
-            Ok(file) => return Ok((dir, target, part, file)),
+            Ok(file) => {
+                in_use.insert(part.clone());
+                let lease = PartLease {
+                    parts: Arc::clone(parts_in_use),
+                    path: part.clone(),
+                };
+                return Ok((dir, target, part, file, lease));
+            }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.into()),
         }
@@ -673,7 +725,15 @@ fn check_resume(destination_dir: &Path, resume: &ResumeFrom) -> Result<ResumePla
 /// creates it if it is gone. Blocking: run through `blocking`.
 fn open_partial(part: &Path, appending: bool) -> Result<std::fs::File, TransferError> {
     let mut file = match partial_open_options().create_new(true).open(part) {
-        Ok(file) => return Ok(file),
+        // Appending to a file that had to be created would write the rest of the download at
+        // position 0 and publish a file holding only its tail.
+        Ok(_) if appending => {
+            let _ = std::fs::remove_file(part);
+            return Err(TransferError::PartialGone);
+        }
+        Ok(file) => {
+            return Ok(file);
+        }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => partial_open_options()
             .open(part)
             .map_err(|_| TransferError::InvalidResume("the partial file cannot be opened"))?,

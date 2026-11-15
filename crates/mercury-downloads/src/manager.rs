@@ -1,6 +1,6 @@
 //! The public face of the crate: requests, events, and the manager that runs transfers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use tokio::sync::watch;
 
-use crate::transfer::{Outcome, Transfer};
+use crate::transfer::{Outcome, PartsInUse, Transfer};
 
 /// How long dropping the manager waits for cancelled transfers to clean up.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
@@ -63,6 +63,12 @@ impl fmt::Debug for DownloadRequest {
 ///
 /// `partial_path` must be `target_path` plus `.part`, and both must be directly inside the
 /// request's `destination_dir`; otherwise the request fails without touching either file.
+///
+/// A part file belongs to one transfer at a time. Resuming a part file that a running transfer
+/// of the same manager is using (a second click on Resume, or the download that is still
+/// running) fails at once with `Failed { resumable: false }` and leaves the file alone. If the
+/// part file disappears after the resume has started, the download fails rather than publish a
+/// file that holds only its tail.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResumeFrom {
     pub partial_path: PathBuf,
@@ -152,6 +158,8 @@ struct Shared {
     /// Tasks that have not yet returned, including ones emitting their terminal event.
     alive: Mutex<usize>,
     all_done: Condvar,
+    /// Part files held by running transfers.
+    parts_in_use: PartsInUse,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -234,6 +242,7 @@ impl DownloadManager {
             shared: Arc::new(Shared {
                 on_event: Arc::new(on_event),
                 running: Mutex::new(HashMap::new()),
+                parts_in_use: Arc::new(Mutex::new(HashSet::new())),
                 alive: Mutex::new(0),
                 all_done: Condvar::new(),
             }),
@@ -254,6 +263,7 @@ impl DownloadManager {
             client: self.client.clone(),
             timeouts: self.timeouts,
             emit: Arc::clone(&self.shared.on_event),
+            parts_in_use: Arc::clone(&self.shared.parts_in_use),
         };
         let guard = TaskGuard {
             shared: Arc::clone(&self.shared),

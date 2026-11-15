@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -52,6 +52,7 @@ impl Recorded {
 pub struct TestServer {
     pub addr: SocketAddr,
     requests: Arc<Mutex<Vec<Recorded>>>,
+    gate: Arc<AtomicBool>,
     shutdown: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -66,6 +67,8 @@ impl TestServer {
         let requests = Arc::new(Mutex::new(Vec::new()));
         let (shutdown, mut stop) = oneshot::channel();
         let recorded = Arc::clone(&requests);
+        let gate = Arc::new(AtomicBool::new(false));
+        let server_gate = Arc::clone(&gate);
         let thread = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -79,7 +82,8 @@ impl TestServer {
                         accepted = listener.accept() => {
                             let Ok((stream, _)) = accepted else { continue };
                             let recorded = Arc::clone(&recorded);
-                            tokio::spawn(serve(stream, addr.port(), recorded));
+                            let gate = Arc::clone(&server_gate);
+                            tokio::spawn(serve(stream, addr.port(), recorded, gate));
                         }
                     }
                 }
@@ -88,6 +92,7 @@ impl TestServer {
         Self {
             addr,
             requests,
+            gate,
             shutdown: Some(shutdown),
             thread: Some(thread),
         }
@@ -100,6 +105,20 @@ impl TestServer {
 
     pub fn requests(&self) -> Vec<Recorded> {
         self.requests.lock().unwrap().clone()
+    }
+
+    /// Lets `/gated/…` routes answer. Until then they hold their response.
+    pub fn open_gate(&self) {
+        self.gate.store(true, Ordering::SeqCst);
+    }
+
+    /// Waits until the server has received `count` requests.
+    pub fn wait_for_requests(&self, count: usize) {
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        while self.requests().len() < count {
+            assert!(Instant::now() < deadline, "only {:?}", self.requests());
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 }
 
@@ -114,7 +133,12 @@ impl Drop for TestServer {
     }
 }
 
-async fn serve(mut stream: TcpStream, port: u16, recorded: Arc<Mutex<Vec<Recorded>>>) {
+async fn serve(
+    mut stream: TcpStream,
+    port: u16,
+    recorded: Arc<Mutex<Vec<Recorded>>>,
+    gate: Arc<AtomicBool>,
+) {
     let mut head = Vec::new();
     let mut buffer = [0_u8; 4096];
     while !head.windows(4).any(|window| window == b"\r\n\r\n") {
@@ -139,13 +163,20 @@ async fn serve(mut stream: TcpStream, port: u16, recorded: Arc<Mutex<Vec<Recorde
         .collect();
     let request = Recorded { path, headers };
     recorded.lock().unwrap().push(request.clone());
+    if request.path.starts_with("/gated/") {
+        while !gate.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
     let _ = respond(&mut stream, port, &request).await;
 }
 
 async fn respond(stream: &mut TcpStream, port: u16, request: &Recorded) -> std::io::Result<()> {
     let file = pattern(FILE_LEN);
     match request.path.as_str() {
-        "/file.bin" | "/named/file.bin" => ranged(stream, request, &file, Some(ETAG), None).await,
+        "/file.bin" | "/named/file.bin" | "/gated/file.bin" => {
+            ranged(stream, request, &file, Some(ETAG), None).await
+        }
         "/lm.bin" => ranged(stream, request, &file, None, Some(LAST_MODIFIED)).await,
         "/plain.bin" => send(stream, "200 OK", &[], &file).await,
         "/no-length" => {

@@ -28,6 +28,10 @@ pub(crate) enum TransferError {
     UnexpectedPartial,
     #[error("the server's partial response does not continue the partial file")]
     RangeMismatch,
+    #[error("the partial file disappeared before the download could continue")]
+    PartialGone,
+    #[error("the download is already being resumed (or is still running)")]
+    AlreadyResuming,
     #[error("cannot resume: {0}")]
     InvalidResume(&'static str),
     /// Not shown to anyone: a cancelled transfer ends with `DownloadEvent::Cancelled`.

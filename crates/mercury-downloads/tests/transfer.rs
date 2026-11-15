@@ -842,6 +842,138 @@ fn a_fifo_at_the_partial_path_fails_fast() {
 }
 
 #[test]
+fn a_resume_whose_partial_file_disappears_is_never_published() {
+    let server = TestServer::start();
+    let dir = TempDir::new("resume-vanished");
+    let (partial, target) = write_partial(&dir.path, "file.bin", 10_000);
+    let (manager, events) = manager();
+    let mut request = request(server.url("/gated/file.bin"), &dir.path);
+    request.resume = Some(resume_from(partial.clone(), target, Some(ETAG), None));
+    let id = manager.start(request);
+
+    // The request is out, so the resume was checked against the 10,000-byte partial file.
+    server.wait_for_requests(1);
+    assert_eq!(server.requests()[0].header("range"), Some("bytes=10000-"));
+    std::fs::remove_file(&partial).unwrap();
+    server.open_gate();
+
+    let done = events_until_done(&events, id);
+    let (error, resumable) = failed(terminal(&done));
+    assert!(error.contains("disappeared"), "{error}");
+    assert!(!resumable);
+    assert!(
+        TempDir::list(&dir.path).is_empty(),
+        "{:?}",
+        TempDir::list(&dir.path)
+    );
+}
+
+#[test]
+fn a_partial_file_is_resumed_by_one_transfer_at_a_time() {
+    let server = TestServer::start();
+    let dir = TempDir::new("resume-twice");
+    let (partial, target) = write_partial(&dir.path, "file.bin", 10_000);
+    let (manager, events) = manager();
+    let resume = |path: &str| {
+        let mut request = request(server.url(path), &dir.path);
+        request.resume = Some(resume_from(
+            partial.clone(),
+            target.clone(),
+            Some(ETAG),
+            None,
+        ));
+        request
+    };
+
+    let first = manager.start(resume("/gated/file.bin"));
+    server.wait_for_requests(1);
+    // A double-clicked Resume: the second must fail at once and leave the file alone.
+    let second = manager.start(resume("/gated/file.bin"));
+    let refused = events_until_done(&events, second);
+    assert_eq!(refused.len(), 1, "{refused:#?}");
+    let (error, resumable) = failed(terminal(&refused));
+    assert!(error.contains("already being resumed"), "{error}");
+    assert!(!resumable);
+    assert_eq!(
+        std::fs::read(&partial).unwrap(),
+        &pattern(FILE_LEN)[..10_000]
+    );
+    assert_eq!(server.requests().len(), 1);
+
+    server.open_gate();
+    let done = events_until_done(&events, first);
+    assert_eq!(finished_path(terminal(&done)), target);
+    assert_eq!(std::fs::read(&target).unwrap(), pattern(FILE_LEN));
+    assert_eq!(TempDir::list(&dir.path), ["file.bin"]);
+
+    // Once the first is over, the part file is free again (here: gone, so a resume restarts).
+    assert_eq!(manager.active(), 0);
+}
+
+#[test]
+fn a_resume_cannot_take_over_the_partial_file_of_a_running_download() {
+    let server = TestServer::start();
+    let dir = TempDir::new("resume-running");
+    let (manager, events) = manager();
+    let running = manager.start(request(server.url("/slow-long"), &dir.path));
+    let DownloadEvent::Started {
+        partial_path,
+        target_path,
+        ..
+    } = wait_started(&events, running)
+    else {
+        unreachable!()
+    };
+    let mut takeover = request(server.url("/file.bin"), &dir.path);
+    takeover.resume = Some(resume_from(
+        partial_path.clone(),
+        target_path,
+        Some(ETAG),
+        None,
+    ));
+    let id = manager.start(takeover);
+    let (error, _) = failed(terminal(&events_until_done(&events, id)));
+    assert!(error.contains("already being resumed"), "{error}");
+    assert!(partial_path.exists());
+    manager.cancel(running);
+    events_until_done(&events, running);
+}
+
+#[test]
+fn a_new_download_does_not_take_a_part_name_held_by_a_resume() {
+    let server = TestServer::start();
+    let dir = TempDir::new("resume-held-name");
+    let (manager, events) = manager();
+    // A resume whose partial file is gone holds `file.bin.part` while it waits for the server.
+    let mut resume = request(server.url("/gated/file.bin"), &dir.path);
+    resume.resume = Some(resume_from(
+        dir.path.join("file.bin.part"),
+        dir.path.join("file.bin"),
+        Some(ETAG),
+        None,
+    ));
+    let resuming = manager.start(resume);
+    server.wait_for_requests(1);
+
+    let fresh = manager.start(request(server.url("/file.bin"), &dir.path));
+    let done = events_until_done(&events, fresh);
+    assert_eq!(
+        finished_path(terminal(&done)),
+        dir.path.join("file (1).bin")
+    );
+
+    server.open_gate();
+    let done = events_until_done(&events, resuming);
+    assert_eq!(finished_path(terminal(&done)), dir.path.join("file.bin"));
+    for name in ["file.bin", "file (1).bin"] {
+        assert_eq!(
+            std::fs::read(dir.path.join(name)).unwrap(),
+            pattern(FILE_LEN)
+        );
+    }
+}
+
+#[test]
 fn a_resume_outside_the_destination_folder_is_refused() {
     let server = TestServer::start();
     let dir = TempDir::new("resume-outside");
