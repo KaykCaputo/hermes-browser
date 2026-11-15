@@ -285,26 +285,23 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # Builds the macOS executable. No secret and no environment: this job runs
+  # the build scripts and procedural macros of about 1,100 crates, so it gets
+  # nothing that could sign or notarise. The signing job below runs on a fresh
+  # runner and receives only the executable and Servo's plugin lists.
   build-macos:
-    name: macOS Apple Silicon
+    name: macOS Apple Silicon (build)
     needs: version
     # The same image as the CI job; see .github/workflows/ci.yml.
     runs-on: macos-26
-    # A release build and packaging, without CI's clippy and test passes.
+    # A release build without CI's clippy and test passes.
     timeout-minutes: 240
-    env:
-      VERSION: ${{ needs.version.outputs.version }}
 
     steps:
       - name: Check out the repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Stop XProtect
-        # XProtect scans a freshly written disk image and can make hdiutil
-        # fail; Servo's own macOS CI stops it the same way.
-        run: sudo pkill -9 XProtect || true
 
       - name: Free disk space for Servo
         shell: bash
@@ -339,12 +336,23 @@ jobs:
           cargo --version
 
       - name: Restore the GStreamer packages
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: gstreamer-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/Library/Caches/mercury-browser/gstreamer/**/*.pkg
           key: gstreamer-macos-arm64-${{ hashFiles('scripts/macos/gstreamer.sh') }}
 
-      - name: Fetch, unpack and check GStreamer
+      - name: Fetch and verify the GStreamer packages
+        run: scripts/macos/gstreamer.sh fetch
+
+      - name: Save the GStreamer packages
+        if: steps.gstreamer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/mercury-browser/gstreamer/**/*.pkg
+          key: ${{ steps.gstreamer-cache.outputs.cache-primary-key }}
+
+      - name: Unpack and check GStreamer
         run: make gstreamer-macos
 
       - name: Export the GStreamer build environment
@@ -354,23 +362,117 @@ jobs:
 
           scripts/ci/github-env.sh scripts/macos/gstreamer.sh env
 
-      - name: Tell the bundler where GStreamer is
+      - name: Build the release executable
+        run: cargo build --locked --release --package mercury-desktop
+
+      - name: Stage the executable and the plugin lists for signing
         shell: bash
         run: |
           set -euo pipefail
 
-          prefix="${MERCURY_GSTREAMER_PREFIX:-}"
-          if [ -z "${prefix}" ]; then
-            prefix="$(pkg-config --variable=prefix gstreamer-1.0)"
-          fi
-          prefix="$(cd "${prefix}" && pwd -P)"
-          ls "${prefix}"/lib/libgstreamer-1.0*.dylib
-          pkg-config --modversion gstreamer-1.0
-          echo "MERCURY_GSTREAMER_PREFIX=${prefix}" >> "${GITHUB_ENV}"
+          # The signing job runs no cargo, so it is handed the plugin lists
+          # the collector would otherwise find through `cargo metadata`.
+          lists="$(scripts/ci/servo-plugin-lists.sh)"
+          mkdir -p staging/plugin-lists
+          install -m 0755 target/release/mercury-browser staging/mercury-browser
+          cp "${lists}/common.rs.in" "${lists}/macos.rs.in" staging/plugin-lists/
+          test "$(lipo -archs staging/mercury-browser)" = arm64
+          # A tar keeps the executable's mode, which an artefact zip would not.
+          tar -C staging -cf mercury-browser-macos-arm64-unsigned.tar .
+          shasum -a 256 mercury-browser-macos-arm64-unsigned.tar
 
-      - name: Is there a signing identity?
+      - name: Upload the unsigned build
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Not named mercury-browser-*: the publishing job takes those.
+          name: unsigned-macos-arm64-build
+          path: mercury-browser-macos-arm64-unsigned.tar
+          if-no-files-found: error
+          retention-days: 3
+
+  # Assembles, signs, notarises and checks Mercury Browser.app and its disk
+  # image from the build above.
+  #
+  # Rule: no step in this job runs cargo, make, or any code from the
+  # dependency graph; a stand-in `cargo` that fails is put first on PATH to
+  # keep it that way. Only the steps that need a secret receive it, through
+  # `env:`. The secrets live in the `release` environment, which the owner
+  # restricts to `v*` tags and to required reviewers (see
+  # docs/developer-guide/continuous-integration.md).
+  package-macos:
+    name: macOS Apple Silicon (sign and package)
+    needs:
+      - version
+      - build-macos
+    runs-on: macos-26
+    environment: release
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Refuse cargo in this job
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          guard="${RUNNER_TEMP}/no-cargo"
+          mkdir -p "${guard}"
+          printf '%s\n' '#!/bin/sh' \
+            'echo "cargo must not run in the signing job" >&2' \
+            'exit 1' > "${guard}/cargo"
+          chmod 755 "${guard}/cargo"
+          echo "${guard}" >> "${GITHUB_PATH}"
+
+      - name: Stop XProtect
+        # XProtect scans a freshly written disk image and can make hdiutil
+        # fail; Servo's own macOS CI stops it the same way.
+        run: sudo pkill -9 XProtect || true
+
+      - name: Restore the GStreamer packages
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/mercury-browser/gstreamer/**/*.pkg
+          key: gstreamer-macos-arm64-${{ hashFiles('scripts/macos/gstreamer.sh') }}
+
+      - name: Fetch, unpack and check GStreamer
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scripts/macos/gstreamer.sh fetch
+          scripts/macos/gstreamer.sh unpack
+          scripts/macos/gstreamer.sh check
+          scripts/ci/github-env.sh scripts/macos/gstreamer.sh env
+
+      - name: Download the unsigned build
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned-macos-arm64-build
+          path: ${{ runner.temp }}/unsigned
+
+      - name: Unpack the unsigned build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          build="${RUNNER_TEMP}/build"
+          mkdir -p "${build}"
+          tar -C "${build}" -xf "${RUNNER_TEMP}/unsigned/mercury-browser-macos-arm64-unsigned.tar"
+          test "$(lipo -archs "${build}/mercury-browser")" = arm64
+          # The collector and the bundle check read the plugin lists here
+          # instead of asking cargo.
+          echo "MERCURY_SERVO_PLUGIN_LISTS=${build}/plugin-lists" >> "${GITHUB_ENV}"
+          echo "MERCURY_UNSIGNED_EXECUTABLE=${build}/mercury-browser" >> "${GITHUB_ENV}"
+
+      - name: Which signing secrets are there?
         # The secrets context cannot be used in a step's `if:`, so only the
-        # answers cross over into the environment, never the secrets.
+        # answers leave this step, never the secrets.
         id: signing
         shell: bash
         env:
@@ -383,18 +485,31 @@ jobs:
         run: |
           set -euo pipefail
 
-          sign=false
-          notarize=false
-          if [ -n "${MACOS_CERTIFICATE}" ] && [ -n "${MACOS_CERTIFICATE_PASSWORD}" ] &&
-            [ -n "${MACOS_SIGN_IDENTITY}" ]; then
-            sign=true
-            if [ -n "${APPLE_ID}" ] && [ -n "${APPLE_TEAM_ID}" ] && [ -n "${APPLE_APP_PASSWORD}" ]; then
-              notarize=true
-            fi
-          elif [ -n "${MACOS_CERTIFICATE}${MACOS_CERTIFICATE_PASSWORD}${MACOS_SIGN_IDENTITY}" ]; then
+          count() {
+            local n=0 value
+            for value in "$@"; do
+              [ -n "${value}" ] && n=$((n + 1))
+            done
+            echo "${n}"
+          }
+          signing="$(count "${MACOS_CERTIFICATE}" "${MACOS_CERTIFICATE_PASSWORD}" "${MACOS_SIGN_IDENTITY}")"
+          notarising="$(count "${APPLE_ID}" "${APPLE_TEAM_ID}" "${APPLE_APP_PASSWORD}")"
+          if [ "${signing}" != 0 ] && [ "${signing}" != 3 ]; then
             echo "::error::Some but not all of MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD and MACOS_SIGN_IDENTITY are set."
             exit 1
           fi
+          if [ "${notarising}" != 0 ] && [ "${notarising}" != 3 ]; then
+            echo "::error::Some but not all of APPLE_ID, APPLE_TEAM_ID and APPLE_APP_PASSWORD are set."
+            exit 1
+          fi
+          if [ "${notarising}" = 3 ] && [ "${signing}" != 3 ]; then
+            echo "::error::The notarisation secrets are set but the signing secrets are not; notarisation needs a Developer ID signature."
+            exit 1
+          fi
+          sign=false
+          notarize=false
+          [ "${signing}" = 3 ] && sign=true
+          [ "${notarising}" = 3 ] && notarize=true
           echo "sign=${sign}" >> "${GITHUB_OUTPUT}"
           echo "notarize=${notarize}" >> "${GITHUB_OUTPUT}"
           echo "Developer ID signing: ${sign}; notarisation: ${notarize}"
@@ -418,7 +533,8 @@ jobs:
           keychain="${RUNNER_TEMP}/mercury-signing.keychain-db"
           keychain_password="$(uuidgen)"
           certificate="${RUNNER_TEMP}/mercury-signing.p12"
-          trap 'rm -f -- "${certificate}"' EXIT
+          identities="${RUNNER_TEMP}/mercury-identities.txt"
+          trap 'rm -f -- "${certificate}" "${identities}"' EXIT
 
           printf '%s' "${MACOS_CERTIFICATE}" | base64 --decode > "${certificate}"
           security create-keychain -p "${keychain_password}" "${keychain}"
@@ -434,8 +550,10 @@ jobs:
           security list-keychains -d user -s "${keychain}" ${existing}
           echo "MERCURY_SIGNING_KEYCHAIN=${keychain}" >> "${GITHUB_ENV}"
 
-          if ! security find-identity -v -p codesigning "${keychain}" |
-            grep -qF "\"${MACOS_SIGN_IDENTITY}\""; then
+          # Written to a file and searched there: grep -q on a pipe can stop
+          # reading early and turn the producer's SIGPIPE into a failure.
+          security find-identity -v -p codesigning "${keychain}" > "${identities}"
+          if ! grep -qF "\"${MACOS_SIGN_IDENTITY}\"" "${identities}"; then
             echo "::error::MACOS_SIGN_IDENTITY does not name a valid code-signing identity in the imported certificate."
             exit 1
           fi
@@ -448,31 +566,49 @@ jobs:
               --keychain "${keychain}" > /dev/null
           fi
 
-      - name: Build the release executable
-        run: cargo build --locked --release --package mercury-desktop
-
       - name: Assemble, sign and package Mercury Browser.app
+        # bundle.sh directly (no make target, nothing that could rebuild):
+        # it copies the executable, collects GStreamer from
+        # MERCURY_GSTREAMER_PREFIX, signs with the identity and makes the dmg.
         shell: bash
         env:
-          # Empty when there is no certificate; bundle.sh then signs ad hoc.
+          # The identity's name only; the key stays in the keychain. Empty
+          # without a certificate, and bundle.sh then signs ad hoc.
           MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
           SIGN: ${{ steps.signing.outputs.sign }}
         run: |
           set -euo pipefail
 
           if [ "${SIGN}" = true ]; then
-            export MERCURY_SIGN_IDENTITY="${MACOS_SIGN_IDENTITY}"
+            identity="${MACOS_SIGN_IDENTITY}"
           else
-            export MERCURY_SIGN_IDENTITY="-"
+            identity="-"
           fi
-          make package-macos
+          scripts/macos/bundle.sh \
+            --binary "${MERCURY_UNSIGNED_EXECUTABLE}" \
+            --out dist \
+            --identity "${identity}" \
+            --dmg
 
           dmg="dist/mercury-browser-${VERSION}-macos-arm64.dmg"
           test -f "${dmg}"
           test -f "${dmg}.sha256"
 
+      - name: Check the bundle before notarising
+        shell: bash
+        env:
+          SIGN: ${{ steps.signing.outputs.sign }}
+        run: |
+          set -euo pipefail
+
+          if [ "${SIGN}" = true ]; then signature=developer-id; else signature=adhoc; fi
+          scripts/ci/check-macos-bundle.sh --signature "${signature}" --require-media \
+            "dist/Mercury Browser.app"
+
       - name: Notarise and staple the disk image
         if: steps.signing.outputs.notarize == 'true'
+        # No secret here: notarytool reads the credentials stored in the
+        # temporary keychain by the import step.
         shell: bash
         run: |
           set -euo pipefail
@@ -483,24 +619,36 @@ jobs:
             --keychain "${MERCURY_SIGNING_KEYCHAIN}" \
             --wait
           xcrun stapler staple "dist/${name}"
-          xcrun stapler validate "dist/${name}"
           # Stapling changes the file, so its checksum is written again.
           (cd dist && shasum -a 256 "${name}" > "${name}.sha256")
 
-      - name: Check the bundle
+      - name: Check the disk image as it will ship
         shell: bash
         env:
           SIGN: ${{ steps.signing.outputs.sign }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
         run: |
           set -euo pipefail
 
+          name="mercury-browser-${VERSION}-macos-arm64.dmg"
+          (cd dist && shasum -a 256 -c "${name}.sha256")
           if [ "${SIGN}" = true ]; then
             signature=developer-id
+            codesign --verify --strict --verbose=2 "dist/${name}"
           else
             signature=adhoc
           fi
-          scripts/ci/check-macos-bundle.sh --signature "${signature}" "dist/Mercury Browser.app"
-          (cd dist && shasum -a 256 -c "mercury-browser-${VERSION}-macos-arm64.dmg.sha256")
+          if [ "${NOTARIZE}" = true ]; then
+            xcrun stapler validate "dist/${name}"
+            spctl --assess --type open --context context:primary-signature --verbose=2 "dist/${name}"
+          fi
+
+          mountpoint="${RUNNER_TEMP}/mercury-dmg"
+          mkdir -p "${mountpoint}"
+          hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "${mountpoint}" "dist/${name}"
+          trap 'hdiutil detach "${mountpoint}" || hdiutil detach -force "${mountpoint}"' EXIT
+          scripts/ci/check-macos-bundle.sh --signature "${signature}" --require-media \
+            "${mountpoint}/Mercury Browser.app"
 
       - name: Describe the signature in the job summary
         shell: bash
@@ -516,13 +664,13 @@ jobs:
             echo "\`mercury-browser-${VERSION}-macos-arm64.dmg\`"
             echo
             if [ "${SIGN}" != true ]; then
-              echo "**Ad-hoc signature.** The repository has no Developer ID secrets"
+              echo "**Ad-hoc signature.** The release environment has no Developer ID secrets"
               echo "(MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, MACOS_SIGN_IDENTITY), so"
               echo "the app is signed ad hoc and not notarised. Gatekeeper will refuse to open"
               echo "it after a download until the quarantine attribute is removed."
             elif [ "${NOTARIZE}" != true ]; then
-              echo "**Developer ID signature, not notarised.** APPLE_ID, APPLE_TEAM_ID or"
-              echo "APPLE_APP_PASSWORD is missing, so the disk image was not notarised."
+              echo "**Developer ID signature, not notarised.** The release environment has no"
+              echo "notarisation secrets (APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD)."
             else
               echo "**Developer ID signature, notarised and stapled.**"
             fi
@@ -550,23 +698,25 @@ jobs:
           fi
           rm -f -- "${RUNNER_TEMP}/mercury-signing.p12"
 
+  # Only a push of a v* tag publishes. A manual run (workflow_dispatch) builds
+  # and leaves its artefacts on the run; it never touches a release, so it
+  # cannot replace published files with different bytes.
   publish-release:
     name: Publish GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs:
       - version
       - build-linux
-      - build-macos
+      - package-macos
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
     permissions:
       contents: write
-      # actions/attest: the OIDC token signs the attestation, `attestations`
-      # stores it and `artifact-metadata` records where the artefact lives.
+      # actions/attest: the OIDC token signs the attestation and
+      # `attestations` stores it.
       id-token: write
       attestations: write
-      artifact-metadata: write
 
     steps:
       - name: Download release artifacts
@@ -600,7 +750,10 @@ jobs:
         with:
           subject-checksums: dist/SHA256SUMS
 
-      - name: Create or update the GitHub Release
+      - name: Publish the GitHub Release
+        # Draft first, every asset uploaded, then published: a release is
+        # never public without its files. An already published release is
+        # left alone rather than given different bytes.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -609,10 +762,18 @@ jobs:
           set -euo pipefail
 
           tag="${GITHUB_REF_NAME}"
+          state="${RUNNER_TEMP}/release-state"
 
-          if ! gh release view "${tag}" >/dev/null 2>&1; then
+          if gh release view "${tag}" --json isDraft --jq .isDraft > "${state}" 2>/dev/null; then
+            if [ "$(cat "${state}")" != true ]; then
+              echo "::error::Release ${tag} is already published; its assets are not replaced."
+              exit 1
+            fi
+            echo "Reusing the draft release ${tag}."
+          else
             gh release create \
               "${tag}" \
+              --draft \
               --verify-tag \
               --generate-notes \
               --title "${tag}"
@@ -622,3 +783,5 @@ jobs:
             "${tag}" \
             dist/* \
             --clobber
+
+          gh release edit "${tag}" --draft=false
