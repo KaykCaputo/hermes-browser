@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::model::{
     BrowserProfile, ImportError, ImportedNode, ImportedVisit, MAX_TREE_DEPTH, VisitCollector,
-    keep_importable, push_unique,
+    keep_importable, push_unique, without_empty_roots,
 };
 use crate::snapshot;
 
@@ -254,16 +254,17 @@ pub fn read_firefox_bookmarks(profile: &Path) -> Result<Vec<ImportedNode>, Impor
         };
         let mut children = Vec::new();
         tree.fill(id, 1, &mut visited, &mut children);
-        if !children.is_empty() {
-            nodes.push(ImportedNode::Folder {
-                title: title.to_owned(),
-                toolbar,
-                added_at_ms: tree.rows.get(&id).and_then(|row| row.added_at_ms),
-                children,
-            });
-        }
+        nodes.push(ImportedNode::Folder {
+            title: title.to_owned(),
+            toolbar,
+            added_at_ms: tree.rows.get(&id).and_then(|row| row.added_at_ms),
+            children,
+        });
     }
-    Ok(keep_importable(nodes, &path.display().to_string()))
+    Ok(without_empty_roots(keep_importable(
+        nodes,
+        &path.display().to_string(),
+    )))
 }
 
 struct Row {
@@ -372,15 +373,7 @@ pub fn read_firefox_history(
         "SELECT p.url, p.title, v.visit_date
          FROM moz_historyvisits v JOIN moz_places p ON p.id = v.place_id
          ORDER BY v.visit_date DESC, v.id DESC",
-        |row| {
-            let (Some(url), Some(micros)) = (
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<i64>>(2)?,
-            ) else {
-                return Ok(true);
-            };
-            Ok(collector.push(url, row.get(1)?, micros.div_euclid(1000)))
-        },
+        |row| Ok(collector.push_row(row, |micros| Some(micros.div_euclid(1000)))),
     )?;
     Ok(collector.finish(&path.display().to_string()))
 }

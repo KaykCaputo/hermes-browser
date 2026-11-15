@@ -166,7 +166,7 @@ fn missing_closing_tags_lower_case_and_any_attribute_order_are_tolerated() {
                 "Bar",
                 Some(10_000),
                 vec![
-                    bookmark("A & B", "https://a.example/?x=1&y=<2>", Some(20_000)),
+                    bookmark("A & B", "https://a.example/?x=1&y=%3C2%3E", Some(20_000)),
                     bookmark("B", "https://b.example/", None),
                     bookmark("C", "https://c.example/", None),
                 ]
@@ -349,7 +349,7 @@ fn writing_then_parsing_gives_the_same_tree() {
             vec![
                 bookmark(
                     "<b>&\"'",
-                    "https://example.com/?q=<b>&x=\"y\"&z='w'",
+                    "https://example.com/?q=%3Cb%3E&x=%22y%22&z=%27w%27",
                     Some(1_600_000_001_000),
                 ),
                 ImportedNode::Separator,
@@ -357,7 +357,21 @@ fn writing_then_parsing_gives_the_same_tree() {
                     "Ünïcödé 文件夹 📚",
                     Some(1_600_000_002_000),
                     vec![
-                        bookmark("Ελληνικά", "https://el.wikipedia.org/wiki/Ελλάδα", None),
+                        bookmark(
+                            "Ελληνικά",
+                            "https://el.wikipedia.org/wiki/%CE%95%CE%BB%CE%BB%CE%AC%CE%B4%CE%B1",
+                            None,
+                        ),
+                        bookmark(
+                            "Line one\nLine two\twith a tab\r\nand more",
+                            "https://lines.example/",
+                            None,
+                        ),
+                        bookmark(
+                            "Ends with </A> and </H3></DL>",
+                            "https://tags.example/",
+                            None,
+                        ),
                         folder(
                             "Deeper",
                             None,
@@ -379,4 +393,119 @@ fn writing_then_parsing_gives_the_same_tree() {
     let html = write_netscape_bookmarks(&tree);
 
     assert_eq!(parse_netscape_bookmarks(&html).unwrap(), tree);
+}
+
+#[test]
+fn a_folder_whose_list_is_never_closed_takes_in_the_entries_after_it() {
+    // As Firefox reads it: its importer walks the DOM, where an unclosed <DL> holds every
+    // following entry until the next </DL> closes it.
+    let html = r#"<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+    <DT><H3>Unclosed</H3>
+    <DL><p>
+        <DT><A HREF="https://a.example/">A</A>
+    <DT><A HREF="https://b.example/">B</A>
+    <DT><H3>Sibling folder</H3>
+    <DL><p>
+        <DT><A HREF="https://c.example/">C</A>
+    </DL><p>
+</DL><p>
+<DT><A HREF="https://d.example/">D</A>
+"#;
+
+    let nodes = parse_netscape_bookmarks(html).unwrap();
+
+    assert_eq!(
+        nodes,
+        vec![
+            folder(
+                "Unclosed",
+                None,
+                vec![
+                    bookmark("A", "https://a.example/", None),
+                    bookmark("B", "https://b.example/", None),
+                    folder(
+                        "Sibling folder",
+                        None,
+                        vec![bookmark("C", "https://c.example/", None)]
+                    ),
+                ]
+            ),
+            bookmark("D", "https://d.example/", None),
+        ]
+    );
+}
+
+#[test]
+fn addresses_come_out_normalised() {
+    let html = r#"<!DOCTYPE NETSCAPE-Bookmark-file-1>
+<DL><p>
+    <DT><A HREF="  HTTPS://Example.COM/a b?q=1 2  ">Spaces and capitals</A>
+    <DT><A HREF="http://xn--caf-dma.example">No path</A>
+    <DT><A HREF="https://café.example/über">Non-ASCII</A>
+</DL><p>
+"#;
+
+    assert_eq!(
+        parse_netscape_bookmarks(html).unwrap(),
+        vec![
+            bookmark(
+                "Spaces and capitals",
+                "https://example.com/a%20b?q=1%202",
+                None
+            ),
+            bookmark("No path", "http://xn--caf-dma.example/", None),
+            bookmark("Non-ASCII", "https://xn--caf-dma.example/%C3%BCber", None),
+        ]
+    );
+}
+
+/// `levels` folders, each inside the one before, with a bookmark in the innermost.
+fn nested(levels: usize) -> Vec<ImportedNode> {
+    let mut node = bookmark("Deep", "https://deep.example/", None);
+    for level in (0..levels).rev() {
+        node = folder(&format!("Level {level}"), None, vec![node]);
+    }
+    vec![node]
+}
+
+fn deepest_list(html: &str) -> usize {
+    let (mut depth, mut deepest) = (0_usize, 0);
+    for line in html.lines().map(str::trim) {
+        if line.starts_with("<DL>") {
+            depth += 1;
+            deepest = deepest.max(depth);
+        } else if line.starts_with("</DL>") {
+            depth -= 1;
+        }
+    }
+    deepest
+}
+
+#[test]
+fn the_writer_flattens_what_the_parser_would_and_survives_a_very_deep_tree() {
+    // 48 levels of folders are kept as they are.
+    let kept = nested(48);
+    assert_eq!(
+        parse_netscape_bookmarks(&write_netscape_bookmarks(&kept)).unwrap(),
+        kept
+    );
+
+    let deep = nested(5_000);
+    let html = write_netscape_bookmarks(&deep);
+
+    assert_eq!(
+        deepest_list(&html),
+        49,
+        "the outer list and 48 levels of folders"
+    );
+    assert_eq!(html.matches("<H3>").count(), 48);
+    assert!(html.len() < 100_000, "{} bytes", html.len());
+    let read = parse_netscape_bookmarks(&html).unwrap();
+    assert_eq!(read, nested(48), "deeper folders open into the 48th");
+    // Drop the deep tree one level at a time rather than through recursive drop glue.
+    let mut rest = deep;
+    while let Some(ImportedNode::Folder { children, .. }) = rest.pop() {
+        rest = children;
+    }
 }

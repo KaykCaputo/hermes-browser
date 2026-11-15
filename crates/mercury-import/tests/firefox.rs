@@ -250,6 +250,17 @@ fn a_database_locked_by_a_running_firefox_is_read_from_a_copy() {
          UPDATE moz_places SET title = 'News (locked)' WHERE id = 1;",
     )
     .unwrap();
+    let files = [
+        profile.path().join("places.sqlite"),
+        profile.path().join("places.sqlite-wal"),
+    ];
+    let contents = || {
+        files
+            .iter()
+            .map(|file| std::fs::read(file).unwrap())
+            .collect::<Vec<_>>()
+    };
+    let before = contents();
     let other_reader = Connection::open(profile.path().join("places.sqlite")).unwrap();
     other_reader.busy_timeout(Duration::ZERO).unwrap();
     assert!(
@@ -271,6 +282,7 @@ fn a_database_locked_by_a_running_firefox_is_read_from_a_copy() {
         )]
     );
     assert_eq!(read_firefox_bookmarks(profile.path()).unwrap().len(), 3);
+    assert_eq!(contents(), before, "the original files are not changed");
     // Firefox's own connection is unaffected.
     conn.execute(
         "UPDATE moz_places SET title = ?1 WHERE id = 1",
@@ -561,4 +573,110 @@ fn a_damaged_profile_group_leaves_profiles_ini_alone() {
 
     assert_eq!(find_firefox_profiles(&[support.path().to_owned()]).len(), 1);
     assert_eq!(find_firefox_profiles(&[]), vec![]);
+}
+
+#[test]
+fn a_root_left_empty_by_the_address_rule_is_left_out() {
+    let profile = tempfile::tempdir().unwrap();
+    let conn = places(profile.path());
+    conn.execute_batch(ROOTS).unwrap();
+    conn.execute_batch(
+        "INSERT INTO moz_places (id, url, title) VALUES
+             (1, 'https://kept.example/', 'Kept'),
+             (2, 'place:sort=8&maxResults=10', 'Most Visited'),
+             (3, 'javascript:alert(1)', 'Script');
+         INSERT INTO moz_bookmarks (id, type, fk, parent, position, title, guid) VALUES
+             (10, 1, 1, 3, 0, 'Kept', 'kept________'),
+             (11, 1, 2, 2, 0, 'Most Visited', 'mostvisited_'),
+             (12, 1, 3, 5, 0, 'Script', 'script______');",
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        read_firefox_bookmarks(profile.path()).unwrap(),
+        vec![folder(
+            "Bookmarks Toolbar",
+            true,
+            ROOT_ADDED,
+            vec![bookmark("Kept", "https://kept.example/", None)]
+        )]
+    );
+}
+
+#[test]
+fn bookmark_and_history_addresses_come_out_normalised() {
+    let profile = tempfile::tempdir().unwrap();
+    let conn = places(profile.path());
+    conn.execute_batch(ROOTS).unwrap();
+    conn.execute_batch(
+        "INSERT INTO moz_places (id, url, title) VALUES (1, ' HTTPS://Upper.Example/a b', 'Upper');
+         INSERT INTO moz_bookmarks (id, type, fk, parent, position, title, guid)
+             VALUES (10, 1, 1, 3, 0, 'Upper', 'upper_______');
+         INSERT INTO moz_historyvisits (place_id, visit_date) VALUES (1, 1700000000000000);",
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        read_firefox_bookmarks(profile.path()).unwrap(),
+        vec![folder(
+            "Bookmarks Toolbar",
+            true,
+            ROOT_ADDED,
+            vec![bookmark("Upper", "https://upper.example/a%20b", None)]
+        )]
+    );
+    assert_eq!(
+        read_firefox_history(profile.path(), 10).unwrap(),
+        vec![visit(
+            "https://upper.example/a%20b",
+            Some("Upper"),
+            1_700_000_000_000
+        )]
+    );
+}
+
+#[test]
+fn visits_without_a_time_are_skipped() {
+    let profile = tempfile::tempdir().unwrap();
+    let conn = places(profile.path());
+    conn.execute_batch(
+        "INSERT INTO moz_places (id, url, title) VALUES (1, 'https://a.example/', 'A');
+         INSERT INTO moz_historyvisits (place_id, visit_date) VALUES
+             (1, 1700000000000000), (1, 0), (1, -5), (1, NULL);",
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        read_firefox_history(profile.path(), 10).unwrap(),
+        vec![visit("https://a.example/", Some("A"), 1_700_000_000_000)]
+    );
+}
+
+#[test]
+fn an_unreadable_history_row_is_skipped_not_fatal() {
+    let profile = tempfile::tempdir().unwrap();
+    let conn = places(profile.path());
+    conn.execute_batch(
+        "INSERT INTO moz_places (id, url, title) VALUES
+             (1, 'https://a.example/', 'A'),
+             (2, X'68747470733a2f2f00ff', 'Blob address'),
+             (3, 'https://c.example/', CAST(X'ff' AS TEXT)),
+             (4, 'https://d.example/', 'D');
+         INSERT INTO moz_historyvisits (place_id, visit_date) VALUES
+             (1, 1700000001000000), (2, 1700000002000000), (3, 1700000003000000),
+             (4, 1700000004000000), (4, X'00');",
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        read_firefox_history(profile.path(), 10).unwrap(),
+        vec![
+            visit("https://d.example/", Some("D"), 1_700_000_004_000),
+            visit("https://a.example/", Some("A"), 1_700_000_001_000),
+        ]
+    );
 }

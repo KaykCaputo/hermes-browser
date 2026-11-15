@@ -24,7 +24,7 @@ use crate::model::{ImportError, ImportedNode, MAX_TREE_DEPTH, keep_importable};
 ///
 /// Folders marked `PERSONAL_TOOLBAR_FOLDER="true"` become toolbar folders; `ADD_DATE` (seconds)
 /// becomes milliseconds; bookmarks without `HREF` or with an address that cannot be imported are
-/// left out. Text that has neither the Netscape doctype nor a list is refused as
+/// left out, and the addresses kept are normalised. Text that has neither the Netscape doctype nor a list is refused as
 /// [`ImportError::Malformed`].
 pub fn parse_netscape_bookmarks(html: &str) -> Result<Vec<ImportedNode>, ImportError> {
     let events = tokenize(html);
@@ -325,7 +325,9 @@ impl Builder {
 ///
 /// Folders carry `ADD_DATE` when known and `PERSONAL_TOOLBAR_FOLDER="true"` for the toolbar;
 /// dates are written in whole seconds, so milliseconds below a second do not survive a round
-/// trip. The same tree always gives the same text.
+/// trip. Folders nested deeper than the parser keeps (48 levels) are opened into the deepest
+/// one kept, as the parser would; their own titles are not written. The same tree always gives
+/// the same text.
 pub fn write_netscape_bookmarks(nodes: &[ImportedNode]) -> String {
     let mut out = String::from(
         "<!DOCTYPE NETSCAPE-Bookmark-file-1>\n\
@@ -334,17 +336,35 @@ pub fn write_netscape_bookmarks(nodes: &[ImportedNode]) -> String {
          DO NOT EDIT! -->\n\
          <META HTTP-EQUIV=\"Content-Type\" CONTENT=\"text/html; charset=UTF-8\">\n\
          <TITLE>Bookmarks</TITLE>\n\
-         <H1>Bookmarks</H1>\n",
+         <H1>Bookmarks</H1>\n\
+         <DL><p>\n",
     );
-    write_list(nodes, 0, &mut out);
-    out
-}
-
-fn write_list(nodes: &[ImportedNode], depth: usize, out: &mut String) {
-    let indent = "    ".repeat(depth);
-    let _ = writeln!(out, "{indent}<DL><p>");
-    for node in nodes {
-        out.push_str(&indent);
+    // An explicit stack rather than recursion, so no tree can exhaust the call stack.
+    let mut lists = vec![List {
+        nodes: nodes.iter(),
+        depth: 0,
+        closes: true,
+    }];
+    while let Some(list) = lists.last_mut() {
+        let depth = list.depth;
+        let Some(node) = list.nodes.next() else {
+            if lists.pop().is_some_and(|list| list.closes) {
+                let _ = writeln!(out, "{}</DL><p>", indent(depth));
+            }
+            continue;
+        };
+        if let ImportedNode::Folder { children, .. } = node
+            && depth >= MAX_TREE_DEPTH
+        {
+            // Opened into the list around it: nothing of the folder itself is written.
+            lists.push(List {
+                nodes: children.iter(),
+                depth,
+                closes: false,
+            });
+            continue;
+        }
+        out.push_str(&indent(depth));
         match node {
             ImportedNode::Folder {
                 title,
@@ -353,14 +373,19 @@ fn write_list(nodes: &[ImportedNode], depth: usize, out: &mut String) {
                 children,
             } => {
                 out.push_str("    <DT><H3");
-                write_add_date(*added_at_ms, out);
+                write_add_date(*added_at_ms, &mut out);
                 if *toolbar {
                     out.push_str(" PERSONAL_TOOLBAR_FOLDER=\"true\"");
                 }
                 out.push('>');
-                escape(title, out);
+                escape(title, &mut out);
                 out.push_str("</H3>\n");
-                write_list(children, depth + 1, out);
+                let _ = writeln!(out, "{}<DL><p>", indent(depth + 1));
+                lists.push(List {
+                    nodes: children.iter(),
+                    depth: depth + 1,
+                    closes: true,
+                });
             }
             ImportedNode::Bookmark {
                 title,
@@ -368,17 +393,30 @@ fn write_list(nodes: &[ImportedNode], depth: usize, out: &mut String) {
                 added_at_ms,
             } => {
                 out.push_str("    <DT><A HREF=\"");
-                escape(url, out);
+                escape(url, &mut out);
                 out.push('"');
-                write_add_date(*added_at_ms, out);
+                write_add_date(*added_at_ms, &mut out);
                 out.push('>');
-                escape(title, out);
+                escape(title, &mut out);
                 out.push_str("</A>\n");
             }
             ImportedNode::Separator => out.push_str("    <HR>\n"),
         }
     }
-    let _ = writeln!(out, "{indent}</DL><p>");
+    out
+}
+
+/// One list being written: its remaining entries, how deep it is, and whether it was opened
+/// with `<DL>` (an opened-up folder's entries are written into the list around it).
+struct List<'a> {
+    nodes: std::slice::Iter<'a, ImportedNode>,
+    depth: usize,
+    closes: bool,
+}
+
+/// Four spaces a level.
+fn indent(depth: usize) -> String {
+    "    ".repeat(depth)
 }
 
 fn write_add_date(added_at_ms: Option<i64>, out: &mut String) {
@@ -395,6 +433,11 @@ fn escape(text: &str, out: &mut String) {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
+            // As character references, line breaks and tabs survive a round trip; the parser only
+            // trims them from the ends of a title.
+            '\n' | '\r' | '\t' => {
+                let _ = write!(out, "&#{};", u32::from(c));
+            }
             c if c.is_control() => out.push(' '),
             c => out.push(c),
         }

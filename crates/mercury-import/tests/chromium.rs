@@ -116,7 +116,7 @@ fn the_bar_becomes_a_toolbar_folder_and_dates_become_unix_milliseconds() {
                 Some(1_699_999_900_000),
                 vec![bookmark(
                     "Über uns — 日本語",
-                    "https://later.example/über",
+                    "https://later.example/%C3%BCber",
                     None
                 )]
             ),
@@ -522,4 +522,114 @@ fn nothing_is_found_where_no_browser_keeps_data() {
 
     assert_eq!(find_chromium_profiles(&[empty.path().to_owned()]), vec![]);
     assert_eq!(find_chromium_profiles(&[]), vec![]);
+}
+
+#[test]
+fn a_root_left_empty_by_the_address_rule_is_left_out() {
+    let profile = tempfile::tempdir().unwrap();
+    std::fs::write(
+        profile.path().join("Bookmarks"),
+        r#"{"roots":{
+            "bookmark_bar":{"type":"folder","name":"Bar","children":[
+                {"type":"url","name":"Kept","url":"https://kept.example/"}]},
+            "other":{"type":"folder","name":"Other","children":[
+                {"type":"url","name":"Script","url":"javascript:alert(1)"},
+                {"type":"url","name":"Settings","url":"chrome://settings/"}]},
+            "synced":{"type":"folder","name":"Mobile","children":[
+                {"type":"url","name":"Data","url":"data:text/plain,hi"}]}
+        },"version":1}"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        read_chromium_bookmarks(profile.path()).unwrap(),
+        vec![folder(
+            "Bar",
+            true,
+            None,
+            vec![bookmark("Kept", "https://kept.example/", None)]
+        )]
+    );
+}
+
+#[test]
+fn bookmark_and_history_addresses_come_out_normalised() {
+    let profile = tempfile::tempdir().unwrap();
+    std::fs::write(
+        profile.path().join("Bookmarks"),
+        r#"{"roots":{"bookmark_bar":{"type":"folder","name":"Bar","children":[
+            {"type":"url","name":"Odd","url":"  HTTP://Odd.EXAMPLE/a b  "}]}},"version":1}"#,
+    )
+    .unwrap();
+    let conn = history_db(&profile.path().join("History"));
+    add_url(&conn, 1, " HTTPS://Upper.Example/Path?q=a b", Some("Upper"));
+    add_visit(&conn, 1, 1_700_000_000_000);
+    drop(conn);
+
+    assert_eq!(
+        read_chromium_bookmarks(profile.path()).unwrap(),
+        vec![folder(
+            "Bar",
+            true,
+            None,
+            vec![bookmark("Odd", "http://odd.example/a%20b", None)]
+        )]
+    );
+    assert_eq!(
+        read_chromium_history(profile.path(), 10).unwrap(),
+        vec![visit(
+            "https://upper.example/Path?q=a%20b",
+            Some("Upper"),
+            1_700_000_000_000
+        )]
+    );
+}
+
+#[test]
+fn visits_without_a_time_are_skipped() {
+    let profile = tempfile::tempdir().unwrap();
+    let conn = history_db(&profile.path().join("History"));
+    add_url(&conn, 1, "https://a.example/", Some("A"));
+    add_visit(&conn, 1, 1_700_000_000_000);
+    for raw in [0_i64, -5] {
+        conn.execute("INSERT INTO visits(url, visit_time) VALUES (1, ?1)", [raw])
+            .unwrap();
+    }
+    drop(conn);
+
+    assert_eq!(
+        read_chromium_history(profile.path(), 10).unwrap(),
+        vec![visit("https://a.example/", Some("A"), 1_700_000_000_000)]
+    );
+}
+
+#[test]
+fn an_unreadable_history_row_is_skipped_not_fatal() {
+    let profile = tempfile::tempdir().unwrap();
+    let conn = history_db(&profile.path().join("History"));
+    add_url(&conn, 1, "https://a.example/", Some("A"));
+    conn.execute_batch(
+        "INSERT INTO urls(id, url, title, last_visit_time) VALUES
+             (2, X'68747470733a2f2f00ff', 'Blob address', 0),
+             (3, 'https://c.example/', CAST(X'ff' AS TEXT), 0),
+             (4, 'https://d.example/', 'D', 0);",
+    )
+    .unwrap();
+    for (url, ms) in [(1, 1_000_i64), (2, 2_000), (3, 3_000), (4, 4_000)] {
+        add_visit(&conn, url, 1_700_000_000_000 + ms);
+    }
+    conn.execute(
+        "INSERT INTO visits(url, visit_time) VALUES (4, 'not a time')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    assert_eq!(
+        read_chromium_history(profile.path(), 10).unwrap(),
+        vec![
+            visit("https://d.example/", Some("D"), 1_700_000_004_000),
+            visit("https://a.example/", Some("A"), 1_700_000_001_000),
+        ]
+    );
 }

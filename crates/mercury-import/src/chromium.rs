@@ -17,7 +17,7 @@ use serde_json::Value;
 
 use crate::model::{
     BrowserProfile, ImportError, ImportedNode, ImportedVisit, MAX_TREE_DEPTH, VisitCollector,
-    keep_importable, push_unique,
+    keep_importable, push_unique, without_empty_roots,
 };
 use crate::snapshot;
 
@@ -126,7 +126,11 @@ fn profile_order(dir_name: &str) -> Option<u64> {
 /// Bookmarks of the profile at `profile`: the bookmarks bar as a toolbar folder, then the
 /// "other" and "mobile" roots, each only when it holds something. The profile's file and its
 /// account's are read together, root by root; either alone is enough, and one that is there but
-/// cannot be read fails the whole import.
+/// cannot be read fails the whole import. Roots left empty once refused addresses are removed
+/// are left out.
+///
+/// Arc keeps its bookmarks in its own sidebar file (`StorableSidebar.json`), not here, so for an
+/// Arc profile this returns [`ImportError::NotFound`] or nothing; its history reads as usual.
 pub fn read_chromium_bookmarks(profile: &Path) -> Result<Vec<ImportedNode>, ImportError> {
     let mut files = Vec::new();
     for name in BOOKMARK_FILES {
@@ -163,12 +167,11 @@ pub fn read_chromium_bookmarks(profile: &Path) -> Result<Vec<ImportedNode>, Impo
             }
         }
     }
-    let nodes = roots
-        .into_iter()
-        .filter(|root| !root.children.is_empty())
-        .map(Root::into_node)
-        .collect();
-    Ok(keep_importable(nodes, &profile.display().to_string()))
+    let nodes = roots.into_iter().map(Root::into_node).collect();
+    Ok(without_empty_roots(keep_importable(
+        nodes,
+        &profile.display().to_string(),
+    )))
 }
 
 fn read_bounded(path: &Path) -> Result<Vec<u8>, ImportError> {
@@ -310,15 +313,7 @@ pub fn read_chromium_history(
     snapshot.rows(
         "SELECT u.url, u.title, v.visit_time FROM visits v JOIN urls u ON u.id = v.url
          ORDER BY v.visit_time DESC, v.id DESC",
-        |row| {
-            let Some(url) = row.get::<_, Option<String>>(0)? else {
-                return Ok(true);
-            };
-            let Some(visited_at_ms) = chrome_time_to_unix_ms(row.get(2)?) else {
-                return Ok(true);
-            };
-            Ok(collector.push(url, row.get(1)?, visited_at_ms))
-        },
+        |row| Ok(collector.push_row(row, chrome_time_to_unix_ms)),
     )?;
     Ok(collector.finish(&path.display().to_string()))
 }

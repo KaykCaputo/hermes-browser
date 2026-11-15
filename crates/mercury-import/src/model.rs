@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use rusqlite::Row;
 use url::Url;
 
 /// One entry of an imported bookmark tree, in the source's own order.
@@ -43,6 +44,10 @@ pub struct ImportedVisit {
 pub const MAX_IMPORTED_VISITS: usize = 100_000;
 
 /// A browser profile found on disk that may be imported from.
+///
+/// Arc profiles (`browser == "Arc"`) are Chromium profiles whose history imports as usual, but
+/// Arc keeps its bookmarks in its own sidebar file (`StorableSidebar.json`), which this crate
+/// does not read: for an Arc profile `read_chromium_bookmarks` returns `NotFound` or nothing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrowserProfile {
     /// The browser's product name, for example `Chrome` or `Firefox`.
@@ -114,15 +119,20 @@ impl ImportError {
     }
 }
 
-/// Whether an address may be imported: only `http`, `https`, `ftp`, `file` and `about`.
-/// Script, data and browser-internal addresses (`javascript:`, `data:`, `chrome:`, `place:`, …)
-/// and anything that does not parse are refused.
-pub(crate) fn is_importable_url(url: &str) -> bool {
+/// The address in normalised form if it may be imported: only `http`, `https`, `ftp`, `file`
+/// and `about`. Script, data and browser-internal addresses (`javascript:`, `data:`, `chrome:`,
+/// `place:`, …) and anything that does not parse are refused. What is returned is the parsed
+/// URL's serialisation, so surrounding spaces, letter case in the scheme and host, and
+/// characters that need escaping never leave this crate.
+pub(crate) fn importable_url(url: &str) -> Option<String> {
     Url::parse(url)
-        .is_ok_and(|url| matches!(url.scheme(), "http" | "https" | "ftp" | "file" | "about"))
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https" | "ftp" | "file" | "about"))
+        .map(String::from)
 }
 
-/// Removes bookmarks whose address may not be imported, at every depth, and logs how many.
+/// Removes bookmarks whose address may not be imported, at every depth, normalises the
+/// addresses of the rest, and logs how many were removed.
 pub(crate) fn keep_importable(nodes: Vec<ImportedNode>, source: &str) -> Vec<ImportedNode> {
     let mut dropped = 0;
     let kept = filter_nodes(nodes, &mut dropped);
@@ -132,6 +142,17 @@ pub(crate) fn keep_importable(nodes: Vec<ImportedNode>, source: &str) -> Vec<Imp
         );
     }
     kept
+}
+
+/// Leaves out root folders with nothing in them. Run after [`keep_importable`], so a root that
+/// held only refused addresses is left out too.
+pub(crate) fn without_empty_roots(roots: Vec<ImportedNode>) -> Vec<ImportedNode> {
+    roots
+        .into_iter()
+        .filter(
+            |root| !matches!(root, ImportedNode::Folder { children, .. } if children.is_empty()),
+        )
+        .collect()
 }
 
 fn filter_nodes(nodes: Vec<ImportedNode>, dropped: &mut usize) -> Vec<ImportedNode> {
@@ -149,20 +170,32 @@ fn filter_nodes(nodes: Vec<ImportedNode>, dropped: &mut usize) -> Vec<ImportedNo
                 added_at_ms,
                 children: filter_nodes(children, dropped),
             }),
-            ImportedNode::Bookmark { ref url, .. } if !is_importable_url(url) => {
-                *dropped += 1;
-                None
-            }
-            node => Some(node),
+            ImportedNode::Bookmark {
+                title,
+                url,
+                added_at_ms,
+            } => match importable_url(&url) {
+                Some(url) => Some(ImportedNode::Bookmark {
+                    title,
+                    url,
+                    added_at_ms,
+                }),
+                None => {
+                    *dropped += 1;
+                    None
+                }
+            },
+            ImportedNode::Separator => Some(ImportedNode::Separator),
         })
         .collect()
 }
 
 /// Collects history visits newest first, keeping only importable addresses, up to `cap`.
 pub(crate) struct VisitCollector {
-    pub(crate) visits: Vec<ImportedVisit>,
+    visits: Vec<ImportedVisit>,
     cap: usize,
     dropped: usize,
+    unreadable: usize,
 }
 
 impl VisitCollector {
@@ -171,6 +204,7 @@ impl VisitCollector {
             visits: Vec::new(),
             cap: limit.min(MAX_IMPORTED_VISITS),
             dropped: 0,
+            unreadable: 0,
         }
     }
 
@@ -178,19 +212,36 @@ impl VisitCollector {
         self.visits.len() >= self.cap
     }
 
-    /// Adds one visit; returns whether there is room for more.
-    pub(crate) fn push(&mut self, url: String, title: Option<String>, visited_at_ms: i64) -> bool {
+    /// Adds the visit in `row`, whose columns are the address, the title and the stored time;
+    /// returns whether there is room for more. A row whose values cannot be read (a blob, or
+    /// text that is not UTF-8), or whose time is missing, zero or negative, is skipped and
+    /// counted.
+    pub(crate) fn push_row(&mut self, row: &Row<'_>, to_unix_ms: fn(i64) -> Option<i64>) -> bool {
         if self.is_full() {
             return false;
         }
-        if is_importable_url(&url) {
-            self.visits.push(ImportedVisit {
+        let read = || -> rusqlite::Result<_> {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+            ))
+        };
+        let visit = read().ok().and_then(|(url, title, time)| {
+            let visited_at_ms = time.filter(|time| *time > 0).and_then(to_unix_ms)?;
+            Some((url?, title, visited_at_ms))
+        });
+        let Some((url, title, visited_at_ms)) = visit else {
+            self.unreadable += 1;
+            return true;
+        };
+        match importable_url(&url) {
+            Some(url) => self.visits.push(ImportedVisit {
                 url,
                 title: title.filter(|title| !title.is_empty()),
                 visited_at_ms,
-            });
-        } else {
-            self.dropped += 1;
+            }),
+            None => self.dropped += 1,
         }
         !self.is_full()
     }
@@ -200,6 +251,12 @@ impl VisitCollector {
             log::debug!(
                 "{source}: left out {} visits to addresses that cannot be imported",
                 self.dropped
+            );
+        }
+        if self.unreadable > 0 {
+            log::warn!(
+                "{source}: skipped {} history rows that could not be read",
+                self.unreadable
             );
         }
         self.visits
