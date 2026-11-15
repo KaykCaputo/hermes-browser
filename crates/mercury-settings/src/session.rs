@@ -279,21 +279,36 @@ fn cap_tabs(windows: Vec<WindowSnapshot>, max: usize) -> Vec<WindowSnapshot> {
 /// Decides when a changed session is worth writing: at most once per interval, and at once
 /// when asked to flush. Pure; the caller supplies the time.
 ///
-/// Call [`mark_dirty`](Self::mark_dirty) on every change, ask
-/// [`should_save`](Self::should_save) from a timer, and call [`saved`](Self::saved) once the
-/// write lands. To flush (on quit, or before something risky), save without asking and then
-/// call `saved`. A save that fails is simply not reported; it is offered again once the
-/// interval has passed.
+/// The protocol:
+///
+/// 1. Call [`mark_dirty`](Self::mark_dirty) on every change.
+/// 2. From a timer, call [`should_save`](Self::should_save). When it returns a [`SaveToken`],
+///    take the snapshot, write it, and hand the token back to [`saved`](Self::saved) if the
+///    write landed. If it failed, drop the token: the save is offered again once the interval
+///    has passed. Changes marked after the token was issued stay dirty.
+/// 3. To save without asking (on quit, or before something risky), write the snapshot and call
+///    [`flushed`](Self::flushed): everything marked so far counts as saved.
+///
+/// **The quit rule:** the final save, with `exited_cleanly: true`, is made on every orderly quit
+/// even when [`is_dirty`](Self::is_dirty) is false, because
+/// [`SessionStore::begin_run`](crate::SessionStore::begin_run) marked the file as belonging
+/// to a running browser; without that save the next start reports a crash.
 #[derive(Clone, Debug)]
 pub struct SaveThrottle {
     min_interval_ms: i64,
-    /// Counts changes; `saved_changes` is the count already on disk.
+    /// Counts changes; `saved_changes` is the count known to be on disk.
     changes: u64,
     saved_changes: u64,
-    /// The count when `should_save` last said yes, if no save has been reported since.
-    offered_changes: Option<u64>,
     last_offer_ms: Option<i64>,
     last_saved_ms: Option<i64>,
+}
+
+/// Permission to save, from [`SaveThrottle::should_save`], to be handed back to
+/// [`SaveThrottle::saved`] once the write lands. It records which changes the save covers.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "hand the token back to `SaveThrottle::saved` once the session is written"]
+pub struct SaveToken {
+    changes: u64,
 }
 
 impl SaveThrottle {
@@ -304,7 +319,6 @@ impl SaveThrottle {
             min_interval_ms: min_interval_ms.max(0),
             changes: 0,
             saved_changes: 0,
-            offered_changes: None,
             last_offer_ms: None,
             last_saved_ms: None,
         }
@@ -312,18 +326,19 @@ impl SaveThrottle {
 
     /// Records that the session changed.
     pub fn mark_dirty(&mut self) {
-        self.changes = self.changes.wrapping_add(1);
+        self.changes = self.changes.saturating_add(1);
     }
 
-    /// Whether there are changes not yet reported as saved.
+    /// Whether there are changes not yet known to be saved.
     pub fn is_dirty(&self) -> bool {
         self.changes != self.saved_changes
     }
 
-    /// True at most once per interval while dirty: the interval runs from the last save and
-    /// from the last time this said yes. A time earlier than either (the clock went back)
+    /// A token to save with, at most once per interval while dirty: the interval runs from the
+    /// last save and from the last token. A time earlier than either (the clock went back)
     /// counts as the interval having passed.
-    pub fn should_save(&mut self, now_ms: i64) -> bool {
+    #[must_use = "save the session when this returns a token"]
+    pub fn should_save(&mut self, now_ms: i64) -> Option<SaveToken> {
         let interval = self.min_interval_ms;
         let passed = |since: Option<i64>| {
             since.is_none_or(|since| {
@@ -332,18 +347,26 @@ impl SaveThrottle {
             })
         };
         if !self.is_dirty() || !passed(self.last_saved_ms) || !passed(self.last_offer_ms) {
-            return false;
+            return None;
         }
-        self.offered_changes = Some(self.changes);
         self.last_offer_ms = Some(now_ms);
-        true
+        Some(SaveToken {
+            changes: self.changes,
+        })
     }
 
-    /// Records that a save landed at `now_ms`: the state as of the last
-    /// [`should_save`](Self::should_save) that said yes, or, when the caller saved without
-    /// asking, the state now. Changes marked after that yes stay dirty.
-    pub fn saved(&mut self, now_ms: i64) {
-        self.saved_changes = self.offered_changes.take().unwrap_or(self.changes);
+    /// Records that the save `token` permitted landed at `now_ms`: the changes marked before
+    /// the token was issued are saved.
+    pub fn saved(&mut self, token: SaveToken, now_ms: i64) {
+        self.saved_changes = self.saved_changes.max(token.changes);
+        self.last_saved_ms = Some(now_ms);
+        self.last_offer_ms = None;
+    }
+
+    /// Records that the caller saved without asking, at `now_ms`: everything marked so far is
+    /// saved. Use it for the final save on quit.
+    pub fn flushed(&mut self, now_ms: i64) {
+        self.saved_changes = self.changes;
         self.last_saved_ms = Some(now_ms);
         self.last_offer_ms = None;
     }

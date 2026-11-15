@@ -26,8 +26,8 @@ pub use search::{
 };
 pub use session::{
     ClosedTab, MAX_CLOSED_TABS, MAX_RESTORED_TABS, MAX_TITLE_BYTES, MAX_WINDOW_COORDINATE,
-    MAX_WINDOW_SIDE, MIN_WINDOW_SIDE, SaveThrottle, SessionSnapshot, TabSnapshot, WindowBounds,
-    WindowSnapshot,
+    MAX_WINDOW_SIDE, MIN_WINDOW_SIDE, SaveThrottle, SaveToken, SessionSnapshot, TabSnapshot,
+    WindowBounds, WindowSnapshot,
 };
 pub use settings::{
     AppearanceSettings, ClearOnExit, DownloadSettings, MAX_LANGUAGE_TAG_BYTES,
