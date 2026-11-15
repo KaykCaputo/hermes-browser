@@ -1,0 +1,19 @@
+[package]
+name = "mercury-settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+url.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+talaria-core = { path = "../talaria-core" }
+tempfile.workspace = true
