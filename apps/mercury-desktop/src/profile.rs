@@ -12,6 +12,9 @@ pub(crate) const APP_DIR_NAME: &str = "mercury-browser";
 const DEFAULT_PROFILE_NAME: &str = "Default";
 const LOCK_FILE_NAME: &str = "lock";
 const SERVO_DIRECTORY_NAME: &str = "servo";
+/// The file that marks a directory as a Mercury Browser profile, and its first line.
+const PROFILE_MARKER_NAME: &str = ".mercury-browser-profile";
+const PROFILE_MARKER_FIRST_LINE: &str = "Mercury Browser profile";
 
 /// Exit status when the profile is already in use by another Mercury Browser.
 pub(crate) const EXIT_PROFILE_IN_USE: u8 = 4;
@@ -43,25 +46,80 @@ impl ProfilePaths {
         })
     }
 
-    /// Creates `root` and `servo_config_dir`, readable by this user only: the profile holds
-    /// cookies and, while the browser runs, HTTP credentials. An existing directory that other
-    /// users can read is tightened only if it is already a Mercury profile (it holds the `lock`
-    /// file or the `servo` directory); any other such directory is refused, never changed, so
-    /// `--profile-dir ~` or a shared directory keeps its permissions. Symbolic links are never
-    /// followed to change a mode.
+    /// Creates the profile, or checks and reopens an existing one, readable by this user only:
+    /// it holds cookies and, while the browser runs, HTTP credentials.
+    ///
+    /// A directory is an existing profile only if it holds `PROFILE_MARKER_NAME`, a regular file
+    /// owned by this user whose first line is `PROFILE_MARKER_FIRST_LINE`; only then, or when
+    /// this code has just created the directory, is any mode changed. Any other existing
+    /// directory is used only if it is empty, private and this user's (the marker is then
+    /// written); a directory holding other things, or open to others, or a symbolic link, is
+    /// refused and left exactly as it is.
     pub(crate) fn create(&self) -> io::Result<()> {
-        let is_profile = |root: &Path| {
-            [LOCK_FILE_NAME, SERVO_DIRECTORY_NAME]
-                .iter()
-                .any(|name| std::fs::symlink_metadata(root.join(name)).is_ok())
+        let root = match std::fs::symlink_metadata(&self.root) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_private_directory(&self.root)?;
+                RootState::Created
+            }
+            Err(error) => return Err(error),
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(io::Error::other(
+                    "it is a symbolic link; Mercury does not follow links to a profile \
+                     (give the directory itself)",
+                ));
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(io::Error::other("it is not a directory"));
+            }
+            Ok(_) if is_recognised_profile(&self.root) => RootState::Profile,
+            Ok(metadata) => {
+                if std::fs::read_dir(&self.root)?.next().is_some() {
+                    return Err(io::Error::other(
+                        "it already holds other files and is not a Mercury profile; a profile \
+                         goes in a new or empty directory",
+                    ));
+                }
+                if !is_owned_by_current_user(&metadata) {
+                    return Err(io::Error::other("it belongs to another user"));
+                }
+                if is_open_to_others(&metadata) {
+                    return Err(io::Error::other(
+                        "other users can read it and it is not a Mercury profile; Mercury does \
+                         not change its permissions (choose a directory that does not exist yet, \
+                         or make it private with chmod 700)",
+                    ));
+                }
+                RootState::Empty
+            }
         };
+
         let mut tightened = Vec::new();
-        if prepare_private_directory(&self.root, is_profile(&self.root))? {
+        if root == RootState::Profile && tighten_directory(&self.root)? {
             tightened.push(self.root.display().to_string());
         }
-        // Inside a profile root that is ours, `servo` is ours too.
-        if prepare_private_directory(&self.servo_config_dir, true)? {
-            tightened.push(self.servo_config_dir.display().to_string());
+        match std::fs::symlink_metadata(&self.servo_config_dir) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                create_private_directory(&self.servo_config_dir)?;
+            }
+            Err(error) => return Err(error),
+            // Only a recognised profile's own `servo` directory is adopted.
+            Ok(metadata)
+                if root == RootState::Profile
+                    && metadata.is_dir()
+                    && is_owned_by_current_user(&metadata) =>
+            {
+                if tighten_directory(&self.servo_config_dir)? {
+                    tightened.push(self.servo_config_dir.display().to_string());
+                }
+            }
+            Ok(_) => {
+                return Err(io::Error::other(
+                    "its `servo` entry is not a directory this profile owns",
+                ));
+            }
+        }
+        if root != RootState::Profile {
+            write_profile_marker(&self.root)?;
         }
         if !tightened.is_empty() {
             eprintln!(
@@ -73,47 +131,87 @@ impl ProfilePaths {
     }
 }
 
-/// Makes sure `path` is a directory only this user can read: creates it (mode 0700, set at
-/// creation) if it is missing; accepts it if it is already private; tightens it if `may_tighten`;
-/// refuses it otherwise. Returns whether it was tightened.
-fn prepare_private_directory(path: &Path, may_tighten: bool) -> io::Result<bool> {
-    let metadata = match std::fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            create_private_directory(path)?;
-            return Ok(false);
-        }
-        Err(error) => return Err(error),
+/// How `ProfilePaths::create` found the profile root.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RootState {
+    /// Created just now.
+    Created,
+    /// Existed, empty, private and this user's.
+    Empty,
+    /// Existed and carries the profile marker.
+    Profile,
+}
+
+/// Whether `root` holds the profile marker: a regular file (not a link) owned by this user
+/// whose first line is `PROFILE_MARKER_FIRST_LINE`.
+fn is_recognised_profile(root: &Path) -> bool {
+    use std::io::Read;
+
+    let Ok(file) = open_without_following(&root.join(PROFILE_MARKER_NAME), false) else {
+        return false;
     };
-    if metadata.file_type().is_symlink() {
-        // Use the target as it is, but never change it.
-        let target = std::fs::metadata(path)?;
-        if !target.is_dir() {
-            return Err(io::Error::other(
-                "it is a symbolic link to something that is not a directory",
-            ));
-        }
-        if is_open_to_others(&target) {
-            return Err(io::Error::other(
-                "it is a symbolic link to a directory other users can read; Mercury does not change \
-                 a link's target (make the target private with chmod 700, or choose another directory)",
-            ));
-        }
-        return Ok(false);
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() || !is_owned_by_current_user(&metadata) {
+        return false;
     }
-    if !metadata.is_dir() {
-        return Err(io::Error::other("it is not a directory"));
+    let mut start = Vec::new();
+    if file.take(256).read_to_end(&mut start).is_err() {
+        return false;
+    }
+    String::from_utf8_lossy(&start).lines().next() == Some(PROFILE_MARKER_FIRST_LINE)
+}
+
+fn write_profile_marker(root: &Path) -> io::Result<()> {
+    use std::io::Write;
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut marker = options.open(root.join(PROFILE_MARKER_NAME))?;
+    writeln!(marker, "{PROFILE_MARKER_FIRST_LINE}")?;
+    writeln!(
+        marker,
+        "This directory is a Mercury Browser profile: cookies and site data. Do not share it."
+    )
+}
+
+/// Opens `path` without following a symbolic link at its last component.
+fn open_without_following(path: &Path, directory: bool) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        let flags = if directory {
+            libc::O_NOFOLLOW | libc::O_DIRECTORY
+        } else {
+            libc::O_NOFOLLOW
+        };
+        std::os::unix::fs::OpenOptionsExt::custom_flags(&mut options, flags);
+    }
+    #[cfg(not(unix))]
+    let _ = directory;
+    options.open(path)
+}
+
+/// Removes group and other permissions from a directory of this user, through an open handle
+/// so that nothing can be swapped in between the check and the change. Returns whether it
+/// changed anything.
+fn tighten_directory(path: &Path) -> io::Result<bool> {
+    let directory = open_without_following(path, true)?;
+    let metadata = directory.metadata()?;
+    if !metadata.is_dir() || !is_owned_by_current_user(&metadata) {
+        return Err(io::Error::other(format!(
+            "{} is not a directory of this user",
+            path.display()
+        )));
     }
     if !is_open_to_others(&metadata) {
         return Ok(false);
     }
-    if !may_tighten {
-        return Err(io::Error::other(
-            "other users can read it and it is not a Mercury profile; Mercury does not change its \
-             permissions (choose a directory that does not exist yet, or make it private with chmod 700)",
-        ));
-    }
-    make_private(path, &metadata)?;
+    make_private(&directory, &metadata)?;
     Ok(true)
 }
 
@@ -138,18 +236,29 @@ fn is_open_to_others(_metadata: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Removes group and other permissions from a directory (not a symbolic link: the caller checked
-/// with `symlink_metadata`).
 #[cfg(unix)]
-fn make_private(path: &Path, metadata: &std::fs::Metadata) -> io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
+fn is_owned_by_current_user(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
 
-    let mode = metadata.permissions().mode();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o700))
+    metadata.uid() == current_user()
 }
 
 #[cfg(not(unix))]
-fn make_private(_path: &Path, _metadata: &std::fs::Metadata) -> io::Result<()> {
+fn is_owned_by_current_user(_metadata: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(unix)]
+fn make_private(directory: &File, metadata: &std::fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // `File::set_permissions` is `fchmod` on the open handle.
+    let mode = metadata.permissions().mode();
+    directory.set_permissions(std::fs::Permissions::from_mode(mode & 0o700))
+}
+
+#[cfg(not(unix))]
+fn make_private(_directory: &File, _metadata: &std::fs::Metadata) -> io::Result<()> {
     Ok(())
 }
 
@@ -292,7 +401,10 @@ impl ProfileLock {
         let mut options = OpenOptions::new();
         options.create(true).truncate(false).write(true);
         #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
         let file = options
             .open(root.join(LOCK_FILE_NAME))
             .map_err(LockError::Io)?;
@@ -329,6 +441,10 @@ impl TemporaryProfile {
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
         builder.create(&root)?;
+        if let Err(error) = write_profile_marker(&root) {
+            remove_directory(&root);
+            return Err(error);
+        }
         let lock = match ProfileLock::acquire(&root) {
             Ok(lock) => lock,
             Err(error) => {
@@ -597,27 +713,6 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn an_existing_profile_with_wider_permissions_is_tightened() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let root = unique_temporary_directory("tighten");
-        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
-        std::fs::create_dir_all(&paths.servo_config_dir).expect("the test directories");
-        for directory in [&paths.root, &paths.servo_config_dir] {
-            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o755))
-                .expect("the test permissions");
-        }
-
-        let result = paths.create();
-        let modes = (mode(&paths.root), mode(&paths.servo_config_dir));
-        let _ = std::fs::remove_dir_all(&root);
-
-        result.expect("an existing profile should be accepted");
-        assert_eq!(modes, (0o700, 0o700));
-    }
-
-    #[cfg(unix)]
     fn set_mode(path: &Path, mode: u32) {
         use std::os::unix::fs::PermissionsExt;
 
@@ -645,56 +740,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_profile_marked_by_its_lock_file_is_tightened() {
-        let root = unique_temporary_directory("marked");
-        std::fs::create_dir_all(&root).expect("the test directory");
-        std::fs::write(root.join("lock"), "").expect("the lock file");
-        set_mode(&root, 0o755);
-        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
-
-        let result = paths.create();
-        let mode_after = mode(&root);
-        let _ = std::fs::remove_dir_all(&root);
-
-        result.expect("an existing profile is accepted");
-        assert_eq!(mode_after, 0o700);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn an_existing_private_directory_is_accepted() {
-        let root = unique_temporary_directory("private-empty");
-        std::fs::create_dir_all(&root).expect("the test directory");
-        set_mode(&root, 0o700);
-        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
-
-        let result = paths.create();
-        let _ = std::fs::remove_dir_all(&root);
-
-        result.expect("a private directory is a fine profile");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn the_target_of_a_symlinked_profile_is_never_changed() {
-        let base = unique_temporary_directory("symlink");
-        let target = base.join("target");
-        std::fs::create_dir_all(target.join("servo")).expect("the test directories");
-        set_mode(&target, 0o755);
-        let link = base.join("link");
-        std::os::unix::fs::symlink(&target, &link).expect("the test symlink");
-        let paths = ProfilePaths::resolve(None, Some(&link)).expect("an override is enough");
-
-        let result = paths.create();
-        let target_mode = mode(&target);
-        let _ = std::fs::remove_dir_all(&base);
-
-        assert!(result.is_err());
-        assert_eq!(target_mode, 0o755);
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn a_symlinked_servo_directory_is_never_changed() {
         let base = unique_temporary_directory("servo-symlink");
         let root = base.join("profile");
@@ -712,6 +757,181 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(elsewhere_mode, 0o755);
+    }
+
+    /// Every entry under `root` (itself included) with its mode, sorted, symlinks not followed.
+    #[cfg(unix)]
+    fn snapshot(root: &Path) -> Vec<(PathBuf, u32)> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut entries = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            let metadata = std::fs::symlink_metadata(&path).expect("an entry");
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(&path).expect("a directory") {
+                    pending.push(entry.expect("an entry").path());
+                }
+            }
+            entries.push((path, metadata.permissions().mode() & 0o7777));
+        }
+        entries.sort();
+        entries
+    }
+
+    fn marker_first_line(root: &Path) -> Option<String> {
+        std::fs::read_to_string(root.join(PROFILE_MARKER_NAME))
+            .ok()
+            .and_then(|contents| contents.lines().next().map(str::to_owned))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_holding_an_unrelated_servo_directory_and_lock_file_is_refused_and_unchanged() {
+        let root = unique_temporary_directory("unrelated");
+        std::fs::create_dir_all(root.join("servo").join("components")).expect("a checkout");
+        std::fs::write(root.join("servo").join("README.md"), "Servo").expect("a file");
+        std::fs::write(root.join("lock"), "not ours").expect("a file");
+        set_mode(&root.join("servo"), 0o755);
+        set_mode(&root, 0o755);
+        let before = snapshot(&root);
+
+        let profile = open_profile(Some(&root), false).expect("the directory is not locked");
+        let used = profile.paths.is_some();
+        drop(profile);
+        let after = snapshot(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(!used);
+        assert_eq!(after, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_directory_holding_other_things_is_refused() {
+        let root = unique_temporary_directory("private-full");
+        std::fs::create_dir_all(&root).expect("the test directory");
+        std::fs::write(root.join("notes.txt"), "mine").expect("a file");
+        set_mode(&root, 0o700);
+        let before = snapshot(&root);
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+
+        let result = paths.create();
+        let after = snapshot(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(result.is_err());
+        assert_eq!(after, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_existing_directory_is_used_and_marked() {
+        let root = unique_temporary_directory("empty");
+        std::fs::create_dir_all(&root).expect("the test directory");
+        set_mode(&root, 0o700);
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+
+        let result = paths.create();
+        let marker = marker_first_line(&root);
+        let servo_mode = mode(&paths.servo_config_dir);
+        let _ = std::fs::remove_dir_all(&root);
+
+        result.expect("an empty private directory is a fine profile");
+        assert_eq!(marker.as_deref(), Some(PROFILE_MARKER_FIRST_LINE));
+        assert_eq!(servo_mode, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_profile_is_marked() {
+        let root = unique_temporary_directory("new-marked");
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+
+        let result = paths.create();
+        let marker = marker_first_line(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        result.expect("a new directory is a fine profile");
+        assert_eq!(marker.as_deref(), Some(PROFILE_MARKER_FIRST_LINE));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_recognised_profile_with_a_too_open_mode_is_tightened() {
+        let root = unique_temporary_directory("recognised");
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+        paths.create().expect("a new profile");
+        set_mode(&root, 0o755);
+        set_mode(&paths.servo_config_dir, 0o755);
+
+        let result = paths.create();
+        let modes = (mode(&root), mode(&paths.servo_config_dir));
+        let _ = std::fs::remove_dir_all(&root);
+
+        result.expect("an existing profile is accepted");
+        assert_eq!(modes, (0o700, 0o700));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_profile_is_refused_and_the_profile_left_alone() {
+        let base = unique_temporary_directory("symlink-profile");
+        let target = base.join("profile");
+        let paths = ProfilePaths::resolve(None, Some(&target)).expect("an override is enough");
+        paths.create().expect("a real profile");
+        set_mode(&target, 0o755);
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("the test symlink");
+        let before = snapshot(&target);
+
+        let result = ProfilePaths::resolve(None, Some(&link))
+            .expect("an override is enough")
+            .create();
+        let after = snapshot(&target);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(result.is_err());
+        assert_eq!(after, before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_whose_servo_entry_is_a_symlink_is_refused() {
+        let base = unique_temporary_directory("servo-link");
+        let root = base.join("profile");
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+        paths.create().expect("a real profile");
+        std::fs::remove_dir(&paths.servo_config_dir).expect("the servo directory");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("the test directory");
+        set_mode(&elsewhere, 0o755);
+        std::os::unix::fs::symlink(&elsewhere, &paths.servo_config_dir).expect("the symlink");
+
+        let result = paths.create();
+        let elsewhere_mode = mode(&elsewhere);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(result.is_err());
+        assert_eq!(elsewhere_mode, 0o755);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_marker_with_other_contents_is_not_recognised() {
+        let root = unique_temporary_directory("bad-marker");
+        std::fs::create_dir_all(root.join("servo")).expect("the test directories");
+        std::fs::write(root.join(PROFILE_MARKER_NAME), "something else\n").expect("a file");
+        set_mode(&root, 0o755);
+        let before = snapshot(&root);
+        let paths = ProfilePaths::resolve(None, Some(&root)).expect("an override is enough");
+
+        let result = paths.create();
+        let after = snapshot(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(result.is_err());
+        assert_eq!(after, before);
     }
 
     #[cfg(unix)]
@@ -1013,7 +1233,10 @@ mod tests {
 
         let root = unique_temporary_directory("read-only");
         let servo = root.join("servo");
-        std::fs::create_dir_all(&servo).expect("the test directories");
+        ProfilePaths::resolve(None, Some(&root))
+            .expect("an override is enough")
+            .create()
+            .expect("a new profile");
         std::fs::set_permissions(&servo, std::fs::Permissions::from_mode(0o500))
             .expect("the test permissions");
 
