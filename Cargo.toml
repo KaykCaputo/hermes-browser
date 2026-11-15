@@ -21,6 +21,7 @@ content-security-policy = "0.9"
 core-foundation = "0.10"
 dpi = "0.1"
 euclid = "0.22"
+getrandom = "0.4"
 gleam = "0.15"
 glow = "0.17"
 image = { version = "0.25", default-features = false, features = ["png"] }

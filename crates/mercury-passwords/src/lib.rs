@@ -9,11 +9,14 @@
 //!
 //! Passwords travel as [`Password`], which is wiped when dropped and never printed. Listing
 //! logins never reads a password: on macOS, reading one is what can make the system ask the user.
+//!
+//! [`generate_password`] makes new passwords from the operating system's random source.
 
 #[cfg(target_os = "macos")]
 mod account;
 mod backend;
 mod error;
+mod generator;
 #[cfg(target_os = "macos")]
 mod keychain;
 mod login;
@@ -25,6 +28,10 @@ pub use backend::{
     MAX_PASSWORD_BYTES, MAX_REALM_BYTES, MAX_USERNAME_BYTES, PasswordStore, SecretBackend,
 };
 pub use error::PasswordError;
+pub use generator::{
+    AMBIGUOUS_CHARACTERS, DIGITS, GENERATOR_MAX_LENGTH, GENERATOR_MIN_LENGTH, GeneratorOptions,
+    LOWERCASE, OsRandom, RandomSource, SYMBOLS, UPPERCASE, entropy_bits, generate_password,
+};
 #[cfg(target_os = "macos")]
 pub use keychain::{KEYCHAIN_SERVICE, KeychainBackend};
 pub use login::{LoginKey, LoginKind, LoginSummary, SaveOutcome};

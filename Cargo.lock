@@ -5333,6 +5333,7 @@ name = "mercury-passwords"
 version = "0.2.0"
 dependencies = [
  "core-foundation 0.10.1",
+ "getrandom 0.4.3",
  "log",
  "security-framework",
  "tempfile",
