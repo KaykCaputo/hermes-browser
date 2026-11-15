@@ -29,9 +29,22 @@ thiserror.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 ash.workspace = true
 
-# `NSScreen.visibleFrame`, the screen area outside the menu bar and Dock (`window.screen.avail*`).
+# `NSScreen.visibleFrame`, the screen area outside the menu bar and Dock (`window.screen.avail*`),
+# and `deviceDescription` to find the monitor's screen.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSScreen"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSGraphics",
+    "NSScreen",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSDictionary",
+    "NSEnumerator",
+    "NSString",
+    "NSValue",
+] }
 
 # The crash handler is compiled on macOS and Linux only, as in servoshell.
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]

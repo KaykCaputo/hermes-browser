@@ -160,8 +160,10 @@ fn use_automatic_gpu_selection() {
         // such as `1` on a single-GPU machine causes every GL context to try a
         // nonexistent second device before falling back to the default GPU.
         //
-        // SAFETY: This is the first operation in main, before Slint, Servo, or
-        // GStreamer can create worker threads or read the process environment.
+        // SAFETY: This runs in main before Slint, Servo, or GStreamer can create worker
+        // threads or read the process environment. The work done before it (installing the
+        // crash handler and panic hook, the content-process check, parsing the command line)
+        // starts no threads and does not read DRI_PRIME.
         unsafe {
             std::env::remove_var("DRI_PRIME");
         }

@@ -3,6 +3,9 @@ use talaria_servo::ScreenMetrics;
 
 /// The screen and window geometry pages should see, read from the native window and the
 /// monitor it is on. `None` when no monitor is known.
+///
+/// On Wayland the compositor does not reveal window positions, so `outer_position` fails and
+/// the window is reported at (0, 0); sizes are still correct.
 pub(crate) fn screen_metrics(window: &Window) -> Option<ScreenMetrics> {
     let monitor = window
         .current_monitor()
@@ -37,12 +40,24 @@ fn macos_available_area(
     screen_origin: (i32, i32),
 ) -> Option<((i32, i32), (u32, u32))> {
     use objc2_app_kit::NSScreen;
+    use objc2_foundation::{MainThreadMarker, NSNumber, NSString};
     use slint::winit_030::winit::platform::macos::MonitorHandleExtMacOS;
 
-    let screen = monitor.ns_screen()?.cast::<NSScreen>();
-    // SAFETY: winit returns a pointer to an `NSScreen` from `+[NSScreen screens]`, which keeps it
-    // alive; it is only read here, on the main thread (the engine pump), and not kept.
-    let screen = unsafe { &*screen };
+    // AppKit screens may only be used on the main thread; this is checked, not assumed.
+    let main_thread = MainThreadMarker::new()?;
+    let screen_number_key = NSString::from_str("NSScreenNumber");
+    let screens = NSScreen::screens(main_thread);
+    let screen = screen_with_display_id(
+        screens.iter().map(|screen| {
+            let number = screen
+                .deviceDescription()
+                .objectForKey(&screen_number_key)
+                .and_then(|number| number.downcast::<NSNumber>().ok())
+                .map(|number| number.unsignedIntValue());
+            (number, screen)
+        }),
+        monitor.native_id(),
+    )?;
     let (frame, visible_frame) = (screen.frame(), screen.visibleFrame());
     Some(available_area(
         PointRect {
@@ -98,9 +113,33 @@ fn available_area(
     )
 }
 
+/// The item whose display number equals `display_id`; items without a number never match.
+#[cfg(any(target_os = "macos", test))]
+fn screen_with_display_id<T>(
+    screens: impl IntoIterator<Item = (Option<u32>, T)>,
+    display_id: u32,
+) -> Option<T> {
+    screens
+        .into_iter()
+        .find_map(|(number, screen)| (number == Some(display_id)).then_some(screen))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_screen_with_the_monitors_display_id_is_chosen() {
+        let screens = [
+            (Some(1), "built-in"),
+            (None, "unknown"),
+            (Some(7), "external"),
+        ];
+
+        assert_eq!(screen_with_display_id(screens, 7), Some("external"));
+        assert_eq!(screen_with_display_id(screens, 1), Some("built-in"));
+        assert_eq!(screen_with_display_id(screens, 3), None);
+    }
 
     #[test]
     fn the_menu_bar_and_a_bottom_dock_are_excluded() {

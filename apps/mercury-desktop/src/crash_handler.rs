@@ -3,6 +3,15 @@
 // `ports/servoshell/backtrace.rs` (the latter as the `backtrace` module below, without its
 // OpenHarmony-only function). Licensed under the Mozilla Public License 2.0.
 //
+// Limitations inherited from servoshell; this is a diagnostic aid, not a crash reporter:
+// - The handler allocates and symbolises a backtrace inside the signal handler. That is not
+//   async-signal-safe: if the fault happened while the allocator's lock was held, the handler
+//   can deadlock and the process hangs instead of dying.
+// - It is installed without an alternate signal stack: `signal-hook-registry` registers its
+//   dispatcher with `SA_RESTART | SA_SIGINFO` but not `SA_ONSTACK`, so on a stack overflow the
+//   handler runs on the exhausted stack, faults again, and the process dies without Rust's
+//   "has overflowed its stack" message.
+//
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.

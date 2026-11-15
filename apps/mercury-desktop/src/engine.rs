@@ -256,8 +256,9 @@ impl EngineState {
     /// Everything that does not need a frame: Servo's event loop, browser events, web-view
     /// lifetimes, tab visibility, sizing and command dispatch.
     fn pump(&mut self, window: &MainWindow) {
-        self.runtime.spin_event_loop();
+        // Before spinning, so that a page's first query after the window moved is current.
         self.update_screen_metrics(window);
+        self.runtime.spin_event_loop();
 
         let mut state_changed = false;
         for receiver in self.event_receivers.values() {
