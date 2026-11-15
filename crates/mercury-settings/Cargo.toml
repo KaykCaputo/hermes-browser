@@ -1,0 +1,10 @@
+[package]
+name = "mercury-settings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+tempfile.workspace = true

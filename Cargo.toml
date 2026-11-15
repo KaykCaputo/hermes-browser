@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "apps/mercury-desktop",
+    "crates/mercury-settings",
     "crates/mercury-ui",
     "crates/talaria-core",
     "crates/talaria-servo",
@@ -47,6 +48,7 @@ slint = { version = "~1.17.1", default-features = false, features = [
 ] }
 slint-build = "~1.17.1"
 surfman = "0.14"
+tempfile = "3"
 thiserror = "2"
 url = "2.5"
 
