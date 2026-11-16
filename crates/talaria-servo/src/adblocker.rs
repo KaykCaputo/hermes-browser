@@ -7,17 +7,19 @@ use log::{debug, info};
 use servo::{WebResourceLoad, WebResourceRequest, WebResourceResponse, WebView};
 use url::Url;
 
+use crate::exit_clearing::EngineSwitches;
+
 const COMPILED_ENGINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/adblock-engine.dat"));
 
 pub(crate) struct ContentBlocker {
     engine: Engine,
     blocked_requests: Cell<u64>,
-    /// Off when the user turned blocking off; checked for every load.
-    enabled: Cell<bool>,
+    /// Whether the user wants blocking; read at every load.
+    switches: EngineSwitches,
 }
 
 impl ContentBlocker {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(switches: EngineSwitches) -> Self {
         let mut engine = Engine::default();
         engine
             .deserialize(COMPILED_ENGINE)
@@ -27,17 +29,7 @@ impl ContentBlocker {
         Self {
             engine,
             blocked_requests: Cell::new(0),
-            enabled: Cell::new(true),
-        }
-    }
-
-    /// Turns blocking on or off for every load from now on.
-    pub(crate) fn set_enabled(&self, enabled: bool) {
-        if self.enabled.replace(enabled) != enabled {
-            info!(
-                "ad and tracker blocking {}",
-                if enabled { "enabled" } else { "disabled" }
-            );
+            switches,
         }
     }
 
@@ -91,7 +83,7 @@ impl ContentBlocker {
         // Brave can show a dedicated interstitial for blocked top-level navigations. Mercury does
         // not have that UI yet, so allowing the main document avoids turning a matched navigation
         // into an unexplained blank tab while still blocking its ads and trackers.
-        if is_for_main_frame || !self.enabled.get() {
+        if is_for_main_frame || !self.switches.content_blocking() {
             return false;
         }
 
@@ -133,7 +125,7 @@ mod tests {
 
     #[test]
     fn bundled_brave_filters_block_ads_and_trackers() {
-        let blocker = ContentBlocker::new();
+        let blocker = ContentBlocker::new(EngineSwitches::default());
 
         assert!(blocker.should_block_url(
             "https://googleads.g.doubleclick.net/pagead/id",
@@ -160,7 +152,8 @@ mod tests {
 
     #[test]
     fn a_switched_off_blocker_blocks_nothing_until_switched_on_again() {
-        let blocker = ContentBlocker::new();
+        let switches = EngineSwitches::default();
+        let blocker = ContentBlocker::new(switches.clone());
         let ad = |blocker: &ContentBlocker| {
             blocker.should_block_url(
                 "https://googleads.g.doubleclick.net/pagead/id",
@@ -171,16 +164,16 @@ mod tests {
             )
         };
 
-        blocker.set_enabled(false);
+        switches.set_content_blocking(false);
         assert!(!ad(&blocker));
 
-        blocker.set_enabled(true);
+        switches.set_content_blocking(true);
         assert!(ad(&blocker));
     }
 
     #[test]
     fn top_level_navigation_is_left_to_the_browser() {
-        let blocker = ContentBlocker::new();
+        let blocker = ContentBlocker::new(EngineSwitches::default());
 
         assert!(!blocker.should_block_url(
             "https://googleads.g.doubleclick.net/pagead/id",

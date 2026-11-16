@@ -17,7 +17,7 @@ use talaria_core::{BrowserEvent, LoadState, PageIcon, PointerCursor, TabEvent, T
 use url::Url;
 
 use crate::adblocker::ContentBlocker;
-use crate::exit_clearing::{ExitClearing, clear_at_exit};
+use crate::exit_clearing::{EngineSwitches, ExitClearing, clear_at_exit};
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
@@ -75,6 +75,12 @@ pub struct RuntimeOptions {
     /// Turn on servoshell's experimental web-platform features, except the async clipboard and
     /// WebGPU (see `EXCLUDED_EXPERIMENTAL_PREFS`).
     pub experimental_web_features: bool,
+    // settings
+    /// Block ads and trackers from the start; changed later through `ServoRuntime::switches`.
+    pub block_ads_and_trackers: bool,
+    /// What to clear at quit; also cleared before the engine starts, in case the last quit
+    /// never got to it. Changed later through `ServoRuntime::switches`.
+    pub clear_on_exit: ExitClearing,
 }
 
 impl Default for RuntimeOptions {
@@ -83,6 +89,8 @@ impl Default for RuntimeOptions {
             gpu_canvas: true,
             config_dir: None,
             experimental_web_features: true,
+            block_ads_and_trackers: true,
+            clear_on_exit: ExitClearing::default(),
         }
     }
 }
@@ -99,8 +107,8 @@ pub struct ServoRuntime {
     /// so it is dropped after the last of them. Every web view's delegate holds a clone too;
     /// see `AfterEngineCleanup`.
     after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
-    /// What to clear when the engine shuts down.
-    exit_clearing: Cell<ExitClearing>,
+    /// Content blocking and what to clear at quit, shared with the browser.
+    switches: EngineSwitches,
 }
 
 impl ServoRuntime {
@@ -108,11 +116,15 @@ impl ServoRuntime {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
+        let switches = EngineSwitches::new(
+            runtime_options.block_ads_and_trackers,
+            runtime_options.clear_on_exit,
+        );
         // Servo reads its saved files when it starts. Session cookies and HTTP credentials in
         // them belong to an earlier session that was not ended (killed, or cut short by the
         // shutdown watchdog); remove them from the files before Servo can load them.
         if let Some(config_dir) = &runtime_options.config_dir {
-            clean_up_before_engine_start(config_dir);
+            clean_up_before_engine_start(config_dir, runtime_options.clear_on_exit);
         }
         let options = mercury_options(runtime_options.config_dir.clone());
         let multiprocess_enabled = options.multiprocess;
@@ -126,7 +138,7 @@ impl ServoRuntime {
         let after_engine_cleanup = runtime_options.config_dir.clone().map(|config_dir| {
             // Session cookies saved by a run that did not end them (it was killed) end now.
             end_session_cookies(&inner);
-            Rc::new(AfterEngineCleanup::new(config_dir))
+            Rc::new(AfterEngineCleanup::new(config_dir, switches.clone()))
         });
         if multiprocess_enabled {
             info!(
@@ -140,7 +152,7 @@ impl ServoRuntime {
         } else {
             info!("Servo single-process mode enabled; operating-system sandbox disabled");
         }
-        let content_blocker = Rc::new(ContentBlocker::new());
+        let content_blocker = Rc::new(ContentBlocker::new(switches.clone()));
         inner.set_delegate(Rc::new(BrowserServoDelegate {
             content_blocker: Rc::clone(&content_blocker),
         }));
@@ -153,20 +165,16 @@ impl ServoRuntime {
             screen_metrics: Rc::default(),
             user_content,
             after_engine_cleanup,
-            exit_clearing: Cell::new(ExitClearing::default()),
+            switches,
         }
     }
 
     // settings
 
-    /// Turns ad and tracker blocking on or off for every load from now on.
-    pub fn set_content_blocking(&self, enabled: bool) {
-        self.content_blocker.set_enabled(enabled);
-    }
-
-    /// What is cleared when the engine shuts down (see `ExitClearing`).
-    pub fn set_clear_on_exit(&self, clearing: ExitClearing) {
-        self.exit_clearing.set(clearing);
+    /// The switches the browser changes while the engine runs; they share their state with
+    /// the engine, so keep the clone and set it directly.
+    pub fn switches(&self) -> EngineSwitches {
+        self.switches.clone()
     }
 
     /// What pages see as the screen and window geometry; `None` lets Servo use its defaults.
@@ -218,7 +226,7 @@ impl Drop for ServoRuntime {
     /// Clears what the user asked to have cleared at exit, then ends the session cookies,
     /// while Servo still runs, before it saves its files.
     fn drop(&mut self) {
-        let clearing = self.exit_clearing.get();
+        let clearing = self.switches.clear_on_exit();
         if clearing.clears_anything() {
             clear_at_exit(&self.inner, clearing);
         }
