@@ -1,3 +1,6 @@
+// The macOS rpath below is adapted from Servo (https://github.com/servo/servo, tag v0.8.0,
+// ports/servoshell/build.rs), MPL-2.0.
+
 use std::env;
 use std::fs::File;
 use std::path::Path;
@@ -12,9 +15,14 @@ fn main() {
         generate_gl_bindings();
     }
 
-    // macOS: the Info.plist embedded in the executable (src/platform_macos.rs).
+    // macOS: the Info.plist embedded in the executable (src/platform_macos.rs); the rpath
+    // through which the dynamic linker finds the GStreamer libraries shipped in a `lib`
+    // directory beside the executable; and the GStreamer version that names the private
+    // registry (src/media_isolation.rs).
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         generate_embedded_info_plist();
+        println!("cargo:rustc-link-arg-bins=-Wl,-rpath,@executable_path/lib/");
+        record_gstreamer_version();
     }
 }
 
@@ -38,6 +46,34 @@ fn generate_embedded_info_plist() {
     let output_directory = env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR");
     std::fs::write(Path::new(&output_directory).join("Info.plist"), info_plist)
         .expect("failed to write the embedded Info.plist");
+}
+
+/// The GStreamer version the media backend is built against, which names the private registry
+/// (src/media_isolation.rs). It comes from the pkg-config the gstreamer-sys crates use.
+fn record_gstreamer_version() {
+    for variable in ["PKG_CONFIG", "PKG_CONFIG_LIBDIR", "PKG_CONFIG_PATH"] {
+        println!("cargo:rerun-if-env-changed={variable}");
+    }
+    let pkg_config = env::var_os("PKG_CONFIG").unwrap_or_else(|| "pkg-config".into());
+    let output = std::process::Command::new(pkg_config)
+        .args(["--modversion", "gstreamer-1.0"])
+        .output();
+    let version = match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        }
+        _ => String::new(),
+    };
+    if version.is_empty() {
+        // The media registry would then be named "unknown"; a build that links GStreamer
+        // normally finds it through the same pkg-config, so this points at a broken setup.
+        println!(
+            "cargo:warning=could not read the GStreamer version with pkg-config; \
+             run the build with the environment of scripts/macos/gstreamer.sh env"
+        );
+    } else {
+        println!("cargo:rustc-env=MERCURY_GSTREAMER_VERSION={version}");
+    }
 }
 
 fn generate_gl_bindings() {

@@ -7,8 +7,9 @@
 #
 # Assemble, sign and optionally package Mercury Browser.app.
 #
-#   scripts/macos/bundle.sh [--binary <path>] [--out <dir>] [--identity <id>]
-#                           [--gstreamer-prefix <dir>] [--dmg]
+#   scripts/macos/bundle.sh --gstreamer-prefix <dir> [--binary <path>] [--out <dir>]
+#                           [--identity <id>] [--dmg]
+#   (or MERCURY_GSTREAMER_PREFIX instead of --gstreamer-prefix; one of them is required)
 #   scripts/macos/bundle.sh [--identity <id>] --print-entitlements
 #
 #   --binary <path>            the arm64 executable to bundle
@@ -24,7 +25,9 @@
 #   --gstreamer-prefix <dir>   GStreamer prefix handed to
 #                              scripts/macos/collect-gstreamer.sh, which fills
 #                              Contents/MacOS/lib (default
-#                              $MERCURY_GSTREAMER_PREFIX; unset = no media)
+#                              $MERCURY_GSTREAMER_PREFIX). Required: the
+#                              executable cannot start without its media
+#                              libraries, so no bundle is built without them
 #   --dmg                      also build mercury-browser-<version>-macos-arm64.dmg
 #                              and its .sha256
 #   --print-entitlements       print the entitlements file the identity would
@@ -107,6 +110,15 @@ if [ "$PRINT_ENTITLEMENTS" = 1 ]; then
     exit 0
 fi
 
+# The executable links GStreamer and stops in the dynamic loader without it, so a
+# bundle without its media libraries must not exist.
+COLLECTOR="scripts/macos/collect-gstreamer.sh"
+[ -n "$GSTREAMER_PREFIX" ] ||
+    die "no GStreamer prefix: pass --gstreamer-prefix or set MERCURY_GSTREAMER_PREFIX (see scripts/macos/gstreamer.sh; make app-macos does this)"
+[ -f "$GSTREAMER_PREFIX/lib/libgstreamer-1.0.0.dylib" ] ||
+    die "$GSTREAMER_PREFIX is not a GStreamer prefix (no lib/libgstreamer-1.0.0.dylib)"
+[ -f "$COLLECTOR" ] || die "$COLLECTOR is missing"
+
 for tool in codesign ditto file hdiutil install_name_tool lipo otool plutil shasum; do
     command -v "$tool" >/dev/null 2>&1 || die "$tool not found (install the Xcode command-line tools)"
 done
@@ -176,20 +188,35 @@ printf 'APPL????' >"$APP/Contents/PkgInfo"
 
 cp "$RESOURCES_SRC/AppIcon.icns" "$RES_DIR/AppIcon.icns"
 cp LICENSE THIRD-PARTY-NOTICES.md "$RES_DIR/"
+ditto LICENSES "$RES_DIR/LICENSES"
 
-# ── Media libraries (hook) ────────────────────────────────────────────────
+# ── Media libraries ───────────────────────────────────────────────────────
 # Servo looks for its GStreamer libraries and plugins in <executable dir>/lib.
-# The collector is provided separately; it copies them from a GStreamer prefix:
-#   scripts/macos/collect-gstreamer.sh <prefix> <destination lib dir>
-COLLECTOR="scripts/macos/collect-gstreamer.sh"
-if [ -f "$COLLECTOR" ] && [ -n "$GSTREAMER_PREFIX" ]; then
-    say "collecting media libraries from $GSTREAMER_PREFIX"
-    bash "$COLLECTOR" "$GSTREAMER_PREFIX" "$BIN_DIR/lib"
-elif [ -f "$COLLECTOR" ]; then
-    say "media libraries were not bundled: no GStreamer prefix configured (--gstreamer-prefix or MERCURY_GSTREAMER_PREFIX)"
-else
-    say "media libraries were not bundled: $COLLECTOR is not present"
-fi
+# The collector copies them from the prefix; inside a bundle it writes nothing
+# but the libraries (no marker), since Contents/MacOS may hold only code.
+say "collecting media libraries from $GSTREAMER_PREFIX"
+bash "$COLLECTOR" "$GSTREAMER_PREFIX" "$BIN_DIR/lib" "$BIN" || die "collecting the media libraries failed"
+
+# Every plugin of the shared definition is there, and no excluded one.
+PLUGIN_FILES="$(bash scripts/macos/gstreamer-plugins.sh)" || die "cannot list the media plugins"
+EXCLUDED_FILES="$(bash scripts/macos/gstreamer-plugins.sh --excluded)" || die "cannot list the excluded plugins"
+while IFS= read -r plugin; do
+    [ -z "$plugin" ] || [ -f "$BIN_DIR/lib/$plugin" ] || die "media plugin $plugin is missing from $BIN_DIR/lib"
+done <<<"$PLUGIN_FILES"
+while IFS= read -r plugin; do
+    [ -z "$plugin" ] || [ ! -e "$BIN_DIR/lib/$plugin" ] || die "excluded plugin $plugin is in $BIN_DIR/lib"
+done <<<"$EXCLUDED_FILES"
+
+# The licence files of every bundled project, as the GStreamer packages ship them.
+PROJECTS="$(bash scripts/macos/gstreamer-notices.sh --projects "$GSTREAMER_PREFIX" "$BIN_DIR/lib")" ||
+    die "cannot list the projects of the bundled libraries"
+while IFS= read -r project; do
+    if [ -d "$GSTREAMER_PREFIX/share/licenses/$project" ]; then
+        # Not "licenses": macOS file systems are case-insensitive, and LICENSES/ is there.
+        mkdir -p "$RES_DIR/gstreamer-licenses"
+        ditto "$GSTREAMER_PREFIX/share/licenses/$project" "$RES_DIR/gstreamer-licenses/$project"
+    fi
+done <<<"$PROJECTS"
 
 # The executable finds the bundled libraries through this rpath. Builds that
 # already link it in are left alone; editing the load commands invalidates the
@@ -223,15 +250,15 @@ fi
 EXECUTABLE_SIGN_ARGS=("${SIGN_ARGS[@]}" --entitlements "$ENTITLEMENTS")
 
 LIBRARIES=()
-if [ -d "$BIN_DIR/lib" ]; then
-    # Process substitution, not a pipe, so that `set -e` and `die` apply in
-    # the loop; -print0 and `read -d ''` so a path with a space survives.
-    while IFS= read -r -d '' lib; do
-        case "$(file -b "$lib")" in
-            Mach-O*) LIBRARIES+=("$lib") ;;
-        esac
-    done < <(find "$BIN_DIR/lib" -type f -print0)
-fi
+# Process substitution, not a pipe, so that `set -e` and `die` apply in the
+# loop; -print0 and `read -d ''` so a path with a space survives. Anything that
+# is not Mach-O code (a marker file, say) would make codesign refuse the bundle.
+while IFS= read -r -d '' lib; do
+    case "$(file -b "$lib")" in
+        Mach-O*) LIBRARIES+=("$lib") ;;
+        *) die "${lib#"$APP/"} is not code; only libraries belong in Contents/MacOS/lib" ;;
+    esac
+done < <(find "$BIN_DIR/lib" ! -type d -print0)
 
 # Only libraries and loadable plugins belong in Contents/MacOS/lib. They are
 # signed below without entitlements, so an executable there (a plugin scanner,
