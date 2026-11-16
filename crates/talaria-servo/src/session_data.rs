@@ -47,7 +47,7 @@ pub(crate) fn end_session_cookies(servo: &servo::Servo) {
 }
 
 /// Runs `work`, turning a panic into an error log. Returns whether it completed.
-fn run_contained(what: &str, work: impl FnOnce()) -> bool {
+pub(crate) fn run_contained(what: &str, work: impl FnOnce()) -> bool {
     match std::panic::catch_unwind(AssertUnwindSafe(work)) {
         Ok(()) => true,
         Err(_) => {

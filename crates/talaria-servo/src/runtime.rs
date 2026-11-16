@@ -17,6 +17,7 @@ use talaria_core::{BrowserEvent, LoadState, PageIcon, PointerCursor, TabEvent, T
 use url::Url;
 
 use crate::adblocker::ContentBlocker;
+use crate::exit_clearing::{ExitClearing, clear_at_exit};
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
@@ -98,6 +99,8 @@ pub struct ServoRuntime {
     /// so it is dropped after the last of them. Every web view's delegate holds a clone too;
     /// see `AfterEngineCleanup`.
     after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
+    /// What to clear when the engine shuts down.
+    exit_clearing: Cell<ExitClearing>,
 }
 
 impl ServoRuntime {
@@ -150,7 +153,20 @@ impl ServoRuntime {
             screen_metrics: Rc::default(),
             user_content,
             after_engine_cleanup,
+            exit_clearing: Cell::new(ExitClearing::default()),
         }
+    }
+
+    // settings
+
+    /// Turns ad and tracker blocking on or off for every load from now on.
+    pub fn set_content_blocking(&self, enabled: bool) {
+        self.content_blocker.set_enabled(enabled);
+    }
+
+    /// What is cleared when the engine shuts down (see `ExitClearing`).
+    pub fn set_clear_on_exit(&self, clearing: ExitClearing) {
+        self.exit_clearing.set(clearing);
     }
 
     /// What pages see as the screen and window geometry; `None` lets Servo use its defaults.
@@ -199,8 +215,13 @@ impl ServoRuntime {
 }
 
 impl Drop for ServoRuntime {
-    /// Ends the session cookies while Servo still runs, before it saves its cookie jar.
+    /// Clears what the user asked to have cleared at exit, then ends the session cookies,
+    /// while Servo still runs, before it saves its files.
     fn drop(&mut self) {
+        let clearing = self.exit_clearing.get();
+        if clearing.clears_anything() {
+            clear_at_exit(&self.inner, clearing);
+        }
         if self.after_engine_cleanup.is_some() {
             end_session_cookies(&self.inner);
         }

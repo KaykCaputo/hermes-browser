@@ -12,6 +12,8 @@ const COMPILED_ENGINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/adblock
 pub(crate) struct ContentBlocker {
     engine: Engine,
     blocked_requests: Cell<u64>,
+    /// Off when the user turned blocking off; checked for every load.
+    enabled: Cell<bool>,
 }
 
 impl ContentBlocker {
@@ -25,6 +27,17 @@ impl ContentBlocker {
         Self {
             engine,
             blocked_requests: Cell::new(0),
+            enabled: Cell::new(true),
+        }
+    }
+
+    /// Turns blocking on or off for every load from now on.
+    pub(crate) fn set_enabled(&self, enabled: bool) {
+        if self.enabled.replace(enabled) != enabled {
+            info!(
+                "ad and tracker blocking {}",
+                if enabled { "enabled" } else { "disabled" }
+            );
         }
     }
 
@@ -78,7 +91,7 @@ impl ContentBlocker {
         // Brave can show a dedicated interstitial for blocked top-level navigations. Mercury does
         // not have that UI yet, so allowing the main document avoids turning a matched navigation
         // into an unexplained blank tab while still blocking its ads and trackers.
-        if is_for_main_frame {
+        if is_for_main_frame || !self.enabled.get() {
             return false;
         }
 
@@ -143,6 +156,26 @@ mod tests {
             "GET",
             false,
         ));
+    }
+
+    #[test]
+    fn a_switched_off_blocker_blocks_nothing_until_switched_on_again() {
+        let blocker = ContentBlocker::new();
+        let ad = |blocker: &ContentBlocker| {
+            blocker.should_block_url(
+                "https://googleads.g.doubleclick.net/pagead/id",
+                "https://example.com/article",
+                "script",
+                "GET",
+                false,
+            )
+        };
+
+        blocker.set_enabled(false);
+        assert!(!ad(&blocker));
+
+        blocker.set_enabled(true);
+        assert!(ad(&blocker));
     }
 
     #[test]
