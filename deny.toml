@@ -159,3 +159,8 @@ allow = ["LicenseRef-Slint-Royalty-free-2.0"]
 [[licenses.exceptions]]
 crate = "i-slint-renderer-skia"
 allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+# Only the headless rendering test of crates/mercury-ui uses it (a dev-dependency).
+[[licenses.exceptions]]
+crate = "i-slint-renderer-software"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
