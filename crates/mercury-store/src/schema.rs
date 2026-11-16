@@ -135,6 +135,9 @@ pub(crate) fn prepare(conn: &mut Connection) -> Result<()> {
         log::warn!("profile database is in {journal_mode} journal mode, not WAL");
     }
     conn.pragma_update(None, "foreign_keys", true)?;
+    // With WAL, NORMAL syncs at checkpoints rather than at every commit: the file stays
+    // consistent after a power loss, which can only lose the last few commits.
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
 
     for (index, migration) in MIGRATIONS.iter().enumerate().skip(found as usize) {
         let version = index as u32 + 1;

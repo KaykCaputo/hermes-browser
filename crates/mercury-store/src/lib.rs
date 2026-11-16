@@ -96,6 +96,18 @@ mod tests {
     }
 
     #[test]
+    fn writes_sync_at_checkpoints_only() {
+        // `synchronous = NORMAL` (1) with WAL: a commit is durable once the WAL is synced at a
+        // checkpoint; a power loss can lose the last commits but never corrupts the file.
+        let store = Store::open_in_memory().unwrap();
+        let synchronous: i64 = store
+            .conn
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 1);
+    }
+
+    #[test]
     fn the_statement_cache_holds_every_cached_statement() {
         let sources = [
             include_str!("bookmarks.rs"),
