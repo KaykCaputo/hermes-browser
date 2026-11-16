@@ -29,7 +29,10 @@ pub(crate) struct PageFeedback {
     /// earlier one is dropped.
     generation: Cell<u64>,
     icon: RefCell<Option<PageIcon>>,
-    title_in_flight: Cell<bool>,
+    /// The generation of the title read in flight. Servo leaves an evaluation unanswered when
+    /// the content process crashes or the page's script thread is stuck, so a new document
+    /// forgets it: a stuck read costs one document, not the tab.
+    title_in_flight: Cell<Option<u64>>,
     /// A title read was asked for while one was in flight; `refresh_title` starts it.
     title_wanted: Cell<bool>,
 }
@@ -41,7 +44,7 @@ impl PageFeedback {
             sender,
             generation: Cell::new(0),
             icon: RefCell::new(None),
-            title_in_flight: Cell::new(false),
+            title_in_flight: Cell::new(None),
             title_wanted: Cell::new(false),
         })
     }
@@ -49,6 +52,7 @@ impl PageFeedback {
     /// A new document is loading: it has no icon yet, and the tab must not keep the last one.
     pub(crate) fn document_started(&self) {
         self.bump();
+        self.title_in_flight.set(None);
         self.icon.replace(None);
         self.send(BrowserEvent::PageIconChanged { icon: None });
     }
@@ -77,12 +81,12 @@ impl PageFeedback {
     /// Reads the title through `evaluate`, unless a read is already in flight, in which case
     /// one more read is owed (see `refresh_title`).
     pub(crate) fn request_title(self: &Rc<Self>, evaluate: impl FnOnce(TitleCallback)) {
-        if self.title_in_flight.get() {
+        if self.title_in_flight.get().is_some() {
             self.title_wanted.set(true);
             return;
         }
-        self.title_in_flight.set(true);
         let generation = self.generation.get();
+        self.title_in_flight.set(Some(generation));
         let feedback = Rc::clone(self);
         evaluate(Box::new(move |result| {
             feedback.title_answer(generation, result);
@@ -92,14 +96,16 @@ impl PageFeedback {
     /// Starts the read that was owed while another was in flight, if it is still owed and the
     /// other has answered.
     pub(crate) fn refresh_title(self: &Rc<Self>, evaluate: impl FnOnce(TitleCallback)) {
-        if self.title_wanted.get() && !self.title_in_flight.get() {
+        if self.title_wanted.get() && self.title_in_flight.get().is_none() {
             self.title_wanted.set(false);
             self.request_title(evaluate);
         }
     }
 
     fn title_answer(&self, generation: u64, result: Result<JSValue, JavaScriptEvaluationError>) {
-        self.title_in_flight.set(false);
+        if self.title_in_flight.get() == Some(generation) {
+            self.title_in_flight.set(None);
+        }
         if generation != self.generation.get() {
             return;
         }
@@ -260,6 +266,38 @@ mod tests {
             .filter(|event| matches!(event, BrowserEvent::PageTitleChanged { .. }))
             .collect::<Vec<_>>();
         assert_eq!(titles, vec![title("Feed")]);
+    }
+
+    #[test]
+    fn a_stuck_evaluation_only_costs_its_document() {
+        let (feedback, receiver) = feedback();
+        let evaluations = Evaluations::default();
+
+        // The first document's script thread never answers.
+        feedback.request_title(evaluations.evaluate());
+        feedback.request_title(evaluations.evaluate());
+        assert_eq!(evaluations.count(), 1);
+
+        // The next document reads its title at once.
+        feedback.document_started();
+        feedback.request_title(evaluations.evaluate());
+        assert_eq!(evaluations.count(), 2);
+        let stuck = evaluations.0.borrow_mut().remove(0);
+
+        // A late answer about the old document neither counts nor ends the new read.
+        stuck(Ok(JSValue::String("Old".to_owned())));
+        feedback.request_title(evaluations.evaluate());
+        assert_eq!(evaluations.count(), 1);
+
+        evaluations.answer(Ok(JSValue::String("New".to_owned())));
+        let titles = events(&receiver)
+            .into_iter()
+            .filter(|event| matches!(event, BrowserEvent::PageTitleChanged { .. }))
+            .collect::<Vec<_>>();
+        assert_eq!(titles, vec![title("New")]);
+        // The read owed from the request made while the new one was in flight follows.
+        feedback.refresh_title(evaluations.evaluate());
+        assert_eq!(evaluations.count(), 1);
     }
 
     #[test]

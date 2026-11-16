@@ -13,6 +13,9 @@ use crate::session_data::AfterEngineCleanup;
 /// should use, or None to refuse.
 pub type NewTabAllocator = Rc<dyn Fn(TabId) -> Option<TabId>>;
 
+/// Called synchronously inside Servo's event loop when a tab starts loading a new document.
+pub type DocumentStartedListener = Rc<dyn Fn(TabId)>;
+
 /// A web view a page opened, with the channel its events arrive on.
 pub type AdoptedWebView = (TabId, ServoWebView, Receiver<TabEvent>);
 
@@ -25,6 +28,7 @@ pub type AdoptedWebView = (TabId, ServoWebView, Receiver<TabEvent>);
 pub(crate) struct PageTabs {
     pub(crate) adopted: RefCell<Vec<AdoptedWebView>>,
     pub(crate) allocator: RefCell<Option<NewTabAllocator>>,
+    pub(crate) document_started_listener: RefCell<Option<DocumentStartedListener>>,
     pub(crate) content_blocker: Rc<ContentBlocker>,
     pub(crate) screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
     pub(crate) user_content: Rc<servo::UserContentManager>,
@@ -35,5 +39,14 @@ impl PageTabs {
     /// The allocator, cloned so that it is not borrowed while it runs.
     pub(crate) fn allocator(&self) -> Option<NewTabAllocator> {
         self.allocator.borrow().clone()
+    }
+
+    /// Tells the listener, if any, that `tab_id` started a new document. The listener is
+    /// cloned first, so it may install another.
+    pub(crate) fn document_started(&self, tab_id: TabId) {
+        let listener = self.document_started_listener.borrow().clone();
+        if let Some(listener) = listener {
+            listener(tab_id);
+        }
     }
 }

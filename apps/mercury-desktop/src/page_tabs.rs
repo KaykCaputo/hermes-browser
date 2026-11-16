@@ -7,10 +7,10 @@ use std::time::Instant;
 use mercury_ui::MainWindow;
 use slint::ComponentHandle;
 use talaria_core::{
-    BrowserController, BrowserEvent, CloseTabOutcome, ColorScheme, DEFAULT_ZOOM_PERCENT, LoadState,
-    TabActivation, TabEvent, TabId, WebView as TalariaWebView, display_origin,
+    BrowserController, CloseTabOutcome, ColorScheme, DEFAULT_ZOOM_PERCENT, TabActivation, TabEvent,
+    TabId, WebView as TalariaWebView, display_origin,
 };
-use talaria_servo::{NewTabAllocator, ServoRuntime, ServoWebView};
+use talaria_servo::{DocumentStartedListener, NewTabAllocator, ServoRuntime, ServoWebView};
 
 use crate::activation::{consume_user_activation, forget_tab as forget_user_activation};
 use crate::ui_sync::{keep_address_draft_for, sync_ui};
@@ -274,27 +274,12 @@ fn allocate_page_tab(
     Some(tab_id)
 }
 
-/// Called for each engine event before it is applied to the tab. When the tab starts loading
-/// a new document, the activation from the last one (often the click on the link) is dropped,
-/// so the new page's scripts cannot use it.
-pub(crate) fn before_tab_event(
-    controller: &BrowserController,
-    tab_id: TabId,
-    event: &BrowserEvent,
-) {
-    let BrowserEvent::LoadStateChanged {
-        state: LoadState::Loading,
-    } = event
-    else {
-        return;
-    };
-    let was_loading = controller
-        .tabs()
-        .find(|tab| tab.id() == tab_id)
-        .is_some_and(|tab| matches!(tab.state().load_state(), LoadState::Loading));
-    if !was_loading {
-        forget_user_activation(tab_id);
-    }
+/// Called by the engine, synchronously inside its event loop, whenever a tab starts loading a
+/// new document (Servo's `LoadStatus::Started`, also when it interrupts a load that had parsed
+/// its head). The activation from the last document, often the click on the link, is dropped
+/// before any script of the new document runs, so the new page cannot use it.
+pub(crate) fn document_started_listener() -> DocumentStartedListener {
+    Rc::new(forget_user_activation)
 }
 
 /// `tab_id` was closed: its blocked-pop-up indicator goes too.
@@ -367,6 +352,8 @@ pub(crate) fn close_page_tab(controller: &mut BrowserController, tab_id: TabId) 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
+
+    use talaria_core::{BrowserEvent, LoadState};
 
     use super::*;
     use crate::activation::{ACTIVATION_WINDOW, Activations};
@@ -620,6 +607,44 @@ mod tests {
             pages_may_open_tabs(tab_id, ORIGIN, now),
             PopUpDecision::Blocked
         );
+    }
+
+    #[test]
+    fn an_activation_is_forgotten_when_a_document_starts_while_another_is_loading() {
+        let mut controller = BrowserController::default();
+        let tab_id = controller.active_tab_id();
+        // The current page has parsed its head but is still loading (ads, say).
+        controller.handle_event(
+            tab_id,
+            BrowserEvent::LoadStateChanged {
+                state: LoadState::Loading,
+            },
+        );
+        let now = Instant::now();
+        crate::activation::note_user_activation(tab_id, now);
+
+        // The user's click on a link starts the next document.
+        document_started_listener()(tab_id);
+
+        assert!(!crate::activation::consume_user_activation(tab_id, now));
+    }
+
+    #[test]
+    fn a_document_starting_within_the_spin_reaches_the_activation_before_the_allocator() {
+        POP_UPS.with(|current| *current.borrow_mut() = policy());
+        let controller = Rc::new(RefCell::new(BrowserController::default()));
+        let opener = controller.borrow().active_tab_id();
+        let allocator = new_tab_allocator(&controller, || false);
+        let listener = document_started_listener();
+
+        // Within one engine spin: the click's document starts, then its script opens a tab.
+        crate::activation::note_user_activation(opener, Instant::now());
+        listener(opener);
+        assert_eq!(allocator(opener), None);
+
+        // Without a new document, the same click lets the page open its tab.
+        crate::activation::note_user_activation(opener, Instant::now());
+        assert!(allocator(opener).is_some());
     }
 
     fn ready_controller() -> (BrowserController, TabId) {

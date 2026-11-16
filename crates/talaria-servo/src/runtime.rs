@@ -21,7 +21,7 @@ use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
 use crate::page_feedback::{DOCUMENT_TITLE_SCRIPT, PageFeedback, reads_title_at};
-use crate::page_tabs::{AdoptedWebView, NewTabAllocator, PageTabs};
+use crate::page_tabs::{AdoptedWebView, DocumentStartedListener, NewTabAllocator, PageTabs};
 use crate::screen::ScreenMetrics;
 use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
 use crate::{ServoWebView, ServoWebViewError};
@@ -152,6 +152,7 @@ impl ServoRuntime {
         let page_tabs = Rc::new(PageTabs {
             adopted: RefCell::default(),
             allocator: RefCell::default(),
+            document_started_listener: RefCell::default(),
             content_blocker: Rc::clone(&content_blocker),
             screen_metrics: Rc::clone(&screen_metrics),
             user_content: Rc::clone(&user_content),
@@ -227,6 +228,14 @@ impl ServoRuntime {
     /// returns None, such requests are refused.
     pub fn set_new_tab_allocator(&self, allocator: NewTabAllocator) {
         self.page_tabs.allocator.replace(Some(allocator));
+    }
+
+    /// Called synchronously, inside `spin_event_loop`, when a tab starts loading a new document
+    /// (Servo's `LoadStatus::Started`, which comes before any of the document's scripts run).
+    pub fn set_document_started_listener(&self, listener: DocumentStartedListener) {
+        self.page_tabs
+            .document_started_listener
+            .replace(Some(listener));
     }
 
     /// Web views created by pages since the last call, in creation order, each with the channel
@@ -444,6 +453,10 @@ impl servo::WebViewDelegate for BrowserDelegate {
             LoadStatus::Started => {
                 // tabs: a new document has no title or icon yet
                 self.page_feedback.document_started();
+                // tabs: and no user activation from the last one, before any script runs
+                if let Some(page_tabs) = self.page_tabs.upgrade() {
+                    page_tabs.document_started(self.tab_id);
+                }
                 self.load_metrics.borrow_mut().start(Instant::now());
                 info!("tab {}: page load started", self.tab_id.value());
             }

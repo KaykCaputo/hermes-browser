@@ -115,6 +115,10 @@ pub(crate) fn connect_servo_runtime(
     // tabs opened by pages
     if let Some(state) = engine.state.borrow().as_ref() {
         state.runtime.set_new_tab_allocator(new_tab_allocator);
+        // activation (tabs lane): a new document does not inherit the last one's activation
+        state
+            .runtime
+            .set_document_started_listener(crate::page_tabs::document_started_listener());
     }
     ENGINE.with(|current| *current.borrow_mut() = Rc::downgrade(&engine));
     schedule_graphics_bootstrap(Rc::downgrade(&engine), GRAPHICS_BOOTSTRAP_DELAY);
@@ -674,8 +678,6 @@ pub(crate) fn apply_pending_browser_events(
             state_changed |= crate::page_tabs::close_page_tab(&mut controller, tab_id);
             continue;
         }
-        // activation (tabs lane): a new document does not inherit the last one's activation
-        crate::page_tabs::before_tab_event(&controller, tab_id, &event);
         let was_engine_ready = is_engine_ready(&controller, tab_id);
         state_changed |= controller.handle_event(tab_id, event);
         if !was_engine_ready && is_engine_ready(&controller, tab_id) {
@@ -937,40 +939,6 @@ mod tests {
             .map(|tab| tab.state().page_title())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["First", "Second"]);
-    }
-
-    #[test]
-    fn an_activation_does_not_carry_over_to_the_next_document() {
-        let controller = RefCell::new(BrowserController::default());
-        let tab_id = controller.borrow().active_tab_id();
-        mark_engine_ready(&controller, tab_id);
-        let (sender, receiver) = mpsc::channel();
-        let send = |event| {
-            sender
-                .send(TabEvent::new(tab_id, event))
-                .expect("the event receiver should be connected");
-        };
-        let loaded = BrowserEvent::LoadStateChanged {
-            state: LoadState::Loaded,
-        };
-        let loading = BrowserEvent::LoadStateChanged {
-            state: LoadState::Loading,
-        };
-        send(loaded.clone());
-        apply_pending_browser_events(&controller, &receiver);
-        let now = std::time::Instant::now();
-
-        // A click on a link: the activation is noted, then the next document starts loading.
-        crate::activation::note_user_activation(tab_id, now);
-        send(loading.clone());
-        apply_pending_browser_events(&controller, &receiver);
-        assert!(!crate::activation::consume_user_activation(tab_id, now));
-
-        // An activation during a load (a second `Loading` from the head being parsed) stays.
-        crate::activation::note_user_activation(tab_id, now);
-        send(loading);
-        apply_pending_browser_events(&controller, &receiver);
-        assert!(crate::activation::consume_user_activation(tab_id, now));
     }
 
     #[test]
