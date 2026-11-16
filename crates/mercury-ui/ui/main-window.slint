@@ -1,4 +1,6 @@
 import { Palette } from "std-widgets.slint";
+import { AddressBarEdit, BrowserMenu, BrowserMenuCommand, BrowserMenuEntry } from "menus/browser-menu.slint";
+export { AboutLink, AboutWindow } from "about/about-window.slint";
 
 export enum WebViewPointerButton {
     left,
@@ -318,6 +320,42 @@ export component MainWindow inherits Window {
         );
     }
 
+    // --- menus ---
+    // The browser menu's items above and below its zoom row (built in apps/mercury-desktop/src/menus).
+    in property <[BrowserMenuEntry]> browser-menu-top-entries;
+    in property <[BrowserMenuEntry]> browser-menu-bottom-entries;
+    out property <bool> address-bar-focused: address-input.has-focus;
+    callback browser-menu-activated(BrowserMenuCommand);
+    // The address bar gained or lost keyboard focus: the Edit menu's enabled items change.
+    callback address-bar-focus-changed(bool);
+    changed address-bar-focused => {
+        root.address-bar-focus-changed(self.address-bar-focused);
+    }
+
+    public function show-browser-menu() {
+        browser-menu.show();
+    }
+
+    public function edit-address-bar(command: AddressBarEdit) {
+        if !address-input.has-focus {
+            return;
+        }
+        if command == AddressBarEdit.undo {
+            address-input.undo();
+        } else if command == AddressBarEdit.redo {
+            address-input.redo();
+        } else if command == AddressBarEdit.cut {
+            address-input.cut();
+        } else if command == AddressBarEdit.copy {
+            address-input.copy();
+        } else if command == AddressBarEdit.paste {
+            address-input.paste();
+        } else if command == AddressBarEdit.select-all {
+            address-input.select-all();
+        }
+    }
+    // --- end menus ---
+
     title: page-title + " — Mercury Browser";
     icon: @image-url("../../../apps/mercury-desktop/resources/mercury-browser.svg");
     preferred-width: 1180px;
@@ -444,8 +482,9 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                 }
 
-                ChromeButton {
+                browser-menu-button := ChromeButton {
                     label: "⋮";
+                    clicked => { root.show-browser-menu(); }
                 }
             }
 
@@ -721,6 +760,24 @@ export component MainWindow inherits Window {
                     wrap: no-wrap;
                 }
             }
+        }
+    }
+
+    // menus: keeps Slint's default macOS menu bar out; Mercury installs its own native menu.
+    MenuBar {
+        visible: false;
+        Menu { }
+    }
+
+    // menus: the browser menu, anchored below the right edge of the "⋮" button.
+    browser-menu := BrowserMenu {
+        x: browser-menu-button.absolute-position.x + browser-menu-button.width - 264px;
+        y: browser-menu-button.absolute-position.y + browser-menu-button.height + 4px;
+        top-entries: root.browser-menu-top-entries;
+        bottom-entries: root.browser-menu-bottom-entries;
+        zoom-percent: root.zoom-percent;
+        activated(command) => {
+            root.browser-menu-activated(command);
         }
     }
 }

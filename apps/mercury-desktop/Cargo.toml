@@ -38,6 +38,14 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSGraphics",
     "NSScreen",
+    # menus lane: the native menu bar (features muda already enables in this build).
+    "NSApplication",
+    "NSCell",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSWindow",
 ] }
 objc2-foundation = { workspace = true, features = [
     "std",

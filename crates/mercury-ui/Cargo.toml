@@ -10,3 +10,9 @@ slint.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
+
+# menus lane: renders the browser menu and the About window headless (tests/render_menus.rs).
+# Slint's software renderer is already in Cargo.lock; tests only.
+[dev-dependencies]
+image.workspace = true
+slint = { workspace = true, features = ["renderer-software"] }

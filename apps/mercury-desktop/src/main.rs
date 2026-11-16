@@ -15,12 +15,14 @@ use talaria_core::{BrowserController, TabActivation};
 use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
+mod about;
 mod callbacks;
 mod cli;
 mod crash_handler;
 mod engine;
 mod keyboard;
 mod keyutils;
+mod menus;
 mod panic_hook;
 #[cfg(target_os = "macos")]
 mod platform_macos;
@@ -104,6 +106,12 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
     );
+    // menus lane: the macOS menu bar and the browser menu.
+    menus::connect(
+        &window,
+        Rc::clone(&controller),
+        Rc::clone(&web_view_focused),
+    );
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
 
     let screenshot_result = Rc::new(Cell::new(ScreenshotResult::Pending));
@@ -117,6 +125,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     });
 
     let run_result = window.run();
+    // menus lane: drop the About window and the menus' handles before the engine shuts down.
+    menus::release();
 
     let exit_code = match (&run_result, screenshot_timer.is_some()) {
         (Err(_), _) => 1,

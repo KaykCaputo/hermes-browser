@@ -1,0 +1,152 @@
+import { AboutSlint, Palette } from "std-widgets.slint";
+
+export enum AboutLink {
+    licence,
+    third-party-notices,
+}
+
+component LinkText inherits Text {
+    callback clicked;
+
+    color: touch.has-hover ? Palette.accent-background.brighter(0.2) : Palette.accent-background;
+    font-size: 12px;
+    accessible-role: button;
+    accessible-label: self.text;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// "About Mercury Browser": a small window of its own, reached from the application menu and
+// from the browser menu. It follows the system appearance.
+export component AboutWindow inherits Window {
+    in property <string> version-line;
+    in property <string> engine-line;
+    // Empty when the GStreamer version was not recorded at build time.
+    in property <string> media-line;
+    in property <string> copyright-line;
+    // Rendering tests force a colour scheme; left at `unknown` the window follows the system.
+    in property <ColorScheme> preview-color-scheme: ColorScheme.unknown;
+    callback open-link(AboutLink);
+    callback close-requested();
+
+    changed preview-color-scheme => {
+        Palette.color-scheme = self.preview-color-scheme;
+    }
+
+    title: "About Mercury Browser";
+    icon: @image-url("../../../../apps/mercury-desktop/resources/mercury-browser.svg");
+    width: 380px;
+    height: 350px;
+    background: Palette.background;
+    forward-focus: key-scope;
+
+    // Keeps Slint from installing its default macOS menu bar when this window becomes active:
+    // a window that declares a `MenuBar` never gets the default one, and a hidden menu bar
+    // installs no menu. Mercury's own menu (apps/mercury-desktop/src/menus) stays in place.
+    MenuBar {
+        visible: false;
+        Menu { }
+    }
+
+    key-scope := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.close-requested();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding: 24px;
+            padding-bottom: 16px;
+            spacing: 6px;
+            alignment: start;
+
+            HorizontalLayout {
+                alignment: center;
+                height: 76px;
+
+                Image {
+                    width: 72px;
+                    height: 72px;
+                    source: @image-url("../../../../apps/mercury-desktop/resources/mercury-browser.svg");
+                    image-fit: contain;
+                    accessible-role: none;
+                }
+            }
+
+            Text {
+                text: "Mercury Browser";
+                color: Palette.foreground;
+                font-size: 20px;
+                font-weight: 650;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: root.version-line;
+                color: Palette.foreground;
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: root.engine-line;
+                color: Palette.foreground.transparentize(0.3);
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+
+            if root.media-line != "": Text {
+                text: root.media-line;
+                color: Palette.foreground.transparentize(0.3);
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: root.copyright-line;
+                color: Palette.foreground.transparentize(0.3);
+                font-size: 11px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 18px;
+                padding-top: 2px;
+
+                LinkText {
+                    text: "Licence (MPL-2.0)";
+                    clicked => {
+                        root.open-link(AboutLink.licence);
+                    }
+                }
+
+                LinkText {
+                    text: "Third-party notices";
+                    clicked => {
+                        root.open-link(AboutLink.third-party-notices);
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
+            }
+
+            // Required by the Slint Royalty-free License 2.0, §2(a).
+            AboutSlint {
+                height: 110px;
+            }
+        }
+    }
+}

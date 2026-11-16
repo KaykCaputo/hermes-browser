@@ -3882,6 +3882,7 @@ version = "1.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68e76f2b13846ca54bba6b8eb3b5454b26879ad987396d0a2d8abedc31a6c469"
 dependencies = [
+ "bytemuck",
  "calloop 0.14.5",
  "cfg_aliases",
  "drm",
@@ -3889,6 +3890,7 @@ dependencies = [
  "i-slint-core",
  "i-slint-renderer-femtovg",
  "i-slint-renderer-skia",
+ "i-slint-renderer-software",
  "input",
  "memmap2",
  "nix",
@@ -3904,6 +3906,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "i-slint-backend-linuxkms",
+ "i-slint-backend-testing",
  "i-slint-backend-winit",
  "i-slint-common",
  "i-slint-core",
@@ -3913,12 +3916,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "i-slint-backend-testing"
+version = "1.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521e901e3d47ab829c0ef500c63155776208707cd93259e6a7803ed627fa2786"
+dependencies = [
+ "cfg_aliases",
+ "i-slint-common",
+ "i-slint-core",
+ "i-slint-renderer-software",
+ "vtable",
+]
+
+[[package]]
 name = "i-slint-backend-winit"
 version = "1.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a27c7e8f53418d3017362465367b6612b6e439a68097d627d1b91c94b885f0a6"
 dependencies = [
  "block2 0.6.2",
+ "bytemuck",
  "cfg-if",
  "cfg_aliases",
  "copypasta",
@@ -3931,6 +3948,8 @@ dependencies = [
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
  "i-slint-renderer-skia",
+ "i-slint-renderer-software",
+ "imgref",
  "lyon_path",
  "muda",
  "objc2 0.6.5",
@@ -3940,6 +3959,7 @@ dependencies = [
  "objc2-ui-kit 0.3.2",
  "pin-weak",
  "raw-window-handle",
+ "rgb",
  "scoped-tls-hkt",
  "scopeguard",
  "softbuffer",
@@ -5437,6 +5457,7 @@ dependencies = [
 name = "mercury-ui"
 version = "0.2.0"
 dependencies = [
+ "image",
  "slint",
  "slint-build",
 ]

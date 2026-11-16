@@ -20,6 +20,14 @@ Mercury follows familiar desktop-browser shortcuts while keeping the interface i
 | ++alt+left++ | Go back |
 | ++alt+right++ | Go forward |
 
+On macOS, ++cmd++ takes the place of ++ctrl++, `Cmd+[` and `Cmd+]` go back and forward, and ++cmd+q++ quits.
+
+## Menus
+
+On macOS, Mercury has a menu bar with Mercury Browser, File, Edit, View, History, Window and Help menus. Each menu item shows its keyboard shortcut, and the Window menu lists the open tabs. The ⋮ button at the end of the toolbar opens the browser menu on every platform. It has New Tab, zoom controls showing the current zoom level, About Mercury Browser, Help and Quit. Find and Settings appear greyed out because they are not available yet.
+
+**About Mercury Browser** shows the version, the engine, the licence and the third-party notices.
+
 ## Mouse and trackpad input
 
 The active page receives pointer movement, primary and secondary button events, and pixel-based scrolling. Navigation controls remain native UI elements outside the web content surface.

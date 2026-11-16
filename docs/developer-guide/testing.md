@@ -54,6 +54,12 @@ Adapter tests cover mappings between Talaria and Servo types, favicon conversion
 
 Desktop tests exercise event routing, bounded command dispatch, shortcuts, key conversion, and IME composition ownership without opening the full application where possible.
 
+### Menus and the About window
+
+`apps/mercury-desktop/src/menus/model.rs` holds the menu bar as a table. Its tests check that every item shows the key that runs its action in `shortcuts.rs`, and that each key has exactly one owner: either the window's key path or the native menu. `crates/mercury-ui/tests/render_menus.rs` renders the browser menu and the About window in both colour schemes with Slint's software renderer. Set `MERCURY_UI_RENDER_DIR` to keep the PNGs.
+
+The macOS menu bar cannot be opened without input. To read it back, run a background launch with `MERCURY_MENU_DIAGNOSTICS=<directory>`. The log then says whether Mercury's menu is the main menu after start-up, while the About window is open and after it closes. The About window, drawn by the app's renderer, is saved as `about-window.png` in that directory. Use `RUST_LOG=mercury_browser=info` or more to see the log lines.
+
 ### Vendored dependencies
 
 Each Mercury-specific upstream regression needs a focused test close to the patch. The `gaol` shared-memory test protects the `memfd` and `ftruncate` behavior that originally killed isolated Servo children with `SIGXFSZ`.

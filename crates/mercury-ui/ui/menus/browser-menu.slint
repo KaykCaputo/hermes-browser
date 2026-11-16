@@ -1,0 +1,238 @@
+// The browser menu behind the toolbar's "⋮" button. Its colours follow the browser chrome,
+// which is dark in both system appearances.
+
+export enum BrowserMenuCommand {
+    new-tab,
+    zoom-in,
+    zoom-out,
+    zoom-reset,
+    find,
+    settings,
+    about,
+    help,
+    quit,
+}
+
+// Edit commands for the address bar's text field, run when the native Edit menu is clicked.
+export enum AddressBarEdit {
+    undo,
+    redo,
+    cut,
+    copy,
+    paste,
+    select-all,
+}
+
+export struct BrowserMenuEntry {
+    title: string,
+    // The key that runs the same action, as the platform writes it ("⌘T", "Ctrl+T"), or "".
+    shortcut: string,
+    enabled: bool,
+    command: BrowserMenuCommand,
+    separator-before: bool,
+}
+
+component MenuSeparatorLine inherits Rectangle {
+    height: 9px;
+
+    Rectangle {
+        x: 8px;
+        y: 4px;
+        width: parent.width - 16px;
+        height: 1px;
+        background: #29323d;
+    }
+}
+
+component BrowserMenuRow inherits Rectangle {
+    in property <BrowserMenuEntry> entry;
+    callback activated(BrowserMenuCommand);
+
+    height: 30px;
+    border-radius: 6px;
+    background: touch.has-hover && root.entry.enabled ? #222d39 : transparent;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 16px;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.entry.title;
+            color: root.entry.enabled ? #edf4fa : #56616f;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Text {
+            text: root.entry.shortcut;
+            color: root.entry.enabled ? #8b98a8 : #48525e;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.entry.enabled;
+        clicked => {
+            root.activated(root.entry.command);
+        }
+    }
+}
+
+component ZoomButton inherits Rectangle {
+    in property <string> label;
+    in property <string> accessible-name;
+    callback clicked;
+
+    width: 32px;
+    height: 26px;
+    border-radius: 6px;
+    background: touch.pressed ? #2b3744 : touch.has-hover ? #222d39 : #161e28;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+
+    Text {
+        text: root.label;
+        color: touch.has-hover ? #71c5ff : #c9d3de;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// The menu's content, also rendered on its own by the rendering test.
+export component BrowserMenuPanel inherits Rectangle {
+    in property <[BrowserMenuEntry]> top-entries;
+    in property <[BrowserMenuEntry]> bottom-entries;
+    in property <int> zoom-percent: 100;
+    // An item other than the zoom buttons was chosen: the popup closes.
+    callback activated(BrowserMenuCommand);
+    // The zoom buttons keep the menu open, so the new percentage can be seen.
+    callback zoom(BrowserMenuCommand);
+
+    width: 264px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: #29323d;
+    background: #1a222c;
+    drop-shadow-blur: 18px;
+    drop-shadow-color: #00000080;
+    drop-shadow-offset-y: 4px;
+
+    VerticalLayout {
+        padding: 6px;
+        spacing: 0px;
+
+        for entry in root.top-entries: VerticalLayout {
+            if entry.separator-before: MenuSeparatorLine { }
+            BrowserMenuRow {
+                entry: entry;
+                activated(command) => {
+                    root.activated(command);
+                }
+            }
+        }
+
+        MenuSeparatorLine { }
+
+        HorizontalLayout {
+            height: 34px;
+            padding-left: 10px;
+            padding-right: 4px;
+            spacing: 4px;
+
+            Text {
+                horizontal-stretch: 1;
+                text: "Zoom";
+                color: #edf4fa;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+
+            ZoomButton {
+                y: 4px;
+                label: "−";
+                accessible-name: "Zoom out";
+                clicked => {
+                    root.zoom(BrowserMenuCommand.zoom-out);
+                }
+            }
+
+            zoom-reset := Rectangle {
+                width: 52px;
+                border-radius: 6px;
+                background: reset-touch.has-hover ? #222d39 : transparent;
+                accessible-role: button;
+                accessible-label: "Actual size";
+
+                Text {
+                    text: root.zoom-percent + "%";
+                    color: #c9d3de;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+
+                reset-touch := TouchArea {
+                    clicked => {
+                        root.zoom(BrowserMenuCommand.zoom-reset);
+                    }
+                }
+            }
+
+            ZoomButton {
+                y: 4px;
+                label: "+";
+                accessible-name: "Zoom in";
+                clicked => {
+                    root.zoom(BrowserMenuCommand.zoom-in);
+                }
+            }
+        }
+
+        MenuSeparatorLine { }
+
+        for entry in root.bottom-entries: VerticalLayout {
+            if entry.separator-before: MenuSeparatorLine { }
+            BrowserMenuRow {
+                entry: entry;
+                activated(command) => {
+                    root.activated(command);
+                }
+            }
+        }
+    }
+}
+
+export component BrowserMenu inherits PopupWindow {
+    in property <[BrowserMenuEntry]> top-entries;
+    in property <[BrowserMenuEntry]> bottom-entries;
+    in property <int> zoom-percent: 100;
+    callback activated(BrowserMenuCommand);
+
+    close-policy: close-on-click-outside;
+    width: 264px;
+
+    BrowserMenuPanel {
+        width: parent.width;
+        top-entries: root.top-entries;
+        bottom-entries: root.bottom-entries;
+        zoom-percent: root.zoom-percent;
+        activated(command) => {
+            root.close();
+            root.activated(command);
+        }
+        zoom(command) => {
+            root.activated(command);
+        }
+    }
+}
