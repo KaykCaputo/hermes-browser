@@ -58,18 +58,9 @@ ignore = [
     { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.36 (links = sqlite3) is pinned by Servo's rusqlite 0.38; mercury-import opens copied third-party databases with their -wal, the advisory's scenario; fix needs a Servo upgrade or a patched libsqlite3-sys" },
 ]
 
-[bans]
-# Servo's and Slint's graphs carry many duplicate versions (two wgpu majors,
-# for one); that is expected, not news.
-multiple-versions = "allow"
-# A `*` version requirement in our own manifests is. The intended level is
-# "deny", but cargo-deny treats the workspace's own path dependencies
-# (`talaria-core = { path = … }`) as wildcards unless the crate that declares
-# them has `publish = false`, which no crate's manifest says yet. Until every
-# workspace crate carries `publish = false` (none is published to crates.io),
-# this warns; change it to "deny" in the same commit that adds those lines.
-# Agreed: done by the lead when the parallel lanes are merged.
-wildcards = "warn"
+# Every workspace crate declares `publish = false`, so path dependencies between them are not
+# wildcards; any other wildcard version requirement is refused.
+wildcards = "deny"
 # Path dependencies in crates with `publish = false` are not wildcards.
 allow-wildcard-paths = true
 
