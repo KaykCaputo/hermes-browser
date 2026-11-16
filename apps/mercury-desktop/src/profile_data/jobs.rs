@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use super::{Area, Database, Message, Payload, ProfileData, ProfileDataError};
+use super::{Area, Change, Database, Message, Payload, ProfileData, ProfileDataError};
 
 /// What one chunk did.
 pub(super) enum Step {
@@ -43,6 +43,8 @@ pub(super) struct Background {
     pub(super) cancel: Arc<AtomicBool>,
     pub(super) steps: Box<dyn Steps>,
     pub(super) wrote: bool,
+    /// What its chunks changed, merged, for its one notification at the end.
+    pub(super) change: Option<Change>,
 }
 
 impl Background {
@@ -98,6 +100,7 @@ impl ProfileData {
             cancel: Arc::clone(&cancel),
             steps: Box::new(steps),
             wrote: false,
+            change: None,
         }));
         JobHandle { cancel }
     }

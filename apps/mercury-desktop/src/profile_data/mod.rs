@@ -22,9 +22,14 @@
 //! logged. Only this module and its children can run work on the database thread (`request`,
 //! `submit` and `Database` are private to it).
 //!
-//! **Change notifications:** [`ProfileData::on_change`] registers a UI-thread callback for an
-//! [`Area`]; it runs after the replies of a delivery in which a write to that area succeeded
-//! (once per delivery, however many writes).
+//! **Change notifications** mean "the list changed": [`ProfileData::on_change`] registers a
+//! UI-thread callback for an [`Area`], called with a [`Change`] after the replies of a delivery
+//! in which a write to that area succeeded (once per delivery, the hints of its writes merged).
+//! A writer gets both its reply and the notification. `History` is coalesced further: at most
+//! one notification per [`HISTORY_NOTIFY_INTERVAL`]. Download progress notifies nothing (live
+//! progress is the download manager's in-memory state). A listener that needs the service
+//! should call [`handle`] inside the callback rather than capture a [`ProfileData`], which
+//! would make a reference cycle through the listener list.
 //!
 //! **Stepwise jobs** (bulk import, frecency upkeep) run one chunk at a time, each chunk its own
 //! transaction, with every waiting request served between chunks; see `jobs`.
@@ -46,7 +51,9 @@
 //! # Start-up, upkeep and shutdown
 //!
 //! [`start`] spawns the service. The service creates the database file private to the user
-//! (0600) if it is new, runs `PRAGMA quick_check`, opens the store, marks downloads left in
+//! (0600) if it is new, runs `PRAGMA quick_check` if the last run did not close the database
+//! (a `-wal` file is left) or the last check is more than [`CHECK_INTERVAL`] old (the time is
+//! kept in `places.sqlite.checked`), opens the store, marks downloads left in
 //! progress by the last run as interrupted (before any request runs), and starts the frecency
 //! upkeep job: `refresh_frecencies` in chunks of [`REFRESH_BATCH`] until a chunk comes back
 //! short. It starts the job again when it has been idle (no request) for
@@ -55,6 +62,12 @@
 //! [`shut_down`] runs every request sent before it, writes held titles, cancels stepwise jobs
 //! between chunks (each reports what it finished), closes the database and returns, waiting no
 //! longer than its deadline.
+//!
+//! # Panics in callbacks
+//!
+//! Reply, progress and change callbacks run inside `slint::invoke_from_event_loop`, that is
+//! inside an AppKit callback on macOS, where a panic cannot unwind: a panicking callback aborts
+//! the process. Callbacks must not panic (no `unwrap` on a reply).
 
 mod bookmarks;
 pub(crate) mod downloads;
@@ -67,7 +80,7 @@ mod worker;
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -76,7 +89,7 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use mercury_store::{DownloadRecordId, Store, StoreError, VisitId};
+use mercury_store::{BookmarkId, DownloadRecordId, Store, StoreError, VisitId};
 use talaria_core::{BrowserController, VisitKey};
 
 pub(crate) use history::record_visits;
@@ -94,6 +107,11 @@ pub(crate) const UPKEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Later titles of the same page within this time are held, and only the last is written.
 pub(crate) const TITLE_DEBOUNCE: Duration = Duration::from_secs(3);
+/// History change notifications come at most this often.
+pub(crate) const HISTORY_NOTIFY_INTERVAL: Duration = Duration::from_secs(1);
+/// `PRAGMA quick_check` runs at least this often (and after any run that did not close the
+/// database).
+pub(crate) const CHECK_INTERVAL: Duration = Duration::from_secs(7 * 86_400);
 /// Visits that can still be taken back (an error page or a replaced entry is recognised
 /// moments after its commit).
 const RECENT_VISITS: usize = 64;
@@ -151,8 +169,39 @@ fn open_database(path: Option<PathBuf>) -> Result<Store, String> {
     let failure =
         |error: &dyn std::fmt::Display| format!("{} could not be opened: {error}", path.display());
     make_private_file(&path).map_err(|error| failure(&error))?;
-    quick_check(&path).map_err(|error| failure(&error))?;
+    let marker = check_marker(&path);
+    if check_is_due(&path, &marker, SystemTime::now()) {
+        quick_check(&path).map_err(|error| failure(&error))?;
+        if let Err(error) = write_private(&marker, now_ms().to_string().as_bytes()) {
+            log::warn!("could not record the database check: {error}");
+        }
+    }
     Store::open(&path).map_err(|error| failure(&error))
+}
+
+/// The file that records when the database was last checked.
+fn check_marker(database: &Path) -> PathBuf {
+    let mut name = database.as_os_str().to_owned();
+    name.push(".checked");
+    PathBuf::from(name)
+}
+
+/// A check is due when a write-ahead log was left behind (the last run did not close the
+/// database) or the last recorded check is missing, unreadable or [`CHECK_INTERVAL`] old.
+fn check_is_due(database: &Path, marker: &Path, now: SystemTime) -> bool {
+    let mut wal = database.as_os_str().to_owned();
+    wal.push("-wal");
+    if Path::new(&wal).exists() {
+        return true;
+    }
+    let checked_at = std::fs::read_to_string(marker)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok())
+        .map(|ms| UNIX_EPOCH + Duration::from_millis(ms));
+    checked_at.is_none_or(|at| {
+        now.duration_since(at)
+            .map_or(true, |age| age >= CHECK_INTERVAL)
+    })
 }
 
 #[cfg(unix)]
@@ -176,6 +225,16 @@ fn make_private_file(path: &Path) -> std::io::Result<()> {
 #[cfg(not(unix))]
 fn make_private_file(_path: &Path) -> std::io::Result<()> {
     Ok(())
+}
+
+/// Replaces the contents of `path`, creating it readable by this user only.
+fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(contents)
 }
 
 /// `PRAGMA quick_check` on its own connection: a damaged file is refused before the store
@@ -246,6 +305,61 @@ pub(crate) enum Area {
     Downloads,
 }
 
+/// What a write changed, as told to [`ProfileData::on_change`] listeners. More hints may be
+/// added; a listener reads the ones it knows.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Change {
+    pub(crate) area: Area,
+    /// `Bookmarks`: the folders whose children changed; `None` if not known (any may have).
+    pub(crate) folders: Option<Vec<BookmarkId>>,
+    /// `Downloads`: the GUIDs of the records that changed; `None` if not known (any may have).
+    pub(crate) downloads: Option<Vec<String>>,
+}
+
+impl Change {
+    /// A change to `area` with no hints: anything in it may have changed.
+    pub(crate) fn any(area: Area) -> Self {
+        Self {
+            area,
+            folders: None,
+            downloads: None,
+        }
+    }
+
+    fn folders(folders: impl IntoIterator<Item = BookmarkId>) -> Self {
+        Self {
+            folders: Some(folders.into_iter().collect()),
+            ..Self::any(Area::Bookmarks)
+        }
+    }
+
+    fn download(guid: &str) -> Self {
+        Self {
+            downloads: Some(vec![guid.to_owned()]),
+            ..Self::any(Area::Downloads)
+        }
+    }
+
+    /// Adds `other`'s hints (same area); an unknown hint makes the merged one unknown.
+    fn merge(&mut self, other: Change) {
+        fn union<T: PartialEq>(into: &mut Option<Vec<T>>, from: Option<Vec<T>>) {
+            match (into.as_mut(), from) {
+                (Some(into), Some(from)) => {
+                    for item in from {
+                        if !into.contains(&item) {
+                            into.push(item);
+                        }
+                    }
+                }
+                _ => *into = None,
+            }
+        }
+        union(&mut self.folders, other.folders);
+        union(&mut self.downloads, other.downloads);
+    }
+}
+
 /// A registered change callback; pass it to [`ProfileData::remove_change_listener`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChangeListener(u64);
@@ -257,6 +371,13 @@ struct Database {
     recent_visits: VecDeque<(VisitKey, VisitId)>,
     /// Download records by GUID: those inserted or listed in this run.
     download_ids: HashMap<String, DownloadRecordId>,
+    /// GUIDs looked up and not found, so later requests do not scan again; a GUID leaves the
+    /// set when it is inserted.
+    download_misses: HashSet<String>,
+    /// How often the downloads table was listed to find a GUID (for the log).
+    download_scans: u64,
+    /// What the running job changed, with hints; collected by the worker after it.
+    changes: Vec<Change>,
 }
 
 impl Database {
@@ -265,7 +386,15 @@ impl Database {
             store,
             recent_visits: VecDeque::new(),
             download_ids: HashMap::new(),
+            download_misses: HashSet::new(),
+            download_scans: 0,
+            changes: Vec::new(),
         }
+    }
+
+    /// Notes what the current job changes, with hints; reported only if the job succeeds.
+    fn changed(&mut self, change: Change) {
+        self.changes.push(change);
     }
 
     fn store(&mut self) -> &mut Store {
@@ -277,7 +406,7 @@ type Payload = Box<dyn Any + Send>;
 type Work = Box<dyn FnOnce(Result<&mut Database, &Arc<str>>, i64) -> JobOutcome + Send>;
 type ReplyCallback = Box<dyn FnOnce(Payload)>;
 type ProgressCallback = Rc<dyn Fn(Payload)>;
-type Listener = (ChangeListener, Area, Rc<dyn Fn()>);
+type Listener = (ChangeListener, Area, Rc<dyn Fn(&Change)>);
 type Failure = Box<dyn FnOnce(ProfileDataError) -> Payload + Send>;
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 type Wake = Arc<dyn Fn() + Send + Sync>;
@@ -307,7 +436,7 @@ enum Message {
 enum Delivery {
     Reply { id: u64, payload: Payload },
     Progress { id: u64, payload: Payload },
-    Changed(Area),
+    Changed(Change),
 }
 
 /// The service's timing policy; tests shorten it.
@@ -316,6 +445,7 @@ pub(crate) struct Timing {
     pub(crate) idle_before_upkeep: Duration,
     pub(crate) upkeep_interval: Duration,
     pub(crate) title_debounce: Duration,
+    pub(crate) history_notify_interval: Duration,
 }
 
 impl Default for Timing {
@@ -324,6 +454,7 @@ impl Default for Timing {
             idle_before_upkeep: IDLE_BEFORE_UPKEEP,
             upkeep_interval: UPKEEP_INTERVAL,
             title_debounce: TITLE_DEBOUNCE,
+            history_notify_interval: HISTORY_NOTIFY_INTERVAL,
         }
     }
 }
@@ -425,12 +556,17 @@ impl ProfileData {
     }
 
     /// Calls `callback` on the UI thread after each delivery in which a write to `area`
-    /// succeeded, after that delivery's replies.
+    /// succeeded, after that delivery's replies, with what changed. Call [`handle`] inside the
+    /// callback rather than capturing a [`ProfileData`].
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "called by the bookmarks and downloads work")
     )]
-    pub(crate) fn on_change(&self, area: Area, callback: impl Fn() + 'static) -> ChangeListener {
+    pub(crate) fn on_change(
+        &self,
+        area: Area,
+        callback: impl Fn(&Change) + 'static,
+    ) -> ChangeListener {
         let listener = ChangeListener(self.next_id());
         self.shared
             .listeners
@@ -496,13 +632,13 @@ impl ProfileData {
     /// Runs `work` on the service thread without a reply; a failure is logged as `what`.
     fn submit(
         &self,
-        area: Area,
+        area: Option<Area>,
         what: &'static str,
         work: impl FnOnce(&mut Database, i64) -> mercury_store::Result<()> + Send + 'static,
     ) {
         let job = Job {
             reply_to: None,
-            area: Some(area),
+            area,
             work: Box::new(move |database, now| {
                 let wrote = match database {
                     Ok(database) => match work(database, now) {
@@ -557,7 +693,7 @@ impl ProfileData {
     /// service made them, then the change callbacks, once per area.
     pub(crate) fn deliver_replies(&self) {
         self.shared.wake_pending.store(false, Ordering::Release);
-        let mut changed = BTreeSet::new();
+        let mut changed: BTreeMap<Area, Change> = BTreeMap::new();
         let undelivered = std::mem::take(&mut *self.shared.undelivered.borrow_mut());
         let deliveries = self
             .shared
@@ -585,12 +721,15 @@ impl ProfileData {
                         callback(payload);
                     }
                 }
-                Delivery::Changed(area) => {
-                    changed.insert(area);
-                }
+                Delivery::Changed(change) => match changed.get_mut(&change.area) {
+                    Some(merged) => merged.merge(change),
+                    None => {
+                        changed.insert(change.area, change);
+                    }
+                },
             }
         }
-        for area in changed {
+        for (area, change) in changed {
             let listeners = self
                 .shared
                 .listeners
@@ -600,7 +739,7 @@ impl ProfileData {
                 .map(|(_, _, callback)| Rc::clone(callback))
                 .collect::<Vec<_>>();
             for listener in listeners {
-                listener();
+                listener(&change);
             }
         }
     }

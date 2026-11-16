@@ -252,7 +252,7 @@ fn writes_notify_their_area_once_per_delivery_after_the_replies() {
         let seen = Rc::clone(&seen);
         harness
             .data
-            .on_change(area, move || seen.borrow_mut().push(name.to_owned()));
+            .on_change(area, move |_| seen.borrow_mut().push(name.to_owned()));
     }
     let toolbar = harness
         .ask(|data, reply| data.bookmark_root(BookmarkRoot::Toolbar, reply))
@@ -300,7 +300,7 @@ fn a_failed_write_notifies_nothing_and_a_removed_listener_is_not_called() {
     let count = Rc::clone(&calls);
     let listener = harness
         .data
-        .on_change(Area::Bookmarks, move || *count.borrow_mut() += 1);
+        .on_change(Area::Bookmarks, move |_| *count.borrow_mut() += 1);
     let toolbar = harness
         .ask(|data, reply| data.bookmark_root(BookmarkRoot::Toolbar, reply))
         .unwrap();
@@ -1165,28 +1165,58 @@ fn shutdown_cancels_an_import_between_chunks_and_reports_it() {
 }
 
 #[test]
-fn a_refused_visit_stops_the_import_after_the_chunks_before_it() {
+fn a_refused_visit_is_skipped_and_the_import_goes_on() {
     let harness = Harness::new();
-    let mut visits = visits_to_import(IMPORT_CHUNK * 2 + 10);
-    let refused = IMPORT_CHUNK * 2 + 3;
-    visits[refused].url = format!(
+    let total = IMPORT_CHUNK * 2 + 10;
+    let mut visits = visits_to_import(total);
+    let too_long = format!(
         "https://a.test/{}",
         "x".repeat(mercury_store::MAX_URL_BYTES)
     );
+    visits[3].url = too_long.clone();
+    visits[IMPORT_CHUNK * 2 + 3].url = too_long;
 
-    let summary = ImportRun::visits(&harness, visits).finish(&harness);
+    let run = ImportRun::visits(&harness, visits);
+    let summary = run.finish(&harness);
 
-    assert_eq!(summary.imported, 2 * IMPORT_CHUNK as u64);
-    assert!(
-        matches!(
-            summary.outcome,
-            ImportOutcome::Failed(ProfileDataError::Store(StoreError::ImportEntryRefused {
-                index,
-                ..
-            })) if index == refused
+    assert!(matches!(summary.outcome, ImportOutcome::Completed));
+    assert_eq!(
+        (
+            summary.imported,
+            summary.skipped,
+            summary.total,
+            summary.resume_from
         ),
-        "{:?}",
-        summary.outcome
+        (total as u64 - 2, 2, total as u64, total as u64)
+    );
+    assert_eq!(run.progress.borrow()[0].skipped, 1);
+    assert_eq!(run.progress.borrow()[0].done, IMPORT_CHUNK as u64);
+    let (store, _directory) = harness.reopen();
+    assert_eq!(
+        store.history(None, None, u32::MAX).unwrap().len(),
+        total - 2
+    );
+}
+
+#[test]
+fn a_cancelled_import_says_where_to_resume() {
+    let harness = Harness::new();
+    let visits = visits_to_import(IMPORT_CHUNK * 30);
+    let run = ImportRun::visits(&harness, visits.clone());
+    harness.settle(|| !run.progress.borrow().is_empty());
+    run.handle.cancel();
+    let first = run.finish(&harness);
+    assert!(matches!(first.outcome, ImportOutcome::Cancelled));
+
+    let rest = visits[first.resume_from as usize..].to_vec();
+    let second = ImportRun::visits(&harness, rest).finish(&harness);
+
+    assert!(matches!(second.outcome, ImportOutcome::Completed));
+    assert_eq!(first.imported + second.imported, visits.len() as u64);
+    let (store, _directory) = harness.reopen();
+    assert_eq!(
+        store.history(None, None, u32::MAX).unwrap().len(),
+        visits.len()
     );
 }
 
@@ -1230,7 +1260,7 @@ fn a_bookmark_import_runs_in_chunks_of_whole_trees_and_notifies_once() {
     let count = Rc::clone(&changes);
     harness
         .data
-        .on_change(Area::Bookmarks, move || *count.borrow_mut() += 1);
+        .on_change(Area::Bookmarks, move |_| *count.borrow_mut() += 1);
     let other = harness
         .ask(|data, reply| data.bookmark_root(BookmarkRoot::Other, reply))
         .unwrap();
@@ -1270,7 +1300,7 @@ fn a_bookmark_import_runs_in_chunks_of_whole_trees_and_notifies_once() {
 }
 
 #[test]
-fn a_refused_bookmark_is_named_by_its_place_in_the_whole_import() {
+fn a_refused_bookmark_folder_is_skipped_with_its_contents() {
     let harness = Harness::new();
     let other = harness
         .ask(|data, reply| data.bookmark_root(BookmarkRoot::Other, reply))
@@ -1295,19 +1325,47 @@ fn a_refused_bookmark_is_named_by_its_place_in_the_whole_import() {
     harness.settle(|| summary.borrow().is_some());
 
     let summary = summary.borrow_mut().take().unwrap();
-    // Node 2,200 is in the fifth chunk of 500 nodes.
-    assert_eq!(summary.imported, 4 * IMPORT_CHUNK as u64);
     assert!(
-        matches!(
-            summary.outcome,
-            ImportOutcome::Failed(ProfileDataError::Store(StoreError::ImportEntryRefused {
-                index: 2200,
-                ..
-            }))
-        ),
+        matches!(summary.outcome, ImportOutcome::Completed),
         "{:?}",
         summary.outcome
     );
+    // Folder 550 (a GUID already used by folder 0) and its three bookmarks are left out.
+    assert_eq!(
+        (summary.imported, summary.skipped, summary.resume_from),
+        (2396, 4, 600)
+    );
+    assert_eq!(
+        harness
+            .ask(|data, reply| data.bookmark_children(other, reply))
+            .unwrap()
+            .len(),
+        599
+    );
+}
+
+#[test]
+fn a_bookmark_import_notifies_the_folders_it_filled() {
+    let harness = Harness::new();
+    let changes = log();
+    let seen = Rc::clone(&changes);
+    harness.data.on_change(Area::Bookmarks, move |change| {
+        seen.borrow_mut().push(format!("{:?}", change.folders))
+    });
+    let other = harness
+        .ask(|data, reply| data.bookmark_root(BookmarkRoot::Other, reply))
+        .unwrap();
+    let summary = Rc::new(RefCell::new(None));
+    let done = Rc::clone(&summary);
+
+    harness.data.import_bookmarks(
+        vec![(other, bookmark_tree(300))],
+        |_| {},
+        move |s| *done.borrow_mut() = Some(s),
+    );
+    harness.settle(|| summary.borrow().is_some() && !changes.borrow().is_empty());
+
+    assert_eq!(*changes.borrow(), vec![format!("{:?}", Some(vec![other]))]);
 }
 
 /// The benchmark the review asked for: 100,000 visits through the chunked import into a
@@ -1348,5 +1406,268 @@ fn import_benchmark_100k_visits() {
             size as f64 / 1e6,
             check_started.elapsed().as_secs_f64() * 1000.0,
         );
+        // One upkeep chunk three days later, when every score is stale.
+        let mut store = Store::open(&path).unwrap();
+        let mut longest = Duration::ZERO;
+        for _ in 0..5 {
+            let started = Instant::now();
+            let refreshed = store
+                .refresh_frecencies(NOW + 3 * DAY_MS, REFRESH_BATCH)
+                .unwrap();
+            assert_eq!(refreshed, u64::from(REFRESH_BATCH));
+            longest = longest.max(started.elapsed());
+        }
+        println!(
+            "{shape}: longest of 5 upkeep chunks of {REFRESH_BATCH} pages {:.1} ms",
+            longest.as_secs_f64() * 1000.0
+        );
     }
+}
+
+// Round 1c: change hints, quiet progress, coalesced history, remembered misses, check policy.
+
+/// Records each change notification of `area`.
+fn listen(harness: &Harness, area: Area) -> Rc<RefCell<Vec<Change>>> {
+    let changes = Rc::new(RefCell::new(Vec::new()));
+    let seen = Rc::clone(&changes);
+    harness
+        .data
+        .on_change(area, move |change| seen.borrow_mut().push(change.clone()));
+    changes
+}
+
+#[test]
+fn bookmark_changes_name_the_folders_whose_listing_changed() {
+    let harness = Harness::new();
+    let changes = listen(&harness, Area::Bookmarks);
+    let toolbar = harness
+        .ask(|data, reply| data.bookmark_root(BookmarkRoot::Toolbar, reply))
+        .unwrap();
+    let other = harness
+        .ask(|data, reply| data.bookmark_root(BookmarkRoot::Other, reply))
+        .unwrap();
+    let take = |harness: &Harness| {
+        harness.settle(|| !changes.borrow().is_empty());
+        let change = changes.borrow_mut().remove(0);
+        change.folders.unwrap()
+    };
+
+    let mark = harness
+        .ask(|data, reply| {
+            data.add_bookmark(toolbar, None, "A".into(), "https://a.test/".into(), reply)
+        })
+        .unwrap();
+    assert_eq!(take(&harness), vec![toolbar]);
+    harness
+        .ask(|data, reply| data.rename_bookmark(mark, "B".into(), reply))
+        .unwrap();
+    assert_eq!(take(&harness), vec![toolbar]);
+    harness
+        .ask(|data, reply| data.move_bookmark(mark, other, None, reply))
+        .unwrap();
+    assert_eq!(take(&harness), vec![toolbar, other]);
+    harness
+        .ask(|data, reply| data.remove_bookmark(mark, reply))
+        .unwrap();
+    assert_eq!(take(&harness), vec![other]);
+}
+
+#[test]
+fn download_changes_name_the_record_and_progress_notifies_nothing() {
+    let harness = Harness::new();
+    let changes = listen(&harness, Area::Downloads);
+    let guid = new_guid().unwrap();
+    harness
+        .ask(|data, reply| data.insert_download(download(&guid), reply))
+        .unwrap();
+    harness.settle(|| !changes.borrow().is_empty());
+    assert_eq!(
+        changes.borrow_mut().remove(0).downloads,
+        Some(vec![guid.clone()])
+    );
+
+    for received in [10, 20, 30] {
+        harness
+            .data
+            .update_download_progress(guid.clone(), received, None);
+    }
+    harness
+        .ask(|data, reply| {
+            data.set_download_validators(guid.clone(), None, Some("e".into()), None, reply)
+        })
+        .unwrap();
+    harness.sync();
+    assert!(changes.borrow().is_empty(), "{:?}", changes.borrow());
+
+    harness
+        .ask(|data, reply| data.finish_download(guid.clone(), DownloadState::Complete, None, reply))
+        .unwrap();
+    harness.settle(|| !changes.borrow().is_empty());
+    assert_eq!(changes.borrow()[0].downloads, Some(vec![guid]));
+}
+
+#[test]
+fn history_notifications_are_coalesced() {
+    let timing = Timing {
+        history_notify_interval: Duration::from_millis(400),
+        ..Timing::default()
+    };
+    let harness = Harness::with(|_| {}, timing);
+    let changes = listen(&harness, Area::History);
+
+    harness.data.record_updates(
+        vec![visit(0, "https://a.test/", NavigationOrigin::Link)],
+        NOW,
+    );
+    harness.settle(|| changes.borrow().len() == 1);
+    for key in 1..10 {
+        harness.data.record_updates(
+            vec![
+                visit(key, &format!("https://{key}.test/"), NavigationOrigin::Link),
+                title(&format!("https://{key}.test/"), "T"),
+            ],
+            NOW,
+        );
+    }
+    harness.sync();
+    assert_eq!(changes.borrow().len(), 1, "held back within the interval");
+
+    harness.settle(|| changes.borrow().len() == 2);
+    std::thread::sleep(Duration::from_millis(600));
+    harness.data.deliver_replies();
+    assert_eq!(changes.borrow().len(), 2);
+}
+
+#[test]
+fn an_unknown_download_guid_is_looked_up_only_once() {
+    let harness = Harness::new();
+    let guid = new_guid().unwrap();
+
+    harness.data.update_download_progress(guid.clone(), 1, None);
+    harness.data.update_download_progress(guid.clone(), 2, None);
+    harness.data.update_download_progress(guid.clone(), 3, None);
+    let looked_up = harness.ask(|data, reply| {
+        let guid = guid.clone();
+        data.request(
+            None,
+            move |db, _| Ok((db.download_misses.contains(&guid), db.download_scans)),
+            reply,
+        );
+    });
+    assert_eq!(looked_up.unwrap(), (true, 1));
+
+    harness
+        .ask(|data, reply| data.insert_download(download(&guid), reply))
+        .unwrap();
+    harness
+        .data
+        .update_download_progress(guid.clone(), 50, None);
+    let records = harness.ask(|data, reply| data.downloads(1, reply)).unwrap();
+    assert_eq!(records[0].received_bytes, 50);
+    let still_missed = harness.ask(|data, reply| {
+        let guid = guid.clone();
+        data.request(
+            None,
+            move |db, _| Ok(db.download_misses.contains(&guid)),
+            reply,
+        );
+    });
+    assert!(!still_missed.unwrap());
+
+    harness
+        .ask(|data, reply| data.remove_download(guid.clone(), reply))
+        .unwrap();
+    assert!(matches!(
+        harness.ask(|data, reply| data.resume_download(guid.clone(), reply)),
+        Err(ProfileDataError::Store(StoreError::NotFound))
+    ));
+}
+
+/// A database whose table pages are damaged but whose header and schema are readable: the
+/// store opens it; only `quick_check` notices.
+fn damaged_database(path: &Path) {
+    let mut store = Store::open(path).unwrap();
+    let visits = (0..2000)
+        .map(|n| format!("https://{n}.test/some/longer/path"))
+        .collect::<Vec<_>>();
+    let imports = visits
+        .iter()
+        .map(|url| VisitImport {
+            url,
+            title: Some("A title"),
+            visited_at_ms: NOW,
+            transition: VisitTransition::Link,
+        })
+        .collect::<Vec<_>>();
+    store.import_visits(&imports, NOW).unwrap();
+    drop(store);
+    let mut bytes = std::fs::read(path).unwrap();
+    bytes[4 * 4096..9 * 4096].fill(0xA5);
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn the_check_is_skipped_within_the_week_after_a_clean_exit() {
+    let harness = Harness::with(
+        |path| {
+            damaged_database(path);
+            std::fs::write(check_marker(path), now_ms().to_string()).unwrap();
+        },
+        Timing::default(),
+    );
+
+    // Not checked, so the damage goes unnoticed at open (the store reads only the schema).
+    assert!(
+        harness
+            .ask(|data, reply| data.bookmark_root(BookmarkRoot::Toolbar, reply))
+            .is_ok()
+    );
+}
+
+#[test]
+fn the_check_runs_after_an_unclean_exit_even_within_the_week() {
+    let harness = Harness::with(
+        |path| {
+            damaged_database(path);
+            std::fs::write(check_marker(path), now_ms().to_string()).unwrap();
+            // What a run that did not close the database leaves behind.
+            std::fs::write(path.with_extension("sqlite-wal"), b"").unwrap();
+        },
+        Timing::default(),
+    );
+
+    assert_unavailable(&harness, "could not be opened");
+}
+
+#[test]
+fn a_check_is_due_when_none_is_recorded_or_the_last_is_a_week_old() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("places.sqlite");
+    let marker = check_marker(&database);
+    let now = SystemTime::now();
+
+    assert!(check_is_due(&database, &marker, now));
+    std::fs::write(&marker, "garbage").unwrap();
+    assert!(check_is_due(&database, &marker, now));
+    std::fs::write(&marker, now_ms().to_string()).unwrap();
+    let now = SystemTime::now();
+    assert!(!check_is_due(&database, &marker, now));
+    assert!(check_is_due(&database, &marker, now + CHECK_INTERVAL));
+    // A check recorded in the future (the clock went back) is not trusted.
+    assert!(check_is_due(
+        &database,
+        &marker,
+        now - Duration::from_secs(3600)
+    ));
+}
+
+#[test]
+fn a_successful_check_is_recorded() {
+    let harness = Harness::new();
+    harness.sync();
+
+    let recorded = std::fs::read_to_string(check_marker(&harness.path())).unwrap();
+    assert!(recorded.trim().parse::<i64>().unwrap() > 0);
+    #[cfg(unix)]
+    assert_eq!(mode(&check_marker(&harness.path())), 0o600);
 }

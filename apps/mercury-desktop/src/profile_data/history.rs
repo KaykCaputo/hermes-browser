@@ -48,28 +48,37 @@ impl ProfileData {
     /// Records a visit to `url` at `at_ms`; `key` lets [`forget_visit`](Self::forget_visit)
     /// take it back. No reply.
     fn record_visit(&self, key: VisitKey, url: String, transition: VisitTransition, at_ms: i64) {
-        self.submit(Area::History, "recording a visit", move |database, _now| {
-            let id = database.store.record_visit(&url, None, transition, at_ms)?;
-            if database.recent_visits.len() == RECENT_VISITS {
-                database.recent_visits.pop_front();
-            }
-            database.recent_visits.push_back((key, id));
-            Ok(())
-        });
+        self.submit(
+            Some(Area::History),
+            "recording a visit",
+            move |database, _now| {
+                let id = database.store.record_visit(&url, None, transition, at_ms)?;
+                if database.recent_visits.len() == RECENT_VISITS {
+                    database.recent_visits.pop_front();
+                }
+                database.recent_visits.push_back((key, id));
+                Ok(())
+            },
+        );
     }
 
     /// Removes a visit recorded with `key` moments ago (an error page, a replaced entry), and
     /// its page if that has no other visit and no bookmark. Older visits are kept. No reply.
     fn forget_visit(&self, key: VisitKey) {
-        self.submit(Area::History, "forgetting a visit", move |database, now| {
-            let index = database.recent_visits.iter().position(|(k, _)| *k == key);
-            let Some((_, id)) = index.and_then(|index| database.recent_visits.remove(index)) else {
-                log::debug!("visit {} is no longer recent; kept", key.value());
-                return Ok(());
-            };
-            database.store.delete_visit(id, now)?;
-            Ok(())
-        });
+        self.submit(
+            Some(Area::History),
+            "forgetting a visit",
+            move |database, now| {
+                let index = database.recent_visits.iter().position(|(k, _)| *k == key);
+                let Some((_, id)) = index.and_then(|index| database.recent_visits.remove(index))
+                else {
+                    log::debug!("visit {} is no longer recent; kept", key.value());
+                    return Ok(());
+                };
+                database.store.delete_visit(id, now)?;
+                Ok(())
+            },
+        );
     }
 
     /// Sets the title of the page at `url`, if it is known; debounced per URL. No reply.

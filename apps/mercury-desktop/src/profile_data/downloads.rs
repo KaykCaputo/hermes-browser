@@ -4,14 +4,19 @@
 //! Records are addressed by their GUID, which the caller makes with
 //! [`new_guid`](super::new_guid) before `insert_download`: every later request can be sent at
 //! once, without waiting for the insert's reply (requests run in order). Records of earlier
-//! runs are addressed by the `guid` of their `DownloadRecord`. Writes notify
-//! [`Area::Downloads`].
+//! runs are addressed by the `guid` of their `DownloadRecord`. A GUID that is not found is
+//! remembered (until it is inserted), so later requests for it fail at once instead of scanning
+//! the table again.
+//!
+//! Inserting, finishing, resuming and removing a record notify [`Area::Downloads`] with its
+//! GUID; clearing notifies without one. Progress and validators notify nothing: they do not
+//! change the list, and live progress is `mercury-downloads`' in-memory state.
 
 #![cfg_attr(not(test), expect(dead_code, reason = "called by the downloads work"))]
 
 use mercury_store::{DownloadRecord, DownloadRecordId, DownloadState, NewDownload, StoreError};
 
-use super::{Area, Database, ProfileData, ProfileDataError};
+use super::{Area, Change, Database, ProfileData, ProfileDataError};
 
 /// The fields known when a download starts (an owned `mercury_store::NewDownload`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,13 +37,21 @@ impl Database {
         if let Some(id) = self.download_ids.get(guid) {
             return Ok(*id);
         }
-        for record in self.store.downloads(u32::MAX)? {
-            self.download_ids.insert(record.guid, record.id);
+        if !self.download_misses.contains(guid) {
+            self.download_scans += 1;
+            for record in self.store.downloads(u32::MAX)? {
+                self.download_ids.insert(record.guid, record.id);
+            }
+            if let Some(id) = self.download_ids.get(guid) {
+                return Ok(*id);
+            }
+            self.download_misses.insert(guid.to_owned());
         }
-        self.download_ids
-            .get(guid)
-            .copied()
-            .ok_or(StoreError::NotFound)
+        log::debug!(
+            "no download record {guid} (the table was listed {} times in this run)",
+            self.download_scans
+        );
+        Err(StoreError::NotFound)
     }
 }
 
@@ -62,6 +75,8 @@ impl ProfileData {
                     total_bytes: start.total_bytes,
                     started_at_ms: start.started_at_ms,
                 })?;
+                db.download_misses.remove(&start.guid);
+                db.changed(Change::download(&start.guid));
                 db.download_ids.insert(start.guid, id);
                 Ok(())
             },
@@ -77,15 +92,11 @@ impl ProfileData {
         received_bytes: i64,
         total_bytes: Option<i64>,
     ) {
-        self.submit(
-            Area::Downloads,
-            "recording download progress",
-            move |db, _| {
-                let id = db.download_id(&guid)?;
-                db.store()
-                    .update_download_progress(id, received_bytes, total_bytes)
-            },
-        );
+        self.submit(None, "recording download progress", move |db, _| {
+            let id = db.download_id(&guid)?;
+            db.store()
+                .update_download_progress(id, received_bytes, total_bytes)
+        });
     }
 
     /// Stores the final URL and the validators needed to resume.
@@ -98,7 +109,7 @@ impl ProfileData {
         reply: impl FnOnce(Result<(), ProfileDataError>) + 'static,
     ) {
         self.request(
-            Some(Area::Downloads),
+            None,
             move |db, _| {
                 let id = db.download_id(&guid)?;
                 db.store().set_download_validators(
@@ -112,7 +123,9 @@ impl ProfileData {
         );
     }
 
-    /// Marks a download complete, cancelled or interrupted, at the service's current time.
+    /// Marks a download complete, cancelled or interrupted, at the service's current time, then
+    /// runs a passive checkpoint so the log does not keep growing during a long download
+    /// session.
     pub(crate) fn finish_download(
         &self,
         guid: String,
@@ -124,7 +137,13 @@ impl ProfileData {
             Some(Area::Downloads),
             move |db, now| {
                 let id = db.download_id(&guid)?;
-                db.store().finish_download(id, state, error.as_deref(), now)
+                db.store()
+                    .finish_download(id, state, error.as_deref(), now)?;
+                db.changed(Change::download(&guid));
+                if let Err(error) = db.store().checkpoint() {
+                    log::debug!("checkpoint after a download failed: {error}");
+                }
+                Ok(())
             },
             reply,
         );
@@ -140,6 +159,7 @@ impl ProfileData {
             Some(Area::Downloads),
             move |db, _| {
                 let id = db.download_id(&guid)?;
+                db.changed(Change::download(&guid));
                 db.store().resume_download(id)
             },
             reply,
@@ -180,6 +200,8 @@ impl ProfileData {
                     Err(error) => return Err(error),
                 };
                 db.download_ids.remove(&guid);
+                db.download_misses.insert(guid.clone());
+                db.changed(Change::download(&guid));
                 db.store().remove_download(id)
             },
             reply,
