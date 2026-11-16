@@ -223,6 +223,9 @@ impl BrowserState {
     pub fn apply(&mut self, event: BrowserEvent) {
         match event {
             BrowserEvent::AddressChanged { url } => {
+                // dialogs: Servo writes credentials typed into a sign-in into the request URL,
+                // and so into the page's address; they are never shown or kept.
+                let url = crate::strip_user_info(&url);
                 // Cursor and status text are deliberately not reset here: the engine only
                 // reports changes against its own cached values, so the engine's notifications
                 // must stay the only source of both.

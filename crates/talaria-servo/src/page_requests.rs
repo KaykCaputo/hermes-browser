@@ -3,13 +3,16 @@
 //! load) until the object is answered or dropped; the browser thread is never blocked. Only an id
 //! and plain data reach `talaria-core`; answers come back as `PageRequestAnswer`s.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use servo::{
-    AllowOrDenyRequest, AuthenticationRequest, PermissionFeature, PermissionRequest, SimpleDialog,
+    AllowOrDenyRequest, AuthenticationRequest, LoadStatus, PermissionFeature, PermissionRequest,
+    SimpleDialog,
 };
 use talaria_core::{PagePermission, PageRequestAnswer, PageRequestId, PageRequestKind};
 
@@ -68,6 +71,68 @@ impl<R: EngineRequest> PendingEngineRequests<R> {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.requests.len()
+    }
+}
+
+/// Owns a web view's store for the browser side and closes it when dropped, so a closed or
+/// replaced tab never leaves a page waiting, whenever Servo lets go of the delegate's handle.
+pub(crate) struct ClosesOnDrop<R: EngineRequest> {
+    shared: Rc<RefCell<PendingEngineRequests<R>>>,
+}
+
+impl<R: EngineRequest> ClosesOnDrop<R> {
+    pub(crate) fn new(requests: PendingEngineRequests<R>) -> Self {
+        Self {
+            shared: Rc::new(RefCell::new(requests)),
+        }
+    }
+
+    /// The handle the delegate keeps.
+    pub(crate) fn shared(&self) -> Rc<RefCell<PendingEngineRequests<R>>> {
+        Rc::clone(&self.shared)
+    }
+
+    /// Removes the request; it is answered by the caller once nothing is borrowed.
+    pub(crate) fn take(&self, id: PageRequestId) -> Option<R> {
+        self.shared.borrow_mut().take(id)
+    }
+}
+
+impl<R: EngineRequest> Drop for ClosesOnDrop<R> {
+    fn drop(&mut self) {
+        let unanswered = self.shared.borrow_mut().close();
+        drop(unanswered);
+    }
+}
+
+/// Tells when a new document starts loading. Servo's own `Started` is not enough:
+/// `WebView::reload` sets the status to `Started` without notifying
+/// (`servo-0.8.0/webview.rs:552`), and the new document's `Started` is then dropped as unchanged
+/// (`webview.rs:334-336`). A `HeadParsed` or `Complete` without a `Started` since the last
+/// finished load therefore also starts a document.
+#[derive(Debug, Default)]
+pub(crate) struct DocumentStartTracker {
+    started: bool,
+}
+
+impl DocumentStartTracker {
+    pub(crate) fn document_started(&mut self, status: LoadStatus) -> bool {
+        match status {
+            LoadStatus::Started => {
+                self.started = true;
+                true
+            }
+            LoadStatus::HeadParsed => !std::mem::replace(&mut self.started, true),
+            LoadStatus::Complete => {
+                let unreported = !self.started;
+                self.started = false;
+                unreported
+            }
+            LoadStatus::Stopped => {
+                self.started = false;
+                false
+            }
+        }
     }
 }
 
@@ -292,6 +357,86 @@ mod tests {
         for (feature, permission) in pairs {
             assert_eq!(page_permission(feature), permission, "{feature:?}");
         }
+    }
+
+    use servo::LoadStatus;
+
+    /// Feeds statuses to a tracker; returns those at which a new document was reported.
+    fn documents_started(statuses: &[LoadStatus]) -> Vec<usize> {
+        let mut tracker = DocumentStartTracker::default();
+        statuses
+            .iter()
+            .enumerate()
+            .filter(|(_, status)| tracker.document_started(**status))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    #[test]
+    fn a_load_that_reports_started_starts_one_document() {
+        assert_eq!(
+            documents_started(&[
+                LoadStatus::Started,
+                LoadStatus::HeadParsed,
+                LoadStatus::Complete,
+                LoadStatus::Started,
+                LoadStatus::HeadParsed,
+                LoadStatus::Complete,
+            ]),
+            vec![0, 3]
+        );
+    }
+
+    #[test]
+    fn a_reload_whose_started_servo_swallowed_still_starts_a_document() {
+        // `WebView::reload` sets the status to Started without notifying, so the new document's
+        // own Started equals it and is not reported either.
+        assert_eq!(
+            documents_started(&[
+                LoadStatus::Started,
+                LoadStatus::HeadParsed,
+                LoadStatus::Complete,
+                LoadStatus::HeadParsed,
+                LoadStatus::Complete,
+            ]),
+            vec![0, 3]
+        );
+        assert_eq!(
+            documents_started(&[LoadStatus::Complete, LoadStatus::Complete]),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn a_stopped_load_ends_the_document_start() {
+        assert_eq!(
+            documents_started(&[
+                LoadStatus::Started,
+                LoadStatus::Stopped,
+                LoadStatus::HeadParsed,
+                LoadStatus::Complete,
+            ]),
+            vec![0, 2]
+        );
+    }
+
+    #[test]
+    fn dropping_the_store_guard_drops_every_request_and_refuses_later_ones() {
+        let log = Rc::default();
+        let guard = ClosesOnDrop::new(PendingEngineRequests::default());
+        let shared = guard.shared();
+        shared
+            .borrow_mut()
+            .insert(FakeRequest::new("waiting", &log))
+            .expect("open");
+
+        drop(guard);
+
+        assert_eq!(*log.borrow(), vec![("waiting", None)]);
+        assert_eq!(
+            shared.borrow_mut().insert(FakeRequest::new("late", &log)),
+            None
+        );
     }
 
     #[test]

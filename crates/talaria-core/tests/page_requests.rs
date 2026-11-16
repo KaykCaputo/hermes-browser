@@ -620,12 +620,13 @@ fn a_remembered_permission_decision_answers_later_requests_from_the_site() {
         permission(4, PAGE, PagePermission::Geolocation),
     );
 
+    // Request 4 is for geolocation, which is denied without a prompt anyway.
     assert_eq!(
         drain(&mut controller),
-        vec![TabCommand::new(
-            tab_id,
-            answer(2, PageRequestAnswer::Accept)
-        )]
+        vec![
+            TabCommand::new(tab_id, answer(2, PageRequestAnswer::Accept)),
+            TabCommand::new(tab_id, answer(4, PageRequestAnswer::Decline)),
+        ]
     );
     assert_eq!(pending_id(&controller, tab_id), Some(3));
 }
@@ -837,4 +838,266 @@ fn credentials_never_appear_in_debug_output() {
     assert_eq!(credentials.username(), "alice");
     assert_eq!(credentials.password(), "hunter2");
     assert!(!format!("{command:?}").contains("hunter2"));
+}
+
+// Review round 1
+
+const EVERY_PERMISSION: [PagePermission; 13] = [
+    PagePermission::Geolocation,
+    PagePermission::Notifications,
+    PagePermission::Push,
+    PagePermission::Midi,
+    PagePermission::Camera,
+    PagePermission::Microphone,
+    PagePermission::Speaker,
+    PagePermission::DeviceInfo,
+    PagePermission::BackgroundSync,
+    PagePermission::Bluetooth,
+    PagePermission::PersistentStorage,
+    PagePermission::ScreenWakeLock,
+    PagePermission::Gamepad,
+];
+
+#[test]
+fn only_persistent_storage_is_asked_and_every_other_permission_is_denied_without_asking() {
+    for (index, feature) in EVERY_PERMISSION.into_iter().enumerate() {
+        let (mut controller, tab_id) = ready_controller();
+        let id = index as u64 + 1;
+        receive(&mut controller, tab_id, permission(id, PAGE, feature));
+
+        if feature == PagePermission::PersistentStorage {
+            assert!(feature.is_promptable());
+            assert_eq!(pending_id(&controller, tab_id), Some(id), "{feature:?}");
+            assert!(drain(&mut controller).is_empty(), "{feature:?}");
+        } else {
+            assert!(!feature.is_promptable(), "{feature:?}");
+            assert_eq!(pending_id(&controller, tab_id), None, "{feature:?}");
+            assert_eq!(
+                drain(&mut controller),
+                vec![TabCommand::new(
+                    tab_id,
+                    answer(id, PageRequestAnswer::Decline)
+                )],
+                "{feature:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_request_from_a_web_view_being_replaced_is_never_queued_on_the_new_page() {
+    let (mut controller, tab_id) = loading_first_page();
+    controller
+        .queue_navigation("b.test")
+        .expect("the address resolves");
+
+    // Sent by the old web view before it was closed, read after the replacement was decided.
+    receive(&mut controller, tab_id, alert(1, 0));
+    assert_eq!(pending_id(&controller, tab_id), None);
+
+    assert_eq!(
+        controller.take_initial_url(tab_id).as_deref(),
+        Some("https://b.test/")
+    );
+    assert_eq!(pending_id(&controller, tab_id), None);
+}
+
+fn interact(controller: &mut BrowserController) {
+    controller.queue_command(BrowserCommand::KeyboardInput(key_down()));
+    drain(controller);
+}
+
+#[test]
+fn a_second_leave_prompt_soon_after_the_first_offers_to_stop_asking() {
+    let (mut controller, tab_id) = ready_controller();
+    interact(&mut controller);
+    receive(
+        &mut controller,
+        tab_id,
+        request(1, PageRequestKind::LeavePage, 0),
+    );
+    assert!(
+        !controller
+            .pending_page_request(tab_id)
+            .expect("the first leave prompt is pending")
+            .offers_to_block_dialogs()
+    );
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept),
+        Duration::from_millis(500),
+    );
+
+    receive(
+        &mut controller,
+        tab_id,
+        request(2, PageRequestKind::LeavePage, 600),
+    );
+    assert!(
+        controller
+            .pending_page_request(tab_id)
+            .expect("the second leave prompt is pending")
+            .offers_to_block_dialogs()
+    );
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(2),
+        reply(PageRequestAnswer::Accept).blocking_further_dialogs(),
+        Duration::from_millis(700),
+    );
+    drain(&mut controller);
+
+    // Further leave prompts are allowed without asking; ordinary dialogs still ask.
+    receive(
+        &mut controller,
+        tab_id,
+        request(3, PageRequestKind::LeavePage, 800),
+    );
+    receive(&mut controller, tab_id, alert(4, 900));
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(3, PageRequestAnswer::Discard)
+        )]
+    );
+    assert_eq!(pending_id(&controller, tab_id), Some(4));
+}
+
+#[test]
+fn a_leave_prompt_caused_by_a_reload_says_so() {
+    let (mut controller, tab_id) = ready_controller();
+    interact(&mut controller);
+    controller.queue_command(BrowserCommand::Reload);
+    receive(
+        &mut controller,
+        tab_id,
+        request(1, PageRequestKind::LeavePage, 0),
+    );
+    assert!(
+        controller
+            .pending_page_request(tab_id)
+            .expect("pending")
+            .is_reload_prompt()
+    );
+
+    let (mut controller, tab_id) = ready_controller();
+    interact(&mut controller);
+    receive(
+        &mut controller,
+        tab_id,
+        request(1, PageRequestKind::LeavePage, 0),
+    );
+    assert!(
+        !controller
+            .pending_page_request(tab_id)
+            .expect("pending")
+            .is_reload_prompt()
+    );
+}
+
+fn sign_in(id: u64, url: &str, at_ms: u64) -> PageRequest {
+    PageRequest {
+        id: PageRequestId::new(id),
+        url: url.to_owned(),
+        kind: PageRequestKind::Authentication { for_proxy: false },
+        received_at: Duration::from_millis(at_ms),
+    }
+}
+
+fn submit_credentials(controller: &mut BrowserController, tab_id: TabId, id: u64, at_ms: u64) {
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(id),
+        reply(PageRequestAnswer::Credentials(HttpCredentials::new(
+            "alice".to_owned(),
+            "wrong".to_owned(),
+        ))),
+        Duration::from_millis(at_ms),
+    );
+}
+
+#[test]
+fn a_sign_in_asked_again_soon_after_credentials_were_sent_says_they_were_not_accepted() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(
+        &mut controller,
+        tab_id,
+        sign_in(1, "https://example.com/a", 0),
+    );
+    assert!(
+        !controller
+            .pending_page_request(tab_id)
+            .expect("pending")
+            .credentials_were_rejected()
+    );
+    submit_credentials(&mut controller, tab_id, 1, 1_000);
+
+    receive(
+        &mut controller,
+        tab_id,
+        sign_in(2, "https://example.com/a", 2_000),
+    );
+    assert!(
+        controller
+            .pending_page_request(tab_id)
+            .expect("pending")
+            .credentials_were_rejected()
+    );
+}
+
+#[test]
+fn a_later_or_other_sites_sign_in_is_not_marked_as_rejected() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(
+        &mut controller,
+        tab_id,
+        sign_in(1, "https://example.com/a", 0),
+    );
+    submit_credentials(&mut controller, tab_id, 1, 1_000);
+    receive(
+        &mut controller,
+        tab_id,
+        sign_in(2, "https://other.test/", 2_000),
+    );
+    assert!(
+        !controller
+            .pending_page_request(tab_id)
+            .expect("pending")
+            .credentials_were_rejected()
+    );
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(2),
+        reply(PageRequestAnswer::Decline),
+        Duration::from_millis(2_100),
+    );
+
+    receive(
+        &mut controller,
+        tab_id,
+        sign_in(3, "https://example.com/a", 60_000),
+    );
+    assert!(
+        !controller
+            .pending_page_request(tab_id)
+            .expect("pending")
+            .credentials_were_rejected()
+    );
+}
+
+#[test]
+fn user_names_and_passwords_never_reach_the_address() {
+    let (mut controller, tab_id) = ready_controller();
+    commit_page(
+        &mut controller,
+        tab_id,
+        "http://alice:secret@127.0.0.1:8123/private?q#f",
+    );
+
+    assert_eq!(
+        controller.active_state().url(),
+        "http://127.0.0.1:8123/private?q#f"
+    );
 }

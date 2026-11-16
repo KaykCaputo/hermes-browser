@@ -341,7 +341,9 @@ fn page_request_components_render_and_answer() {
         vec![(7, false, String::new(), String::new(), false)]
     );
 
-    // Sign-in: user name, Return moves to the password, Return signs in.
+    // Sign-in: the card has the keyboard, not a field, so keys meant for the page cannot land in
+    // the user name. Return does nothing there; Tab enters the user-name field; Return moves to
+    // the password; Return signs in.
     fixture.show(PageRequestView {
         heading: "Sign in to 127.0.0.1:8123".into(),
         message: "127.0.0.1:8123 needs a user name and password.".into(),
@@ -351,6 +353,10 @@ fn page_request_components_render_and_answer() {
         ..view(8, PageRequestStyle::SignIn)
     });
     fixture.save("06-sign-in");
+    fixture.type_text("typed for the page");
+    fixture.key(Key::Return);
+    assert_eq!(fixture.take_answers(), vec![]);
+    fixture.key(Key::Tab);
     fixture.type_text("alice");
     fixture.key(Key::Return);
     fixture.type_text("secret");
@@ -368,12 +374,77 @@ fn page_request_components_render_and_answer() {
     fixture.key(Key::Return);
     fixture.take_answers();
 
-    // A permission prompt under the address bar: Return does not grant; Escape blocks.
+    // A sign-in's Escape is Cancel even before a field was chosen.
+    fixture.show(PageRequestView {
+        heading: "Sign in to 127.0.0.1:8123".into(),
+        accept_label: "Sign in".into(),
+        decline_label: "Cancel".into(),
+        ..view(11, PageRequestStyle::SignIn)
+    });
+    fixture.key(Key::Escape);
+    assert_eq!(
+        fixture.take_answers(),
+        vec![(11, false, String::new(), String::new(), false)]
+    );
+
+    // Stacked combining marks and a 253-character host stay inside the card once the message
+    // has been cleaned as the browser cleans it.
+    let stacked = format!("x{}", "\u{0301}".repeat(500));
+    fixture.show(dialog(
+        12,
+        PageRequestStyle::Alert,
+        &talaria_core::sanitize_page_text(&stacked, true, talaria_core::MAX_MESSAGE_CHARS),
+    ));
+    fixture.save("09-combining-marks");
+    fixture.key(Key::Return);
+    fixture.take_answers();
+    let label = [
+        "a".repeat(63),
+        "b".repeat(63),
+        "c".repeat(63),
+        "d".repeat(61),
+    ]
+    .join(".");
+    assert_eq!(label.len(), 253);
+    fixture.show(PageRequestView {
+        heading: format!("{label} says").into(),
+        ..dialog(
+            13,
+            PageRequestStyle::Confirm,
+            "A page on a very long host name.",
+        )
+    });
+    let pixels = fixture.save("10-long-host");
+    assert!(
+        pixel_at(&pixels, 40.0, 480.0).0 < 120,
+        "the sheet stays inside the page"
+    );
+    fixture.key(Key::Escape);
+    fixture.take_answers();
+
+    // A reload prompt with the repeated-prompt choice.
+    fixture.show(PageRequestView {
+        heading: "Reload this page?".into(),
+        message: "Changes you made may not be saved.".into(),
+        detail: "Asked by 127.0.0.1:8123".into(),
+        accept_label: "Reload".into(),
+        decline_label: "Stay".into(),
+        choice_label: "Don't allow this page to ask again".into(),
+        ..view(14, PageRequestStyle::LeavePage)
+    });
+    fixture.save("11-reload-page");
+    fixture.key(Key::Escape);
+    assert_eq!(
+        fixture.take_answers(),
+        vec![(14, false, String::new(), String::new(), false)]
+    );
+
+    // A permission prompt under the address bar never takes the keyboard: neither Return nor
+    // Escape reaches it (the browser window handles Escape); it is answered with the mouse.
     fixture.show(PageRequestView {
         heading: "127.0.0.1:8123 wants to store data permanently on this device".into(),
         accept_label: "Allow".into(),
         decline_label: "Block".into(),
-        choice_label: "Remember for this site until you quit".into(),
         ..view(10, PageRequestStyle::Permission)
     });
     let pixels = fixture.save("08-permission");
@@ -383,10 +454,6 @@ fn page_request_components_render_and_answer() {
         "the page beneath a permission prompt is not dimmed"
     );
     fixture.key(Key::Return);
-    assert_eq!(fixture.take_answers(), vec![]);
     fixture.key(Key::Escape);
-    assert_eq!(
-        fixture.take_answers(),
-        vec![(10, false, String::new(), String::new(), false)]
-    );
+    assert_eq!(fixture.take_answers(), vec![]);
 }

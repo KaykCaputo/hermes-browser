@@ -37,8 +37,11 @@ export component PageRequestSheet inherits Rectangle {
         }
     }
 
+    // A prompt's field takes the keyboard with its default value selected. A sign-in sheet
+    // focuses its card only: keys meant for the page must not end up in the user-name field, so
+    // the user clicks a field or presses Tab to start typing.
     function take-focus() {
-        if root.has-text-field {
+        if root.request.style == PageRequestStyle.prompt {
             first-field.focus-and-select();
         } else {
             keys.focus();
@@ -73,7 +76,9 @@ export component PageRequestSheet inherits Rectangle {
         width: Math.min(parent.width - 32px, 460px);
         height: card-layout.preferred-height;
         x: (parent.width - self.width) / 2;
-        y: 0px;
+        // Overlaps the toolbar's bottom edge, which a page cannot draw over, so the page cannot
+        // show a pixel-identical copy of the sheet inside its own area.
+        y: -4px;
         background: #18212b;
         border-width: 1px;
         border-color: #3a4a5c;
@@ -94,7 +99,10 @@ export component PageRequestSheet inherits Rectangle {
                     return accept;
                 }
                 if event.text == Key.Return {
-                    root.answer(true);
+                    // On a sign-in, Return only signs in from a field the user chose.
+                    if root.request.style != PageRequestStyle.sign-in {
+                        root.answer(true);
+                    }
                     return accept;
                 }
                 reject
@@ -103,7 +111,7 @@ export component PageRequestSheet inherits Rectangle {
             card-layout := VerticalLayout {
                 padding-left: 20px;
                 padding-right: 20px;
-                padding-top: 16px;
+                padding-top: 20px;
                 padding-bottom: 16px;
                 spacing: 0px;
 

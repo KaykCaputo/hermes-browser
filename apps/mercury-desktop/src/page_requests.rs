@@ -15,6 +15,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use mercury_ui::{MainWindow, PageRequestStyle, PageRequestView};
 use slint::ComponentHandle;
@@ -25,6 +26,43 @@ use talaria_core::{
 use talaria_servo::page_request_clock;
 
 use crate::ui_sync::sync_ui;
+
+/// Keys and clicks on a page-triggered sheet or prompt are ignored for this long after it
+/// appears, so that a click or key press meant for the page cannot answer it (Chrome's
+/// `InputEventActivationProtector` does the same).
+pub(crate) const INPUT_PROTECTION: Duration = Duration::from_millis(500);
+
+/// Remembers when the request on screen appeared. Time is passed in.
+#[derive(Debug, Default)]
+pub(crate) struct InputProtector {
+    shown: Option<(PageRequestId, Duration)>,
+}
+
+impl InputProtector {
+    /// Called whenever the window shows `shown` (or nothing); a new request restarts the time.
+    pub(crate) fn show(&mut self, shown: Option<PageRequestId>, now: Duration) {
+        match shown {
+            None => self.shown = None,
+            Some(id) if self.shown.map(|(current, _)| current) != Some(id) => {
+                self.shown = Some((id, now));
+            }
+            Some(_) => {}
+        }
+    }
+
+    /// Whether an answer to `id` given at `now` comes from the user rather than from input
+    /// that was meant for the page.
+    pub(crate) fn accepts(&self, id: PageRequestId, now: Duration) -> bool {
+        self.shown.is_some_and(|(shown, shown_at)| {
+            shown == id && now.saturating_sub(shown_at) >= INPUT_PROTECTION
+        })
+    }
+}
+
+thread_local! {
+    /// The window's protector; the window lives on this thread.
+    static PROTECTOR: RefCell<InputProtector> = RefCell::default();
+}
 
 /// The password manager's seam: credentials saved for a site's sign-in, used to fill the sheet
 /// in. `origin` is the serialised origin (`https://example.com`); `realm` is the sign-in realm,
@@ -38,8 +76,14 @@ pub(crate) fn saved_http_credentials(
 
 /// Shows the active tab's oldest unanswered request, or nothing.
 pub(crate) fn sync_page_request(window: &MainWindow, controller: &BrowserController) {
-    let view = controller
-        .pending_page_request(controller.active_tab_id())
+    let pending = controller.pending_page_request(controller.active_tab_id());
+    PROTECTOR.with(|protector| {
+        protector.borrow_mut().show(
+            pending.as_ref().map(PendingPageRequest::id),
+            page_request_clock(),
+        );
+    });
+    let view = pending
         .map(|pending| {
             let saved = match pending.kind() {
                 PageRequestKind::Authentication { .. } => pending
@@ -71,15 +115,75 @@ pub(crate) fn connect_page_request_callbacks(
         let Some(pending) = pending.filter(|pending| pending.id() == id) else {
             return;
         };
+        let now = page_request_clock();
+        if !PROTECTOR.with(|protector| protector.borrow().accepts(id, now)) {
+            log::debug!(
+                "ignoring an answer to page request {} given too soon",
+                id.value()
+            );
+            return;
+        }
         let reply = reply_for(pending.kind(), accepted, &text, &password, checked);
         controller
             .borrow_mut()
-            .answer_page_request(tab_id, id, reply, page_request_clock());
+            .answer_page_request(tab_id, id, reply, now);
         if let Some(window) = weak_window.upgrade() {
             sync_ui(&window, &controller.borrow());
             window.window().request_redraw();
         }
     });
+}
+
+/// Whether the active tab shows a sheet over its page (anything but a permission prompt): its
+/// page then gets no keyboard or IME input.
+pub(crate) fn sheet_shown(controller: &BrowserController) -> bool {
+    controller
+        .pending_page_request(controller.active_tab_id())
+        .is_some_and(|pending| !matches!(pending.kind(), PageRequestKind::Permission(_)))
+}
+
+/// Escape blocks the active tab's permission prompt, which never takes keyboard focus itself.
+/// Not while the user types in one of the browser's own fields, where Escape is theirs. Returns
+/// true when the key was used.
+pub(crate) fn handle_permission_escape(
+    window: &MainWindow,
+    controller: &RefCell<BrowserController>,
+    escape_pressed: bool,
+) -> bool {
+    let tab_id = controller.borrow().active_tab_id();
+    let pending = controller.borrow().pending_page_request(tab_id);
+    let now = page_request_clock();
+    let Some(id) = permission_escape_target(
+        pending.as_ref(),
+        escape_pressed,
+        window.get_text_input_focused(),
+    ) else {
+        return false;
+    };
+    if PROTECTOR.with(|protector| protector.borrow().accepts(id, now)) {
+        controller.borrow_mut().answer_page_request(
+            tab_id,
+            id,
+            PageRequestReply::new(PageRequestAnswer::Decline),
+            now,
+        );
+        sync_ui(window, &controller.borrow());
+        window.window().request_redraw();
+    }
+    true
+}
+
+/// The permission request an Escape press blocks, if any.
+pub(crate) fn permission_escape_target(
+    pending: Option<&PendingPageRequest>,
+    escape_pressed: bool,
+    browser_field_focused: bool,
+) -> Option<PageRequestId> {
+    let pending = pending?;
+    (escape_pressed
+        && !browser_field_focused
+        && matches!(pending.kind(), PageRequestKind::Permission(_)))
+    .then_some(pending.id())
 }
 
 /// The user's answer to a request of this kind. `accepted` is OK, Leave, Sign in or Allow;
@@ -93,7 +197,14 @@ pub(crate) fn reply_for(
 ) -> PageRequestReply {
     let answer = match (kind, accepted) {
         (PageRequestKind::Alert { .. }, _) => PageRequestAnswer::Accept,
-        (PageRequestKind::Prompt { .. }, true) => PageRequestAnswer::PromptText(text.to_owned()),
+        // Unedited: the page gets its own default value back, not the shortened, cleaned copy
+        // that was shown.
+        (PageRequestKind::Prompt { default_value, .. }, true) if text == default_value => {
+            PageRequestAnswer::Accept
+        }
+        (PageRequestKind::Prompt { .. }, true) => {
+            PageRequestAnswer::PromptText(text.replace(['\r', '\n'], ""))
+        }
         (PageRequestKind::Authentication { .. }, true) => PageRequestAnswer::Credentials(
             HttpCredentials::new(text.to_owned(), password.to_owned()),
         ),
@@ -102,14 +213,19 @@ pub(crate) fn reply_for(
     };
     let reply = PageRequestReply::new(answer);
     match kind {
-        _ if !checked => reply,
-        PageRequestKind::Permission(_) => reply.remembering_for_site(),
-        _ => reply.blocking_further_dialogs(),
+        // Servo 0.8 does not say which frame asked for a permission, so a decision cannot be
+        // remembered for the right site; none is offered.
+        PageRequestKind::Permission(_) => reply,
+        _ if checked => reply.blocking_further_dialogs(),
+        _ => reply,
     }
 }
 
 const BLOCK_DIALOGS_CHOICE: &str = "Don't allow this page to show more dialogs";
-const REMEMBER_CHOICE: &str = "Remember for this site until you quit";
+const BLOCK_LEAVE_PROMPTS_CHOICE: &str = "Don't allow this page to ask again";
+const CREDENTIALS_REJECTED: &str = "The user name or password was not accepted.";
+const NOT_HTTPS: &str = "This connection is not secure (not HTTPS): your user name and password will be sent \
+     unencrypted.";
 
 pub(crate) fn page_request_view(
     pending: &PendingPageRequest,
@@ -141,15 +257,28 @@ pub(crate) fn page_request_view(
             message,
             default_value,
         } => dialog(PageRequestStyle::Prompt, message, default_value, "Cancel"),
-        PageRequestKind::LeavePage => PageRequestView {
-            style: PageRequestStyle::LeavePage,
-            heading: "Leave this page?".into(),
-            message: "Changes you made may not be saved.".into(),
-            detail: format!("Asked by {site}").into(),
-            accept_label: "Leave".into(),
-            decline_label: "Stay".into(),
-            ..PageRequestView::default()
-        },
+        PageRequestKind::LeavePage => {
+            let (heading, accept) = if pending.is_reload_prompt() {
+                ("Reload this page?", "Reload")
+            } else {
+                ("Leave this page?", "Leave")
+            };
+            PageRequestView {
+                style: PageRequestStyle::LeavePage,
+                heading: heading.into(),
+                message: "Changes you made may not be saved.".into(),
+                detail: format!("Asked by {site}").into(),
+                accept_label: accept.into(),
+                decline_label: "Stay".into(),
+                choice_label: if pending.offers_to_block_dialogs() {
+                    BLOCK_LEAVE_PROMPTS_CHOICE
+                } else {
+                    ""
+                }
+                .into(),
+                ..PageRequestView::default()
+            }
+        }
         PageRequestKind::Authentication { for_proxy } => {
             let (heading, message) = if *for_proxy {
                 (
@@ -162,12 +291,16 @@ pub(crate) fn page_request_view(
                     format!("{site} needs a user name and password."),
                 )
             };
-            let warning = if pending.origin().is_secure() {
-                ""
-            } else {
-                "This connection is not secure (not HTTPS): your user name and password will be \
-                 sent unencrypted."
-            };
+            let warning = [
+                pending
+                    .credentials_were_rejected()
+                    .then_some(CREDENTIALS_REJECTED),
+                (!pending.origin().is_secure()).then_some(NOT_HTTPS),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("\n");
             PageRequestView {
                 style: PageRequestStyle::SignIn,
                 heading: heading.into(),
@@ -191,13 +324,6 @@ pub(crate) fn page_request_view(
             heading: format!("{site} wants to {}", permission.description()).into(),
             accept_label: "Allow".into(),
             decline_label: "Block".into(),
-            // A page without an origin has no site to remember the decision for.
-            choice_label: if pending.origin().key().is_some() {
-                REMEMBER_CHOICE
-            } else {
-                ""
-            }
-            .into(),
             ..PageRequestView::default()
         },
     };
@@ -352,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn a_permission_prompt_reads_as_a_sentence_and_offers_to_remember() {
+    fn a_permission_prompt_reads_as_a_sentence_and_offers_nothing_to_remember() {
         let view = page_request_view(
             &pending(
                 "http://127.0.0.1:8123/",
@@ -368,7 +494,8 @@ mod tests {
         );
         assert_eq!(view.accept_label, "Allow");
         assert_eq!(view.decline_label, "Block");
-        assert_eq!(view.choice_label, REMEMBER_CHOICE);
+        // The asking frame is unknown, so nothing is offered to remember.
+        assert_eq!(view.choice_label, "");
     }
 
     #[test]
@@ -406,7 +533,7 @@ mod tests {
                 "",
                 true
             ),
-            PageRequestReply::new(PageRequestAnswer::Decline).remembering_for_site()
+            PageRequestReply::new(PageRequestAnswer::Decline)
         );
         assert_eq!(
             reply_for(
@@ -470,5 +597,156 @@ mod tests {
                 }
             )]
         );
+    }
+
+    fn prompt(default_value: &str) -> PageRequestKind {
+        PageRequestKind::Prompt {
+            message: String::new(),
+            default_value: default_value.to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_unedited_prompt_returns_the_pages_own_default_value() {
+        // The shown default is the cleaned copy; Accept makes the engine return the original.
+        assert_eq!(
+            reply_for(&prompt("Ada"), true, "Ada", "", false),
+            PageRequestReply::new(PageRequestAnswer::Accept)
+        );
+    }
+
+    #[test]
+    fn line_breaks_never_reach_the_page_from_the_prompt_field() {
+        assert_eq!(
+            reply_for(&prompt("x"), true, "one\r\ntwo\nthree", "", false),
+            PageRequestReply::new(PageRequestAnswer::PromptText("onetwothree".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_reload_asks_to_reload_and_a_second_leave_prompt_offers_to_stop_asking() {
+        let mut controller = BrowserController::default();
+        let tab_id = controller.active_tab_id();
+        controller.handle_event(
+            tab_id,
+            BrowserEvent::AddressChanged {
+                url: "https://example.com/".to_owned(),
+            },
+        );
+        controller.queue_command(BrowserCommand::PointerButton {
+            action: talaria_core::PointerButtonAction::Down,
+            button: talaria_core::PointerButton::Left,
+            x: 0.0,
+            y: 0.0,
+        });
+        controller.queue_command(BrowserCommand::Reload);
+        for id in [1, 2] {
+            controller.handle_event(
+                tab_id,
+                BrowserEvent::PageRequested(PageRequest {
+                    id: PageRequestId::new(id),
+                    url: "https://example.com/".to_owned(),
+                    kind: PageRequestKind::LeavePage,
+                    received_at: Duration::ZERO,
+                }),
+            );
+        }
+
+        let view = page_request_view(
+            &controller.pending_page_request(tab_id).expect("pending"),
+            None,
+        );
+        assert_eq!(view.heading, "Reload this page?");
+        assert_eq!(view.message, "Changes you made may not be saved.");
+        assert_eq!(view.accept_label, "Reload");
+        assert_eq!(view.decline_label, "Stay");
+        assert_eq!(view.choice_label, BLOCK_LEAVE_PROMPTS_CHOICE);
+    }
+
+    #[test]
+    fn a_rejected_sign_in_says_so_before_the_https_warning() {
+        let mut controller = BrowserController::default();
+        let tab_id = controller.active_tab_id();
+        let sign_in = |id| {
+            BrowserEvent::PageRequested(PageRequest {
+                id: PageRequestId::new(id),
+                url: "http://127.0.0.1:8123/private".to_owned(),
+                kind: PageRequestKind::Authentication { for_proxy: false },
+                received_at: Duration::from_secs(id),
+            })
+        };
+        controller.handle_event(tab_id, sign_in(1));
+        controller.answer_page_request(
+            tab_id,
+            PageRequestId::new(1),
+            reply_for(
+                &PageRequestKind::Authentication { for_proxy: false },
+                true,
+                "alice",
+                "wrong",
+                false,
+            ),
+            Duration::from_secs(1),
+        );
+        controller.handle_event(tab_id, sign_in(2));
+
+        let view = page_request_view(
+            &controller.pending_page_request(tab_id).expect("pending"),
+            None,
+        );
+        assert_eq!(view.warning, format!("{CREDENTIALS_REJECTED}\n{NOT_HTTPS}"));
+    }
+
+    #[test]
+    fn answers_are_ignored_for_half_a_second_after_a_request_appears() {
+        let mut protector = InputProtector::default();
+        let first = PageRequestId::new(1);
+        let second = PageRequestId::new(2);
+        let at = |ms| Duration::from_millis(ms);
+
+        protector.show(Some(first), at(1_000));
+        assert!(!protector.accepts(first, at(1_000)));
+        assert!(!protector.accepts(first, at(1_499)));
+        assert!(protector.accepts(first, at(1_500)));
+        // Showing the same request again does not restart the time.
+        protector.show(Some(first), at(1_600));
+        assert!(protector.accepts(first, at(1_600)));
+        // A request that is not the one on screen is never answered.
+        assert!(!protector.accepts(second, at(5_000)));
+
+        protector.show(Some(second), at(2_000));
+        assert!(!protector.accepts(second, at(2_100)));
+        assert!(!protector.accepts(first, at(9_000)));
+        protector.show(None, at(3_000));
+        assert!(!protector.accepts(second, at(9_000)));
+    }
+
+    #[test]
+    fn escape_blocks_a_permission_prompt_unless_a_browser_field_has_focus() {
+        let permission = pending(
+            "https://example.com/",
+            PageRequestKind::Permission(PagePermission::PersistentStorage),
+        );
+        let alert = pending(
+            "https://example.com/",
+            PageRequestKind::Alert {
+                message: String::new(),
+            },
+        );
+
+        assert_eq!(
+            permission_escape_target(Some(&permission), true, false),
+            Some(PageRequestId::new(42))
+        );
+        assert_eq!(
+            permission_escape_target(Some(&permission), true, true),
+            None
+        );
+        assert_eq!(
+            permission_escape_target(Some(&permission), false, false),
+            None
+        );
+        assert_eq!(permission_escape_target(Some(&alert), true, false), None);
+        assert_eq!(permission_escape_target(None, true, false), None);
     }
 }

@@ -20,6 +20,14 @@ use url::Url;
 /// soon as it is closed always falls inside it, a person reading and answering rarely does.
 pub const SUCCESSIVE_DIALOG_INTERVAL: Duration = Duration::from_secs(3);
 
+/// A sign-in for an origin that arrives within this time after the user sent credentials to it
+/// is taken as the site rejecting them.
+pub const SIGN_IN_RETRY_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Combining marks kept after one base character; more are dropped so that stacked marks cannot
+/// draw over the text around the message.
+pub const MAX_COMBINING_MARKS: usize = 3;
+
 /// Longest page-supplied message kept, in characters; the rest is cut off with an ellipsis.
 pub const MAX_MESSAGE_CHARS: usize = 10_000;
 /// Longest default value of a `prompt()` kept, in characters.
@@ -58,6 +66,19 @@ pub enum PagePermission {
 }
 
 impl PagePermission {
+    /// Whether the user is asked. Everything else is denied without a prompt, including any
+    /// variant added later. Only persistent storage does something in Mercury today:
+    /// - notifications, push, background sync: no notification or service-worker UI yet;
+    /// - camera, microphone, speaker, device info: WebRTC and `getUserMedia` are off;
+    /// - MIDI, Bluetooth, gamepad: no device support is built or exposed;
+    /// - geolocation and screen wake lock: their engine preferences (`dom_geolocation_enabled`,
+    ///   `dom_wakelock_enabled`) are off. Add them here when they are turned on.
+    ///
+    /// A page can still name any of these in `navigator.permissions.request()`.
+    pub const fn is_promptable(self) -> bool {
+        matches!(self, Self::PersistentStorage)
+    }
+
     /// Completes "<site> wants to …".
     pub const fn description(self) -> &'static str {
         match self {
@@ -289,23 +310,27 @@ impl PageOrigin {
         let Ok(url) = Url::parse(url) else {
             return Self::unnamed();
         };
+        // The origin, not the URL: `blob:` URLs name their creator's origin, and user info is
+        // never part of it.
         let origin = url.origin();
-        if !origin.is_tuple() {
-            return Self::unnamed();
-        }
-        let Some(host) = url.host_str() else {
+        let url::Origin::Tuple(scheme, host, port) = &origin else {
             return Self::unnamed();
         };
-        // `host_str` is ASCII: internationalised names appear in their punycode form, so a
-        // look-alike name cannot pass for another.
-        let label = match url.port() {
-            Some(port) => format!("{host}:{port}"),
-            None => host.to_owned(),
+        // Hosts serialise as ASCII: internationalised names appear in their punycode form, so a
+        // look-alike name cannot pass for another; IPv6 addresses keep their brackets.
+        let label = if url::Url::parse(&format!("{scheme}://{host}/"))
+            .ok()
+            .and_then(|default| default.port_or_known_default())
+            == Some(*port)
+        {
+            host.to_string()
+        } else {
+            format!("{host}:{port}")
         };
         Self {
             label,
             key: Some(origin.ascii_serialization()),
-            secure: url.scheme() == "https",
+            secure: scheme == "https",
         }
     }
 
@@ -341,6 +366,8 @@ pub struct PendingPageRequest {
     kind: PageRequestKind,
     origin: PageOrigin,
     offers_to_block_dialogs: bool,
+    for_reload: bool,
+    credentials_rejected: bool,
 }
 
 impl PendingPageRequest {
@@ -357,9 +384,21 @@ impl PendingPageRequest {
         &self.origin
     }
 
-    /// Whether to offer "Don't allow this page to show more dialogs".
+    /// Whether to offer "Don't allow this page to show more dialogs" (for a leave prompt,
+    /// "Don't allow this page to ask again").
     pub const fn offers_to_block_dialogs(&self) -> bool {
         self.offers_to_block_dialogs
+    }
+
+    /// For a leave prompt: the user asked to reload the page.
+    pub const fn is_reload_prompt(&self) -> bool {
+        self.for_reload
+    }
+
+    /// For a sign-in: the user sent credentials to this origin moments ago, so the site most
+    /// likely rejected them.
+    pub const fn credentials_were_rejected(&self) -> bool {
+        self.credentials_rejected
     }
 }
 
@@ -377,18 +416,29 @@ pub(crate) struct PageRequests {
     /// Whether the user has clicked or typed in the current document; a page the user never
     /// interacted with may not ask before it is left.
     user_activated: bool,
+    /// "Don't allow this page to ask again", chosen on a leave prompt.
+    leave_prompts_blocked: bool,
+    last_leave_prompt_closed_at: Option<Duration>,
+    /// The user's latest navigation of this page was a reload.
+    reload_requested: bool,
+    /// The origin the user last sent credentials to, and when.
+    credentials_sent: Option<(String, Duration)>,
 }
 
 impl PageRequests {
     pub(crate) fn front(&self) -> Option<PendingPageRequest> {
         let front = self.queue.front()?;
         let mut pending = front.pending.clone();
-        if pending.kind.is_simple_dialog() {
+        let same_group = |kind: &PageRequestKind| match pending.kind {
+            PageRequestKind::LeavePage => *kind == PageRequestKind::LeavePage,
+            _ => kind.is_simple_dialog(),
+        };
+        if pending.kind.is_blockable_dialog() {
             pending.offers_to_block_dialogs |= self
                 .queue
                 .iter()
                 .skip(1)
-                .any(|queued| queued.pending.kind.is_simple_dialog());
+                .any(|queued| same_group(&queued.pending.kind));
         }
         Some(pending)
     }
@@ -406,12 +456,15 @@ impl PageRequests {
             return Some(PageRequestAnswer::Discard);
         }
         match &kind {
+            PageRequestKind::LeavePage if self.leave_prompts_blocked => {
+                return Some(PageRequestAnswer::Discard);
+            }
             PageRequestKind::LeavePage if !self.user_activated => {
                 return Some(PageRequestAnswer::Accept);
             }
-            // There is no notification display yet, so notifications stay denied without a
-            // prompt.
-            PageRequestKind::Permission(PagePermission::Notifications) => {
+            // Features Mercury does not offer (notifications among them: there is no
+            // notification display yet) are denied without a prompt.
+            PageRequestKind::Permission(permission) if !permission.is_promptable() => {
                 return Some(PageRequestAnswer::Decline);
             }
             PageRequestKind::Permission(permission) => {
@@ -425,16 +478,32 @@ impl PageRequests {
             _ => {}
         }
 
-        let offers_to_block_dialogs = kind.is_simple_dialog()
-            && self.last_dialog_closed_at.is_some_and(|closed_at| {
+        let soon_after = |closed_at: Option<Duration>| {
+            closed_at.is_some_and(|closed_at| {
                 request.received_at.saturating_sub(closed_at) < SUCCESSIVE_DIALOG_INTERVAL
-            });
+            })
+        };
+        let offers_to_block_dialogs = match kind {
+            PageRequestKind::LeavePage => soon_after(self.last_leave_prompt_closed_at),
+            _ => kind.is_simple_dialog() && soon_after(self.last_dialog_closed_at),
+        };
+        let for_reload = kind == PageRequestKind::LeavePage && self.reload_requested;
+        let credentials_rejected = matches!(kind, PageRequestKind::Authentication { .. })
+            && self
+                .credentials_sent
+                .as_ref()
+                .is_some_and(|(sent_to, sent_at)| {
+                    origin.key() == Some(sent_to.as_str())
+                        && request.received_at.saturating_sub(*sent_at) < SIGN_IN_RETRY_INTERVAL
+                });
         self.queue.push_back(QueuedRequest {
             pending: PendingPageRequest {
                 id: request.id,
                 kind,
                 origin,
                 offers_to_block_dialogs,
+                for_reload,
+                credentials_rejected,
             },
         });
         None
@@ -453,13 +522,29 @@ impl PageRequests {
             .iter()
             .position(|queued| queued.pending.id == id)?;
         let answered = self.queue.remove(index)?.pending;
-        if answered.kind.is_simple_dialog() {
-            self.last_dialog_closed_at = Some(now);
-        }
         let mut discarded = Vec::new();
-        if reply.block_further_dialogs && answered.kind.is_blockable_dialog() {
-            self.dialogs_blocked = true;
-            discarded = self.take_where(|kind| kind.is_blockable_dialog());
+        match &answered.kind {
+            PageRequestKind::LeavePage => {
+                self.last_leave_prompt_closed_at = Some(now);
+                if reply.block_further_dialogs {
+                    self.leave_prompts_blocked = true;
+                    discarded = self.take_where(|kind| *kind == PageRequestKind::LeavePage);
+                }
+            }
+            kind if kind.is_simple_dialog() => {
+                self.last_dialog_closed_at = Some(now);
+                if reply.block_further_dialogs {
+                    self.dialogs_blocked = true;
+                    discarded = self.take_where(PageRequestKind::is_blockable_dialog);
+                }
+            }
+            PageRequestKind::Authentication { .. } => {
+                self.credentials_sent = match (&reply.answer, answered.origin.key()) {
+                    (PageRequestAnswer::Credentials(_), Some(key)) => Some((key.to_owned(), now)),
+                    _ => None,
+                };
+            }
+            _ => {}
         }
         Some((answered, discarded))
     }
@@ -489,9 +574,19 @@ impl PageRequests {
 
     /// A new document started loading: the old one's requests and per-page state go.
     pub(crate) fn start_new_document(&mut self) -> Vec<PageRequestId> {
-        self.dialogs_blocked = false;
-        self.last_dialog_closed_at = None;
-        self.user_activated = false;
+        let credentials_sent = self.credentials_sent.take();
+        let discarded = self.discard_all();
+        *self = Self {
+            // A sign-in that loads the next document fails with a new request for it.
+            credentials_sent,
+            ..Self::default()
+        };
+        discarded
+    }
+
+    /// The user navigates the page; `reload` when they reload it.
+    pub(crate) fn note_user_navigation(&mut self, reload: bool) -> Vec<PageRequestId> {
+        self.reload_requested = reload;
         self.discard_all()
     }
 
@@ -544,7 +639,25 @@ pub fn sanitize_page_text(text: &str, multiline: bool, max_chars: usize) -> Stri
     let mut sanitized = String::with_capacity(text.len().min(max_chars * 4));
     let mut characters = text.chars().peekable();
     let mut count = 0;
+    let mut combining_marks = 0;
+    let mut previous_was_variation_selector = false;
     while let Some(character) = characters.next() {
+        if is_variation_selector(character) {
+            if previous_was_variation_selector {
+                continue;
+            }
+            previous_was_variation_selector = true;
+        } else {
+            previous_was_variation_selector = false;
+        }
+        if is_combining_mark(character) {
+            combining_marks += 1;
+            if combining_marks > MAX_COMBINING_MARKS {
+                continue;
+            }
+        } else if !is_variation_selector(character) {
+            combining_marks = 0;
+        }
         let replacement = match character {
             '\r' => {
                 if characters.peek() == Some(&'\n') {
@@ -554,7 +667,7 @@ pub fn sanitize_page_text(text: &str, multiline: bool, max_chars: usize) -> Stri
             }
             '\n' | '\u{2028}' | '\u{2029}' | '\u{0085}' => Some('\n'),
             '\t' => Some(' '),
-            _ if is_direction_control(character) => None,
+            _ if is_direction_control(character) || is_invisible(character) => None,
             _ if character.is_control() => None,
             _ => Some(character),
         };
@@ -572,6 +685,55 @@ pub fn sanitize_page_text(text: &str, multiline: bool, max_chars: usize) -> Stri
         count += 1;
     }
     sanitized
+}
+
+/// Characters that draw nothing but can hide or pad text: zero-width space, non-joiner and joiner,
+/// word joiner and the invisible operators, the byte-order mark, the soft hyphen, the Hangul
+/// fillers and the tag characters.
+const fn is_invisible(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200B}'..='\u{200D}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{FEFF}'
+            | '\u{00AD}'
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{3164}'
+            | '\u{FFA0}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
+/// The variation selectors (VS1-VS16 and the supplement); runs keep only the first.
+const fn is_variation_selector(character: char) -> bool {
+    matches!(character, '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}')
+}
+
+/// The combining-mark blocks (diacritical marks, their extended and supplement blocks, marks for
+/// symbols, half marks). Marks of individual scripts are left alone; `talaria-core` has no Unicode
+/// tables beyond these ranges.
+const fn is_combining_mark(character: char) -> bool {
+    matches!(
+        character,
+        '\u{0300}'..='\u{036F}'
+            | '\u{1AB0}'..='\u{1AFF}'
+            | '\u{1DC0}'..='\u{1DFF}'
+            | '\u{20D0}'..='\u{20FF}'
+            | '\u{FE20}'..='\u{FE2F}'
+    )
+}
+
+/// The URL without its user name and password; text that is not a URL is returned unchanged.
+pub fn strip_user_info(url: &str) -> String {
+    match Url::parse(url) {
+        Ok(mut parsed) if !parsed.username().is_empty() || parsed.password().is_some() => {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.to_string()
+        }
+        _ => url.to_owned(),
+    }
 }
 
 /// Arabic letter mark, left-to-right and right-to-left marks, the embedding and override
@@ -647,6 +809,63 @@ mod tests {
             assert_eq!(origin.key(), None, "{url}");
             assert!(!origin.is_secure(), "{url}");
         }
+    }
+
+    #[test]
+    fn invisible_characters_are_removed() {
+        let text = "a\u{200B}b\u{200D}c\u{2060}d\u{2064}e\u{FEFF}f\u{00AD}g\u{115F}\u{1160}\u{3164}\u{FFA0}h\u{E0041}\u{E007F}i";
+        assert_eq!(sanitize_page_text(text, true, 100), "abcdefghi");
+    }
+
+    #[test]
+    fn runs_of_combining_marks_and_variation_selectors_are_capped() {
+        let stacked = format!("x{}y", "\u{0301}".repeat(500));
+        assert_eq!(
+            sanitize_page_text(&stacked, true, 10_000),
+            format!("x{}y", "\u{0301}".repeat(MAX_COMBINING_MARKS))
+        );
+        assert_eq!(
+            sanitize_page_text("a\u{FE0F}\u{FE0F}\u{FE0E}b\u{E0100}\u{E0101}", true, 100),
+            "a\u{FE0F}b\u{E0100}"
+        );
+        // A new base character starts a new run.
+        assert_eq!(
+            sanitize_page_text("e\u{0301}\u{0302}e\u{0301}", true, 100),
+            "e\u{0301}\u{0302}e\u{0301}"
+        );
+    }
+
+    #[test]
+    fn labels_never_show_user_info_and_name_ipv6_and_blob_origins() {
+        assert_eq!(
+            PageOrigin::from_url("https://alice:secret@example.com/").label(),
+            "example.com"
+        );
+        let ipv6 = PageOrigin::from_url("http://[::1]:8080/a");
+        assert_eq!(ipv6.label(), "[::1]:8080");
+        assert_eq!(ipv6.key(), Some("http://[::1]:8080"));
+        let blob = PageOrigin::from_url("blob:https://example.com/0f8c-11");
+        assert_eq!(blob.label(), "example.com");
+        assert_eq!(blob.key(), Some("https://example.com"));
+        assert!(blob.is_secure());
+        assert_eq!(
+            PageOrigin::from_url("https://example.com:443/").label(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn user_info_is_stripped_from_urls() {
+        assert_eq!(
+            strip_user_info("https://alice:pw@example.com/a?b#c"),
+            "https://example.com/a?b#c"
+        );
+        assert_eq!(
+            strip_user_info("https://example.com/"),
+            "https://example.com/"
+        );
+        assert_eq!(strip_user_info(""), "");
+        assert_eq!(strip_user_info("not a url"), "not a url");
     }
 
     #[test]

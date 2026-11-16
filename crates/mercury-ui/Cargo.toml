@@ -16,4 +16,5 @@ slint-build.workspace = true
 # application's Slint features are unchanged.
 [dev-dependencies]
 image.workspace = true
+talaria-core = { path = "../talaria-core" }
 slint = { workspace = true, features = ["renderer-software"] }

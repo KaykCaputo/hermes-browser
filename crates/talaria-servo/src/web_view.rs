@@ -1,5 +1,4 @@
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::cell::Cell;
 
 use dpi::PhysicalSize;
 use euclid::{Point2D, Scale};
@@ -18,7 +17,7 @@ use talaria_core::{PageRequestAnswer, PageRequestId};
 use url::Url;
 
 use crate::frame_ready::FrameReadySignal;
-use crate::page_requests::{EngineRequest, PendingEngineRequests, ServoPageRequest};
+use crate::page_requests::{ClosesOnDrop, EngineRequest, ServoPageRequest};
 use crate::{ServoWebViewError, ViewportSize};
 
 pub struct ServoWebView {
@@ -27,8 +26,9 @@ pub struct ServoWebView {
     tab_id: TabId,
     /// Device pixels per logical pixel; pointer positions arrive in logical pixels.
     scale_factor: Cell<f32>,
-    // dialogs
-    page_requests: Rc<RefCell<PendingEngineRequests<ServoPageRequest>>>,
+    // dialogs: closes the delegate's store when the web view goes, which gives every
+    // unanswered request the engine's default.
+    page_requests: ClosesOnDrop<ServoPageRequest>,
 }
 
 impl ServoWebView {
@@ -37,7 +37,7 @@ impl ServoWebView {
         frame_ready: FrameReadySignal,
         tab_id: TabId,
         scale_factor: f32,
-        page_requests: Rc<RefCell<PendingEngineRequests<ServoPageRequest>>>,
+        page_requests: ClosesOnDrop<ServoPageRequest>,
     ) -> Self {
         Self {
             inner,
@@ -83,10 +83,6 @@ impl ServoWebView {
 impl Drop for ServoWebView {
     fn drop(&mut self) {
         log::info!("closing Servo WebView for tab {}", self.tab_id.value());
-        // dialogs: unanswered requests get the engine's default now rather than whenever Servo
-        // lets go of the delegate, so no page waits on a tab that is gone.
-        let unanswered = self.page_requests.borrow_mut().close();
-        drop(unanswered);
     }
 }
 
@@ -228,7 +224,7 @@ impl TalariaWebView for ServoWebView {
         answer: PageRequestAnswer,
     ) -> Result<(), Self::Error> {
         // Taken out first, so answering never runs while the store is borrowed.
-        let request = self.page_requests.borrow_mut().take(id);
+        let request = self.page_requests.take(id);
         match request {
             Some(request) => request.respond(answer),
             None => log::debug!(

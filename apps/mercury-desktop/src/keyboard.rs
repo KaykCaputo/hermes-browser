@@ -38,6 +38,16 @@ pub(crate) fn connect_native_keyboard_input(
                     modifiers = changed.state();
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
+                    // dialogs: Escape blocks a permission prompt, which never takes focus.
+                    let escape = event.state == ElementState::Pressed
+                        && matches!(
+                            event.logical_key,
+                            Key::Named(winit::keyboard::NamedKey::Escape)
+                        );
+                    if crate::page_requests::handle_permission_escape(&window, &controller, escape)
+                    {
+                        return EventResult::PreventDefault;
+                    }
                     if handle_browser_shortcut(
                         &window,
                         &controller,
@@ -61,6 +71,10 @@ pub(crate) fn connect_native_keyboard_input(
                             .queue_command(BrowserCommand::KeyboardInput(keyboard_input));
                         window.window().request_redraw();
                     }
+                }
+                // dialogs: a page under a sheet gets no IME input; its composition ends.
+                WindowEvent::Ime(_) if crate::page_requests::sheet_shown(&controller.borrow()) => {
+                    dismiss_composition(&controller, &mut composition_tab_id);
                 }
                 WindowEvent::Ime(ime) if web_view_focused.get() || composition_tab_id.is_some() => {
                     queue_ime_input(&controller, &mut composition_tab_id, ime);

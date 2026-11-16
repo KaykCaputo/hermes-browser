@@ -452,8 +452,13 @@ impl BrowserController {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id() == tab_id) else {
             return;
         };
+        let awaiting_replacement = tab.is_awaiting_replacement();
         let requests = tab.page_requests_mut();
         match event {
+            // Sent by the web view that is being replaced: it never reaches the new page.
+            BrowserEvent::PageRequested(request) if awaiting_replacement => {
+                self.queue_page_request_answers(tab_id, &[request.id], PageRequestAnswer::Discard);
+            }
             BrowserEvent::PageRequested(request) => {
                 let id = request.id;
                 if let Some(answer) =
@@ -484,7 +489,8 @@ impl BrowserController {
             // The user is leaving the page: its questions no longer matter. Answering them first
             // also unblocks the page's script, which the navigation may need.
             command if command.targets_the_current_page() => {
-                let discarded = tab.page_requests_mut().discard_all();
+                let reload = matches!(command, BrowserCommand::Reload);
+                let discarded = tab.page_requests_mut().note_user_navigation(reload);
                 self.queue_page_request_answers(tab_id, &discarded, PageRequestAnswer::Discard);
             }
             BrowserCommand::PointerButton {

@@ -9,10 +9,9 @@ import {
 
 export component PermissionPrompt inherits Rectangle {
     in property <PageRequestView> request;
-    in property <bool> may-take-focus: true;
     // Where the address bar starts, relative to this element's parent.
     in property <length> anchor-x: 0px;
-    // accepted: Allow; checked: remember the decision for the site.
+    // accepted: Allow; checked: the choice under the question, if any.
     callback answered(/* id */ int, /* accepted */ bool, /* checked */ bool);
 
     property <int> shown-id: -1;
@@ -24,9 +23,6 @@ export component PermissionPrompt inherits Rectangle {
         }
         root.shown-id = root.request.id;
         root.checked = false;
-        if root.may-take-focus {
-            keys.focus();
-        }
     }
 
     function answer(accepted: bool) {
@@ -41,47 +37,39 @@ export component PermissionPrompt inherits Rectangle {
         root.show-request();
     }
 
-    // Fills the content area without taking input; only the bubble does.
+    // Fills the content area without taking input; only the bubble does. The bubble never takes
+    // keyboard focus: Escape (Block) is handled by the browser window instead.
     bubble := Rectangle {
-    x: Math.max(8px, Math.min(root.anchor-x, root.width - self.width - 8px));
-    y: 6px;
-    width: Math.min(root.width - 16px, 380px);
-    height: layout.preferred-height + 8px;
+        x: Math.max(8px, Math.min(root.anchor-x, root.width - self.width - 8px));
+        // The arrow overlaps the toolbar's bottom edge, which a page cannot draw over.
+        y: -4px;
+        width: Math.min(root.width - 16px, 380px);
+        height: layout.preferred-height + 8px;
 
-    // The arrow pointing at the address bar.
-    Path {
-        x: 22px;
-        y: 0px;
-        width: 16px;
-        height: 9px;
-        fill: #18212b;
-        stroke: #3a4a5c;
-        stroke-width: 1px;
-        commands: "M 0 9 L 8 0 L 16 9";
-    }
+        // The arrow pointing at the address bar.
+        Path {
+            x: 22px;
+            y: 0px;
+            width: 16px;
+            height: 9px;
+            fill: #18212b;
+            stroke: #3a4a5c;
+            stroke-width: 1px;
+            commands: "M 0 9 L 8 0 L 16 9";
+        }
 
-    Rectangle {
-        y: 8px;
-        height: parent.height - 8px;
-        background: #18212b;
-        border-width: 1px;
-        border-color: #3a4a5c;
-        border-radius: 10px;
-        drop-shadow-blur: 20px;
-        drop-shadow-color: #00000090;
-        drop-shadow-offset-y: 4px;
+        Rectangle {
+            y: 8px;
+            height: parent.height - 8px;
+            background: #18212b;
+            border-width: 1px;
+            border-color: #3a4a5c;
+            border-radius: 10px;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: #00000090;
+            drop-shadow-offset-y: 4px;
 
-        TouchArea { }
-
-        keys := FocusScope {
-            key-pressed(event) => {
-                // Return does not grant a permission; only Escape (Block) has a key.
-                if event.text == Key.Escape {
-                    root.answer(false);
-                    return accept;
-                }
-                reject
-            }
+            TouchArea { }
 
             layout := VerticalLayout {
                 padding: 16px;
@@ -121,6 +109,5 @@ export component PermissionPrompt inherits Rectangle {
                 }
             }
         }
-    }
     }
 }

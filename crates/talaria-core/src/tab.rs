@@ -105,6 +105,11 @@ impl Tab {
     }
 
     // dialogs
+    /// The tab's web view is about to be replaced; requests still arriving come from the old one.
+    pub(crate) const fn is_awaiting_replacement(&self) -> bool {
+        matches!(self.initial_url, InitialUrl::Pending(Some(_)))
+    }
+
     pub(crate) const fn page_requests(&self) -> &PageRequests {
         &self.page_requests
     }
