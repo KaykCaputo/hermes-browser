@@ -25,6 +25,7 @@ mod panic_hook;
 #[cfg(target_os = "macos")]
 mod platform_macos;
 mod profile;
+mod quit;
 mod rendering;
 mod screen_metrics;
 mod screenshot;
@@ -115,6 +116,9 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
             Rc::clone(&screenshot_result),
         )
     });
+    let exit_request_timer = options
+        .exit_request
+        .map(|request| quit::start_exit_request(&window, request));
 
     let run_result = window.run();
 
@@ -132,6 +136,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     // Nothing may capture, pump or render while the engine shuts down, and the engine must be
     // gone before the window (and the renderer whose device Servo uses) is destroyed.
     drop(screenshot_timer);
+    drop(exit_request_timer);
     shut_down_engine(exit_code);
     drop(window);
 
