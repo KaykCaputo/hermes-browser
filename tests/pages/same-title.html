@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Same title</title>
+<style>
+  body { font: 24px -apple-system, sans-serif; margin: 40px; background: #fff; color: #000; }
+</style>
+</head>
+<body>
+<h1 id="heading">Same title</h1>
+<script>
+  // ?page=1 loads ?page=2, a new document with the same title. ?push changes the address with
+  // history.pushState. ?untitled moves on to a document without a title.
+  const query = location.search;
+  document.getElementById("heading").textContent = "Same title " + query;
+  window.addEventListener("load", () => {
+    setTimeout(() => {
+      if (query === "?page=1") {
+        location.href = "same-title.html?page=2";
+      } else if (query === "?push") {
+        history.pushState({}, "", "same-title.html?pushed-route");
+      } else if (query === "?untitled") {
+        location.href = "untitled.html";
+      }
+    }, 300);
+  });
+</script>
+</body>
+</html>

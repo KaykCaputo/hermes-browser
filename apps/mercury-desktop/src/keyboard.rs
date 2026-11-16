@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Instant;
 
 use mercury_ui::MainWindow;
 use slint::ComponentHandle;
@@ -51,6 +52,10 @@ pub(crate) fn connect_native_keyboard_input(
 
                     if web_view_focused.get() {
                         let active_tab_id = controller.borrow().active_tab_id();
+                        // activation (tabs lane)
+                        if crate::activation::is_activating_key(&event.logical_key, event.state) {
+                            crate::activation::note_user_activation(active_tab_id, Instant::now());
+                        }
                         let keyboard_input = keyboard_input_from_winit(
                             event,
                             modifiers,

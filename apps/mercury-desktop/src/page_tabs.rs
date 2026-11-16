@@ -1,25 +1,203 @@
 use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
+use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
-use talaria_core::{BrowserController, CloseTabOutcome, TabId};
-use talaria_servo::NewTabAllocator;
+use mercury_ui::MainWindow;
+use slint::ComponentHandle;
+use talaria_core::{
+    BrowserController, CloseTabOutcome, ColorScheme, DEFAULT_ZOOM_PERCENT, TabActivation, TabEvent,
+    TabId, WebView as TalariaWebView, display_origin,
+};
+use talaria_servo::{NewTabAllocator, ServoRuntime, ServoWebView};
 
-use crate::tab_close::quit_after_last_tab;
+use crate::activation::consume_user_activation;
+use crate::ui_sync::{keep_address_draft_for, sync_ui};
 
-/// The decision point for the "block pop-ups" setting: whether a page in `opener` may open a
-/// tab (`window.open`, `target=_blank`, Servo's "Open link in new view"). Today every request
-/// is allowed.
-///
-/// Servo 0.8.0 asks the embedder for every such tab and tells it nothing about user activation:
-/// `CreateNewWebViewRequest` carries only the responder, and Servo's own pop-up blocker step is a
-/// TODO (servo-script 0.8.0, `dom/window/windowproxy.rs`, "Step 8"). A blocking setting can
-/// therefore only refuse every page-opened tab, or judge by recent user input to `opener`.
-pub(crate) fn pages_may_open_tabs(_opener: TabId) -> bool {
-    true
+/// Set to `1` to turn pop-up blocking off for this run, as the "Block pop-ups" setting will.
+/// For automated checks of page-opened tabs, which cannot click.
+const ALLOW_POP_UPS_VARIABLE: &str = "MERCURY_ALLOW_POP_UPS";
+
+/// Remembers the origins the user allowed to open pop-ups. Session-scoped today; a profile
+/// store can implement it later.
+pub(crate) trait PopUpPermissions {
+    fn allows(&self, origin: &str) -> bool;
+    fn allow(&mut self, origin: &str);
 }
 
-/// Gives a page-opened web view its tab. Runs inside Servo's callback, which must answer at
-/// once: the opener's script thread waits for it.
+/// Allowed origins for this run only.
+#[derive(Debug, Default)]
+pub(crate) struct SessionPopUpPermissions {
+    origins: HashSet<String>,
+}
+
+impl PopUpPermissions for SessionPopUpPermissions {
+    fn allows(&self, origin: &str) -> bool {
+        self.origins.contains(origin)
+    }
+
+    fn allow(&mut self, origin: &str) {
+        self.origins.insert(origin.to_owned());
+    }
+}
+
+/// What happens to a tab a page asks to open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PopUpDecision {
+    /// Opened and selected: the user just clicked or typed in the opener.
+    Foreground,
+    /// Opened behind the active tab: the opener's origin is allowed, without a gesture.
+    Background,
+    Blocked,
+}
+
+/// Decides which tabs pages may open.
+///
+/// Servo 0.8.0 asks the embedder for every tab a page opens and says nothing about user
+/// activation (its own pop-up blocker step is a TODO in `dom/window/windowproxy.rs`), so the
+/// browser tracks activation itself (`crate::activation`): a pointer press or release, or a
+/// key press other than Escape or a modifier, forwarded to a tab's page lets that page open
+/// one tab within `ACTIVATION_WINDOW`. Background tabs receive no input and so can open
+/// nothing, unless the user allowed their origin.
+pub(crate) struct PopUpPolicy {
+    /// The "Block pop-ups" setting: on (the default) applies the rules above; off lets pages
+    /// open tabs at will, in front.
+    pub(crate) block_pop_ups: bool,
+    permissions: Box<dyn PopUpPermissions>,
+    /// The opener tabs that had a pop-up blocked, with the origin shown to the user.
+    blocked: HashMap<TabId, String>,
+    /// The indicator needs showing or hiding.
+    ui_changed: bool,
+}
+
+impl PopUpPolicy {
+    pub(crate) fn new(block_pop_ups: bool, permissions: Box<dyn PopUpPermissions>) -> Self {
+        Self {
+            block_pop_ups,
+            permissions,
+            blocked: HashMap::new(),
+            ui_changed: false,
+        }
+    }
+
+    /// Decides on a tab `opener` asks to open; `opener_origin` is its page's origin.
+    /// `consume_activation` uses up the opener's user activation if it has a recent one; it is
+    /// only called while pop-ups are blocked, so allowing all pop-ups leaves activations to the
+    /// file and colour pickers.
+    pub(crate) fn decide(
+        &mut self,
+        opener: TabId,
+        opener_origin: Option<&str>,
+        consume_activation: impl FnOnce() -> bool,
+    ) -> PopUpDecision {
+        if !self.block_pop_ups || consume_activation() {
+            return PopUpDecision::Foreground;
+        }
+        let Some(origin) = opener_origin else {
+            return PopUpDecision::Blocked;
+        };
+        if self.permissions.allows(origin) {
+            return PopUpDecision::Background;
+        }
+        self.blocked.insert(opener, origin.to_owned());
+        self.ui_changed = true;
+        PopUpDecision::Blocked
+    }
+
+    /// The origin to name in the "Pop-up blocked" indicator for `tab_id`, while its page is
+    /// still at that origin.
+    pub(crate) fn blocked_origin(
+        &self,
+        tab_id: TabId,
+        current_origin: Option<&str>,
+    ) -> Option<&str> {
+        self.blocked
+            .get(&tab_id)
+            .map(String::as_str)
+            .filter(|origin| Some(*origin) == current_origin)
+    }
+
+    /// "Allow pop-ups from <origin>" was chosen in `tab_id`'s indicator.
+    pub(crate) fn allow_blocked(&mut self, tab_id: TabId) {
+        if let Some(origin) = self.blocked.remove(&tab_id) {
+            self.permissions.allow(&origin);
+        }
+    }
+
+    pub(crate) fn dismiss_blocked(&mut self, tab_id: TabId) {
+        self.blocked.remove(&tab_id);
+    }
+
+    pub(crate) fn take_ui_changed(&mut self) -> bool {
+        std::mem::take(&mut self.ui_changed)
+    }
+}
+
+thread_local! {
+    static POP_UPS: RefCell<PopUpPolicy> = RefCell::new(PopUpPolicy::new(
+        std::env::var(ALLOW_POP_UPS_VARIABLE).as_deref() != Ok("1"),
+        Box::new(SessionPopUpPermissions::default()),
+    ));
+}
+
+/// Whether, and how, the page in `opener` may open a tab now: the decision point for the
+/// "Block pop-ups" setting, whose switch is `PopUpPolicy::block_pop_ups`.
+pub(crate) fn pages_may_open_tabs(
+    opener: TabId,
+    opener_origin: Option<&str>,
+    now: Instant,
+) -> PopUpDecision {
+    POP_UPS.with(|policy| {
+        policy
+            .try_borrow_mut()
+            .map_or(PopUpDecision::Blocked, |mut policy| {
+                policy.decide(opener, opener_origin, || {
+                    consume_user_activation(opener, now)
+                })
+            })
+    })
+}
+
+/// The origin to name in the active tab's "Pop-up blocked" indicator.
+pub(crate) fn blocked_pop_up_origin(tab_id: TabId, url: &str) -> Option<String> {
+    let current_origin = display_origin(url);
+    POP_UPS.with(|policy| {
+        policy
+            .try_borrow()
+            .ok()?
+            .blocked_origin(tab_id, current_origin.as_deref())
+            .map(str::to_owned)
+    })
+}
+
+/// Connects the "Pop-up blocked" indicator's buttons.
+pub(crate) fn connect_pop_up_indicator(
+    window: &MainWindow,
+    controller: &Rc<RefCell<BrowserController>>,
+) {
+    let allow_controller = Rc::clone(controller);
+    let allow_window = window.as_weak();
+    window.on_allow_pop_ups(move || {
+        let tab_id = allow_controller.borrow().active_tab_id();
+        POP_UPS.with(|policy| policy.borrow_mut().allow_blocked(tab_id));
+        if let Some(window) = allow_window.upgrade() {
+            sync_ui(&window, &allow_controller.borrow());
+        }
+    });
+    let dismiss_controller = Rc::clone(controller);
+    let dismiss_window = window.as_weak();
+    window.on_dismiss_pop_up_blocked(move || {
+        let tab_id = dismiss_controller.borrow().active_tab_id();
+        POP_UPS.with(|policy| policy.borrow_mut().dismiss_blocked(tab_id));
+        if let Some(window) = dismiss_window.upgrade() {
+            sync_ui(&window, &dismiss_controller.borrow());
+        }
+    });
+}
+
+/// Gives a page-opened web view its tab, if the pop-up policy allows it. Runs inside Servo's
+/// callback, which must answer at once: the opener's script thread waits for it.
 pub(crate) fn new_tab_allocator(controller: &Rc<RefCell<BrowserController>>) -> NewTabAllocator {
     let controller = Rc::downgrade(controller);
     Rc::new(move |opener| allocate_page_tab(&controller, opener))
@@ -29,10 +207,6 @@ fn allocate_page_tab(
     controller: &Weak<RefCell<BrowserController>>,
     opener: TabId,
 ) -> Option<TabId> {
-    if !pages_may_open_tabs(opener) {
-        log::info!("tab {}: blocked a tab opened by the page", opener.value());
-        return None;
-    }
     let controller = controller.upgrade()?;
     let Ok(mut controller) = controller.try_borrow_mut() else {
         log::warn!(
@@ -41,17 +215,77 @@ fn allocate_page_tab(
         );
         return None;
     };
-    controller.adopt_tab(opener)
+    let opener_origin = controller
+        .tabs()
+        .find(|tab| tab.id() == opener)
+        .and_then(|tab| display_origin(tab.state().url()));
+    match pages_may_open_tabs(opener, opener_origin.as_deref(), Instant::now()) {
+        PopUpDecision::Blocked => {
+            log::info!("tab {}: blocked a pop-up", opener.value());
+            None
+        }
+        PopUpDecision::Background => controller.adopt_tab(opener, TabActivation::Background),
+        PopUpDecision::Foreground => {
+            let tab_id = controller.adopt_tab(opener, TabActivation::Foreground)?;
+            keep_address_draft_for(tab_id);
+            Some(tab_id)
+        }
+    }
 }
 
-/// The page in `tab_id` closed its tab. Returns whether a tab was closed; closing the last tab
-/// quits.
+/// What `adopt_page_web_views` changed.
+pub(crate) struct Adoption {
+    /// Web views pages opened were added.
+    pub(crate) web_views_added: bool,
+    /// The tab strip or the pop-up indicator must be redrawn.
+    pub(crate) ui_changed: bool,
+}
+
+/// Takes the web views pages opened during the last spin, so the creation loop sees that
+/// their tabs have one, and gives each the tab's zoom and the colour scheme.
+pub(crate) fn adopt_page_web_views(
+    runtime: &ServoRuntime,
+    controller: &RefCell<BrowserController>,
+    web_views: &mut HashMap<TabId, ServoWebView>,
+    event_receivers: &mut HashMap<TabId, Receiver<TabEvent>>,
+) -> Adoption {
+    let adopted = runtime.take_adopted_web_views();
+    let web_views_added = !adopted.is_empty();
+    for (tab_id, mut web_view, event_receiver) in adopted {
+        let Some((zoom_percent, color_scheme)) = tab_settings(&controller.borrow(), tab_id) else {
+            continue;
+        };
+        if zoom_percent != DEFAULT_ZOOM_PERCENT {
+            let _zoom_result = web_view.set_page_zoom(zoom_percent);
+        }
+        let _scheme_result = web_view.set_color_scheme(color_scheme);
+        web_views.insert(tab_id, web_view);
+        event_receivers.insert(tab_id, event_receiver);
+    }
+    let ui_changed = POP_UPS.with(|policy| {
+        policy
+            .try_borrow_mut()
+            .is_ok_and(|mut policy| policy.take_ui_changed())
+    });
+    Adoption {
+        web_views_added,
+        ui_changed: web_views_added || ui_changed,
+    }
+}
+
+fn tab_settings(controller: &BrowserController, tab_id: TabId) -> Option<(u16, ColorScheme)> {
+    let tab = controller.tabs().find(|tab| tab.id() == tab_id)?;
+    Some((tab.state().zoom_percent(), controller.color_scheme()))
+}
+
+/// The page in `tab_id` closed its tab. Returns whether the tabs changed. A page never quits
+/// the browser: if it closes the last tab, a blank tab takes its place.
 pub(crate) fn close_page_tab(controller: &mut BrowserController, tab_id: TabId) -> bool {
     match controller.close_tab(tab_id) {
         CloseTabOutcome::Closed => true,
         CloseTabOutcome::LastTab => {
-            quit_after_last_tab();
-            false
+            controller.open_tab();
+            controller.close_tab(tab_id) == CloseTabOutcome::Closed
         }
         CloseTabOutcome::NotFound => false,
     }
@@ -59,25 +293,225 @@ pub(crate) fn close_page_tab(controller: &mut BrowserController, tab_id: TabId) 
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use talaria_core::BrowserEvent;
 
     use super::*;
+    use crate::activation::{ACTIVATION_WINDOW, Activations};
 
-    #[test]
-    fn pages_may_open_tabs_by_default() {
-        assert!(pages_may_open_tabs(TabId::new(1)));
+    const OPENER: TabId = TabId::new(1);
+    const ORIGIN: Option<&str> = Some("https://a.test");
+
+    fn policy() -> PopUpPolicy {
+        PopUpPolicy::new(true, Box::new(SessionPopUpPermissions::default()))
+    }
+
+    /// Decides with `activations` standing in for the per-tab activation state.
+    fn decide(
+        policy: &mut PopUpPolicy,
+        activations: &mut Activations,
+        opener: TabId,
+        now: Instant,
+    ) -> PopUpDecision {
+        policy.decide(opener, ORIGIN, || activations.consume(opener, now))
     }
 
     #[test]
-    fn the_allocator_adopts_a_tab_after_the_opener() {
-        let controller = Rc::new(RefCell::new(BrowserController::default()));
-        let opener = controller.borrow().active_tab_id();
-        let allocator = new_tab_allocator(&controller);
+    fn a_gesture_lets_the_page_open_one_tab_in_front() {
+        let (mut policy, mut activations) = (policy(), Activations::default());
+        let now = Instant::now();
+        activations.note(OPENER, now);
 
-        let adopted = allocator(opener).expect("the opener exists");
+        assert_eq!(
+            decide(
+                &mut policy,
+                &mut activations,
+                OPENER,
+                now + Duration::from_millis(200)
+            ),
+            PopUpDecision::Foreground
+        );
+    }
 
-        assert_eq!(controller.borrow().active_tab_id(), adopted);
-        assert_eq!(allocator(TabId::new(999)), None);
+    #[test]
+    fn a_second_pop_up_from_one_gesture_is_refused() {
+        let (mut policy, mut activations) = (policy(), Activations::default());
+        let now = Instant::now();
+        activations.note(OPENER, now);
+
+        assert_eq!(
+            decide(&mut policy, &mut activations, OPENER, now),
+            PopUpDecision::Foreground
+        );
+        assert_eq!(
+            decide(&mut policy, &mut activations, OPENER, now),
+            PopUpDecision::Blocked
+        );
+    }
+
+    #[test]
+    fn a_background_tab_cannot_open_a_tab() {
+        let (mut policy, mut activations) = (policy(), Activations::default());
+        let now = Instant::now();
+        let active = TabId::new(2);
+        // Only the active tab ever receives input.
+        activations.note(active, now);
+
+        assert_eq!(
+            decide(&mut policy, &mut activations, OPENER, now),
+            PopUpDecision::Blocked
+        );
+        assert_eq!(
+            decide(&mut policy, &mut activations, active, now),
+            PopUpDecision::Foreground
+        );
+    }
+
+    #[test]
+    fn an_activation_older_than_a_second_is_refused() {
+        let (mut policy, mut activations) = (policy(), Activations::default());
+        let now = Instant::now();
+        activations.note(OPENER, now);
+
+        assert_eq!(
+            decide(
+                &mut policy,
+                &mut activations,
+                OPENER,
+                now + ACTIVATION_WINDOW
+            ),
+            PopUpDecision::Blocked
+        );
+    }
+
+    #[test]
+    fn an_allowed_origin_opens_in_the_background() {
+        let (mut policy, mut activations) = (policy(), Activations::default());
+        let now = Instant::now();
+        assert_eq!(
+            decide(&mut policy, &mut activations, OPENER, now),
+            PopUpDecision::Blocked
+        );
+        assert_eq!(policy.blocked_origin(OPENER, ORIGIN), ORIGIN);
+
+        policy.allow_blocked(OPENER);
+
+        assert_eq!(policy.blocked_origin(OPENER, ORIGIN), None);
+        assert_eq!(
+            decide(&mut policy, &mut activations, OPENER, now),
+            PopUpDecision::Background
+        );
+        // Another tab of the same origin is allowed too; a gesture still opens in front.
+        assert_eq!(
+            decide(&mut policy, &mut activations, TabId::new(3), now),
+            PopUpDecision::Background
+        );
+        activations.note(OPENER, now);
+        assert_eq!(
+            decide(&mut policy, &mut activations, OPENER, now),
+            PopUpDecision::Foreground
+        );
+    }
+
+    #[test]
+    fn a_blocked_pop_up_is_reported_for_the_openers_origin_until_dismissed_or_it_navigates_away() {
+        let (mut policy, mut activations) = (policy(), Activations::default());
+        let now = Instant::now();
+        assert_eq!(
+            decide(&mut policy, &mut activations, OPENER, now),
+            PopUpDecision::Blocked
+        );
+        assert!(policy.take_ui_changed());
+        assert!(!policy.take_ui_changed());
+
+        assert_eq!(policy.blocked_origin(OPENER, ORIGIN), ORIGIN);
+        assert_eq!(policy.blocked_origin(TabId::new(2), ORIGIN), None);
+        assert_eq!(policy.blocked_origin(OPENER, Some("https://b.test")), None);
+
+        policy.dismiss_blocked(OPENER);
+        assert_eq!(policy.blocked_origin(OPENER, ORIGIN), None);
+        assert_eq!(
+            decide(&mut policy, &mut activations, OPENER, now),
+            PopUpDecision::Blocked
+        );
+    }
+
+    #[test]
+    fn a_page_without_an_origin_is_blocked_without_an_indicator() {
+        let mut policy = policy();
+
+        assert_eq!(
+            policy.decide(OPENER, None, || false),
+            PopUpDecision::Blocked
+        );
+        assert_eq!(policy.blocked_origin(OPENER, None), None);
+    }
+
+    #[test]
+    fn with_blocking_off_every_page_opens_tabs_in_front_and_keeps_its_activation() {
+        let mut policy = PopUpPolicy::new(false, Box::new(SessionPopUpPermissions::default()));
+        let mut activations = Activations::default();
+        let now = Instant::now();
+        activations.note(OPENER, now);
+
+        assert_eq!(
+            decide(&mut policy, &mut activations, OPENER, now),
+            PopUpDecision::Foreground
+        );
+        assert_eq!(
+            policy.decide(OPENER, None, || false),
+            PopUpDecision::Foreground
+        );
+        assert!(activations.consume(OPENER, now));
+    }
+
+    #[test]
+    fn the_decision_point_uses_up_the_tabs_user_activation() {
+        let tab_id = TabId::new(77);
+        let now = Instant::now();
+        crate::activation::note_user_activation(tab_id, now);
+
+        assert_eq!(
+            pages_may_open_tabs(tab_id, ORIGIN, now),
+            PopUpDecision::Foreground
+        );
+        assert_eq!(
+            pages_may_open_tabs(tab_id, ORIGIN, now),
+            PopUpDecision::Blocked
+        );
+    }
+
+    fn ready_controller() -> (BrowserController, TabId) {
+        let mut controller = BrowserController::default();
+        let tab_id = controller.active_tab_id();
+        controller.handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() });
+        (controller, tab_id)
+    }
+
+    #[test]
+    fn a_page_closing_its_tab_returns_to_the_opener() {
+        let (mut controller, opener) = ready_controller();
+        let adopted = controller
+            .adopt_tab(opener, TabActivation::Foreground)
+            .expect("the opener exists");
+
+        assert!(close_page_tab(&mut controller, adopted));
+        assert_eq!(controller.active_tab_id(), opener);
+        assert_eq!(controller.tabs().len(), 1);
+    }
+
+    #[test]
+    fn a_page_closing_the_last_tab_leaves_a_blank_tab_instead_of_quitting() {
+        let (mut controller, tab_id) = ready_controller();
+
+        assert!(close_page_tab(&mut controller, tab_id));
+
+        assert_eq!(controller.tabs().len(), 1);
+        let blank = controller.active_tab_id();
+        assert_ne!(blank, tab_id);
+        assert_eq!(controller.state().url(), "");
+        assert_eq!(controller.state().page_title(), "New Tab");
     }
 
     #[test]
@@ -98,17 +532,5 @@ mod tests {
         drop(controller);
 
         assert_eq!(allocator(opener), None);
-    }
-
-    #[test]
-    fn a_page_closing_its_tab_returns_to_the_opener() {
-        let mut controller = BrowserController::default();
-        let opener = controller.active_tab_id();
-        controller.handle_event(opener, BrowserEvent::AddressChanged { url: String::new() });
-        let adopted = controller.adopt_tab(opener).expect("the opener exists");
-
-        assert!(close_page_tab(&mut controller, adopted));
-        assert_eq!(controller.active_tab_id(), opener);
-        assert_eq!(controller.tabs().len(), 1);
     }
 }

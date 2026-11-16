@@ -20,6 +20,9 @@ use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
+use crate::page_feedback::{
+    DOCUMENT_TITLE_SCRIPT, PageFeedback, reads_title_after_address_change, reads_title_at,
+};
 use crate::page_tabs::{AdoptedWebView, NewTabAllocator, PageTabs};
 use crate::screen::ScreenMetrics;
 use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
@@ -191,6 +194,7 @@ impl ServoRuntime {
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
             page_tabs: Rc::downgrade(&self.page_tabs),
+            page_feedback: Rc::default(),
             _after_engine_cleanup: self.after_engine_cleanup.clone(),
         });
 
@@ -351,6 +355,8 @@ struct BrowserDelegate {
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
     /// Weak: queued web views hold their delegates, which must not keep the queue alive.
     page_tabs: Weak<PageTabs>,
+    /// Title and icon kept right across documents; see `PageFeedback`.
+    page_feedback: Rc<PageFeedback>,
     /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
     _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }
@@ -360,6 +366,20 @@ impl BrowserDelegate {
         let _send_result = self
             .browser_event_sender
             .send(TabEvent::new(self.tab_id, event));
+    }
+
+    // tabs
+    /// Reads `document.title` and sends it, unless the document or address changed meanwhile.
+    fn read_document_title(&self, web_view: &servo::WebView) {
+        let ticket = self.page_feedback.title_ticket();
+        let page_feedback = Rc::clone(&self.page_feedback);
+        let sender = self.browser_event_sender.clone();
+        let tab_id = self.tab_id;
+        web_view.evaluate_javascript(DOCUMENT_TITLE_SCRIPT, move |result| {
+            if let Some(event) = page_feedback.title_answer(ticket, result) {
+                let _send_result = sender.send(TabEvent::new(tab_id, event));
+            }
+        });
     }
 
     fn record_load_milestone(&self, milestone: LoadMilestone) {
@@ -391,10 +411,18 @@ impl servo::WebViewDelegate for BrowserDelegate {
             .handle_web_resource_load(Some(&web_view), load);
     }
 
-    fn notify_url_changed(&self, _web_view: servo::WebView, url: Url) {
+    fn notify_url_changed(&self, web_view: servo::WebView, url: Url) {
         self.send_browser_event(BrowserEvent::AddressChanged {
             url: display_url(&url),
         });
+        // tabs: a same-document navigation keeps the document's title and icon
+        let status = web_view.load_status();
+        for event in self.page_feedback.address_changed(status) {
+            self.send_browser_event(event);
+        }
+        if reads_title_after_address_change(status) {
+            self.read_document_title(&web_view);
+        }
     }
 
     fn notify_page_title_changed(&self, _web_view: servo::WebView, title: Option<String>) {
@@ -410,13 +438,17 @@ impl servo::WebViewDelegate for BrowserDelegate {
                 favicon.data(),
             )
         });
+        // tabs: remembered for same-document navigations
+        self.page_feedback.icon_changed(icon.clone());
 
         self.send_browser_event(BrowserEvent::PageIconChanged { icon });
     }
 
-    fn notify_load_status_changed(&self, _web_view: servo::WebView, status: LoadStatus) {
+    fn notify_load_status_changed(&self, web_view: servo::WebView, status: LoadStatus) {
         match status {
             LoadStatus::Started => {
+                // tabs: a new document has no title or icon yet
+                self.page_feedback.document_started();
                 self.load_metrics.borrow_mut().start(Instant::now());
                 info!("tab {}: page load started", self.tab_id.value());
             }
@@ -428,6 +460,10 @@ impl servo::WebViewDelegate for BrowserDelegate {
         self.send_browser_event(BrowserEvent::LoadStateChanged {
             state: load_state_from_servo(status),
         });
+        // tabs: Servo only notifies a title that differs from its cached one
+        if reads_title_at(status) {
+            self.read_document_title(&web_view);
+        }
     }
 
     fn notify_history_changed(&self, _web_view: servo::WebView, entries: Vec<Url>, current: usize) {
@@ -489,6 +525,7 @@ impl servo::WebViewDelegate for BrowserDelegate {
             content_blocker: Rc::clone(&page_tabs.content_blocker),
             screen_metrics: Rc::clone(&page_tabs.screen_metrics),
             page_tabs: Rc::downgrade(&page_tabs),
+            page_feedback: Rc::default(),
             _after_engine_cleanup: page_tabs.after_engine_cleanup.clone(),
         });
         let scale_factor = parent.hidpi_scale_factor();
@@ -498,8 +535,9 @@ impl servo::WebViewDelegate for BrowserDelegate {
             .delegate(delegate)
             .user_content_manager(Rc::clone(&page_tabs.user_content))
             .build();
-        // New auxiliary web views start visible and share the opener's rendering context.
-        parent.hide();
+        // Servo creates auxiliary web views visible, and all tabs share one rendering context:
+        // the engine shows whichever tab becomes active.
+        inner.hide();
 
         for event in new_web_view_feedback(inner.cursor(), inner.status_text()) {
             let _send_result = browser_event_sender.send(TabEvent::new(tab_id, event));

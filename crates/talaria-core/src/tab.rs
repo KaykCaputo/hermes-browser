@@ -33,6 +33,7 @@ pub struct Tab {
     state: BrowserState,
     initial_url: InitialUrl,
     engine_ready: bool,
+    opened_by_page: bool,
 }
 
 impl Tab {
@@ -42,7 +43,20 @@ impl Tab {
             state,
             initial_url: InitialUrl::Pending(None),
             engine_ready: false,
+            opened_by_page: false,
         }
+    }
+
+    pub(crate) fn opened_by_page(id: TabId, state: BrowserState) -> Self {
+        Self {
+            opened_by_page: true,
+            ..Self::new(id, state)
+        }
+    }
+
+    /// True for a tab a page opened (`window.open`, `target=_blank`).
+    pub const fn is_opened_by_page(&self) -> bool {
+        self.opened_by_page
     }
 
     pub const fn id(&self) -> TabId {

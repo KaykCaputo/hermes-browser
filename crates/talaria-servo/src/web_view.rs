@@ -64,6 +64,11 @@ impl ServoWebView {
         true
     }
 
+    /// Paints the shared rendering context now, whether or not a new frame was announced.
+    pub fn paint(&self) {
+        self.inner.paint();
+    }
+
     /// Forgets a frame announced before now. A hidden web view is told about every frame of the
     /// shared rendering context, including frames drawn while another tab was shown; after
     /// `show()` only a frame announced later contains this web view.

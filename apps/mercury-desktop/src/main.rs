@@ -15,6 +15,8 @@ use talaria_core::{BrowserController, TabActivation};
 use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
+// activation (tabs lane)
+mod activation;
 mod callbacks;
 mod cli;
 mod crash_handler;
@@ -38,6 +40,8 @@ mod shortcuts;
 mod shutdown;
 // tabs
 mod tab_close;
+// tabs
+mod tab_switch_frame;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {
@@ -125,6 +129,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
     );
+    // tabs: the "Pop-up blocked" indicator
+    page_tabs::connect_pop_up_indicator(&window, &controller);
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
 
     let screenshot_result = Rc::new(Cell::new(ScreenshotResult::Pending));

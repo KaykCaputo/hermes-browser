@@ -1,0 +1,78 @@
+// Shown in the toolbar when the active tab's page tried to open a pop-up without a click or
+// key press. It is part of the browser's chrome, never of the page area, and names the origin.
+export component PopUpBlockedIndicator inherits Rectangle {
+    in property <string> origin;
+    callback allow;
+    callback dismiss;
+
+    height: 34px;
+    max-width: 420px;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #3a4552;
+    background: #19222c;
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 4px;
+        spacing: 8px;
+
+        Text {
+            text: "Pop-up blocked";
+            color: #edf4fa;
+            font-size: 12px;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+
+        allow-button := Rectangle {
+            horizontal-stretch: 1;
+            min-width: 80px;
+            height: 26px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: allow-touch.pressed
+                ? #2b3744
+                : allow-touch.has-hover ? #222c37 : #1f2832;
+
+            Text {
+                x: 8px;
+                width: parent.width - 16px;
+                height: parent.height;
+                text: "Allow pop-ups from " + root.origin;
+                color: #71c5ff;
+                font-size: 12px;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+
+            allow-touch := TouchArea {
+                clicked => {
+                    root.allow();
+                }
+            }
+        }
+
+        Rectangle {
+            width: 24px;
+            height: 24px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 6px;
+            background: dismiss-touch.has-hover ? #222c37 : transparent;
+
+            Text {
+                text: "×";
+                color: #9aa6b5;
+                font-size: 15px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            dismiss-touch := TouchArea {
+                clicked => {
+                    root.dismiss();
+                }
+            }
+        }
+    }
+}

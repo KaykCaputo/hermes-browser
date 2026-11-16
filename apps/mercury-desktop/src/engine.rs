@@ -23,6 +23,7 @@ use crate::shutdown::{
     ENGINE_SHUTDOWN_TIMEOUT, EngineParts, Watchdog, drop_catching_panic, release_in_order,
     settle_period, spin_for,
 };
+use crate::tab_switch_frame::TabSwitchFrame;
 use crate::ui_sync::sync_ui;
 
 pub(crate) const MAX_COMMANDS_PER_FRAME: usize = 128;
@@ -62,6 +63,8 @@ struct EngineState {
     web_view_created: bool,
     /// What pages were last told about the screen and window.
     screen_metrics: Option<ScreenMetrics>,
+    /// tabs: bounds how long the previous tab's frame stays up after a switch.
+    tab_switch_frame: TabSwitchFrame,
 }
 
 enum GraphicsStatus {
@@ -83,13 +86,12 @@ pub(crate) fn connect_servo_runtime(
         let _queued = slint::invoke_from_event_loop(pump_after_wake);
     });
 
-    let runtime = ServoRuntime::new(event_loop_waker, runtime_options);
     // tabs opened by pages
-    runtime.set_new_tab_allocator(crate::page_tabs::new_tab_allocator(&controller));
+    let new_tab_allocator = crate::page_tabs::new_tab_allocator(&controller);
     let engine = Rc::new(Engine {
         window: window.as_weak(),
         state: RefCell::new(Some(EngineState {
-            runtime,
+            runtime: ServoRuntime::new(event_loop_waker, runtime_options),
             controller,
             web_view_focused,
             rendering_context: None,
@@ -101,9 +103,14 @@ pub(crate) fn connect_servo_runtime(
             current_scale_factor: None,
             web_view_created: false,
             screen_metrics: None,
+            tab_switch_frame: TabSwitchFrame::default(),
         })),
         bootstrap_failure_logged: Cell::new(false),
     });
+    // tabs opened by pages
+    if let Some(state) = engine.state.borrow().as_ref() {
+        state.runtime.set_new_tab_allocator(new_tab_allocator);
+    }
     ENGINE.with(|current| *current.borrow_mut() = Rc::downgrade(&engine));
     schedule_graphics_bootstrap(Rc::downgrade(&engine), GRAPHICS_BOOTSTRAP_DELAY);
 
@@ -325,7 +332,14 @@ impl EngineState {
             is_engine_ready(&controller, controller.active_tab_id())
         };
         // tabs opened by pages: before the events, so the new tabs' first events are applied
-        let mut state_changed = self.adopt_page_web_views();
+        let adoption = crate::page_tabs::adopt_page_web_views(
+            &self.runtime,
+            &self.controller,
+            &mut self.web_views,
+            &mut self.event_receivers,
+        );
+        self.web_view_created |= adoption.web_views_added;
+        let mut state_changed = adoption.ui_changed;
         for receiver in self.event_receivers.values() {
             state_changed |= apply_pending_browser_events(&self.controller, receiver);
         }
@@ -356,6 +370,14 @@ impl EngineState {
             let tab_ids = controller.tabs().map(|tab| tab.id()).collect::<Vec<_>>();
             (active_tab_id, tab_ids)
         };
+        // activation (tabs lane): closed tabs forget their activation
+        for closed in self
+            .web_views
+            .keys()
+            .filter(|tab_id| !tab_ids.contains(tab_id))
+        {
+            crate::activation::forget_tab(*closed);
+        }
         self.web_views.retain(|tab_id, _| tab_ids.contains(tab_id));
         self.event_receivers
             .retain(|tab_id, _| tab_ids.contains(tab_id));
@@ -424,12 +446,15 @@ impl EngineState {
                 // Servo 0.8 couples visibility and throttling: show() resumes the active
                 // pipeline and hide() throttles background tabs.
                 active_web_view.show();
-                // tabs: wait for a frame drawn after show(); see `blank_until_new_tab_frame`
+                // tabs: only a frame announced after show() shows this tab; painting without
+                // importing ends the repaint Servo still owes for the earlier scene, which
+                // would otherwise announce it to every web view again
+                active_web_view.paint();
                 active_web_view.discard_ready_frame();
                 let _focus_result = active_web_view.set_focus(self.web_view_focused.get());
             }
-            // tabs: never leave the previous tab's frame on screen
-            blank_until_new_tab_frame(window);
+            // tabs: keep the previous frame briefly instead of flashing the background
+            self.tab_switch_frame.begin(window);
             self.visible_tab_id = Some(active_tab_id);
         }
 
@@ -472,29 +497,6 @@ impl EngineState {
         }
     }
 
-    /// Takes the web views pages opened during the last spin, so the creation loop sees that
-    /// their tabs have one. Returns whether any arrived.
-    fn adopt_page_web_views(&mut self) -> bool {
-        let adopted = self.runtime.take_adopted_web_views();
-        let any_adopted = !adopted.is_empty();
-        for (tab_id, mut web_view, event_receiver) in adopted {
-            let controller = self.controller.borrow();
-            if !controller.tabs().any(|tab| tab.id() == tab_id) {
-                continue;
-            }
-            let zoom_percent = tab_zoom_percent(&controller, tab_id);
-            if zoom_percent != DEFAULT_ZOOM_PERCENT {
-                let _zoom_result = web_view.set_page_zoom(zoom_percent);
-            }
-            let _scheme_result = web_view.set_color_scheme(controller.color_scheme());
-            drop(controller);
-            self.web_views.insert(tab_id, web_view);
-            self.event_receivers.insert(tab_id, event_receiver);
-            self.web_view_created = true;
-        }
-        any_adopted
-    }
-
     fn update_screen_metrics(&mut self, window: &MainWindow) {
         let metrics = window.window().with_winit_window(screen_metrics).flatten();
         if metrics != self.screen_metrics {
@@ -520,7 +522,11 @@ impl EngineState {
         }
 
         match rendering_context.current_frame_as_image(device) {
-            Ok(image) => window.set_web_view_texture(image),
+            Ok(image) => {
+                window.set_web_view_texture(image);
+                // tabs: the new tab's frame is up
+                self.tab_switch_frame.frame_shown();
+            }
             Err(error) => {
                 log::error!("failed to import Servo frame into Slint: {error}");
                 window
@@ -654,7 +660,7 @@ pub(crate) fn apply_pending_browser_events(
         let tab_id = tab_event.tab_id();
         let event = tab_event.into_event();
         if event == BrowserEvent::CloseRequested {
-            // tabs closed by pages: closing the last tab quits
+            // tabs closed by pages: a page never quits the browser
             state_changed |= crate::page_tabs::close_page_tab(&mut controller, tab_id);
             continue;
         }
@@ -692,13 +698,6 @@ pub(crate) fn queue_leaving_tab(controller: &mut BrowserController, tab_id: TabI
     if is_fullscreen {
         controller.queue_command_for(tab_id, BrowserCommand::ExitFullscreen);
     }
-}
-
-/// Shows the neutral background in place of the previous tab's frame. `show()` only queues a
-/// scene change; painting at once would draw the scene WebRender still holds, which shows the
-/// previous tab. The new tab's frame replaces the background when Servo announces it.
-fn blank_until_new_tab_frame(window: &MainWindow) {
-    window.set_web_view_texture(Image::default());
 }
 
 fn tab_zoom_percent(controller: &BrowserController, tab_id: TabId) -> u16 {
@@ -926,6 +925,27 @@ mod tests {
             .map(|tab| tab.state().page_title())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["First", "Second"]);
+    }
+
+    #[test]
+    fn a_close_request_from_a_page_closes_its_tab() {
+        let controller = RefCell::new(BrowserController::default());
+        let opener = controller.borrow().active_tab_id();
+        mark_engine_ready(&controller, opener);
+        let adopted = controller
+            .borrow_mut()
+            .adopt_tab(opener, talaria_core::TabActivation::Foreground)
+            .expect("the opener exists");
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TabEvent::new(adopted, BrowserEvent::CloseRequested))
+            .expect("the event receiver should be connected");
+
+        assert!(apply_pending_browser_events(&controller, &receiver));
+
+        let controller = controller.borrow();
+        assert_eq!(controller.tabs().len(), 1);
+        assert_eq!(controller.active_tab_id(), opener);
     }
 
     #[test]

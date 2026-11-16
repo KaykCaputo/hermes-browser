@@ -1000,7 +1000,7 @@ fn adopted_tab_is_inserted_after_its_opener_and_activated() {
     let last = controller.open_tab();
 
     let adopted = controller
-        .adopt_tab(opener)
+        .adopt_tab(opener, TabActivation::Foreground)
         .expect("the opener exists, so the tab is adopted");
 
     assert_eq!(tab_ids(&controller), vec![first, opener, adopted, last]);
@@ -1012,7 +1012,9 @@ fn adopted_tab_is_inserted_after_its_opener_and_activated() {
 fn adopted_tab_has_no_initial_url_and_becomes_ready_on_its_first_event() {
     let mut controller = controller_with_ready_tab();
     let opener = controller.active_tab_id();
-    let adopted = controller.adopt_tab(opener).expect("the opener exists");
+    let adopted = controller
+        .adopt_tab(opener, TabActivation::Foreground)
+        .expect("the opener exists");
 
     assert_eq!(controller.take_initial_url(adopted), None);
     assert!(!tab_is_engine_ready(&controller, adopted));
@@ -1038,7 +1040,9 @@ fn adopted_tab_has_no_initial_url_and_becomes_ready_on_its_first_event() {
 fn navigating_an_adopted_tab_before_it_is_ready_requests_a_fresh_web_view() {
     let mut controller = controller_with_ready_tab();
     let opener = controller.active_tab_id();
-    let adopted = controller.adopt_tab(opener).expect("the opener exists");
+    let adopted = controller
+        .adopt_tab(opener, TabActivation::Foreground)
+        .expect("the opener exists");
     assert_eq!(controller.take_initial_url(adopted), None);
 
     controller
@@ -1057,29 +1061,69 @@ fn adopting_from_an_unknown_opener_is_refused() {
     let mut controller = BrowserController::default();
     let active = controller.active_tab_id();
 
-    assert_eq!(controller.adopt_tab(TabId::new(999)), None);
+    assert_eq!(
+        controller.adopt_tab(TabId::new(999), TabActivation::Foreground),
+        None
+    );
     assert_eq!(controller.tabs().len(), 1);
     assert_eq!(controller.active_tab_id(), active);
 }
 
 #[test]
-fn close_request_closes_the_tab() {
+fn a_close_request_is_left_to_the_embedder() {
     let mut controller = controller_with_ready_tab();
     let opener = controller.active_tab_id();
-    let adopted = controller.adopt_tab(opener).expect("the opener exists");
+    let adopted = controller
+        .adopt_tab(opener, TabActivation::Foreground)
+        .expect("the opener exists");
 
-    assert!(controller.handle_event(adopted, BrowserEvent::CloseRequested));
+    controller.handle_event(adopted, BrowserEvent::CloseRequested);
 
-    assert_eq!(tab_ids(&controller), vec![opener]);
+    assert_eq!(tab_ids(&controller), vec![opener, adopted]);
+    assert_eq!(controller.active_tab_id(), adopted);
+}
+
+#[test]
+fn a_background_adopted_tab_leaves_the_active_tab_alone() {
+    let mut controller = controller_with_ready_tab();
+    let opener = controller.active_tab_id();
+    let last = controller.open_tab();
+    controller.select_tab(opener);
+
+    let adopted = controller
+        .adopt_tab(opener, TabActivation::Background)
+        .expect("the opener exists");
+
+    assert_eq!(tab_ids(&controller), vec![opener, adopted, last]);
     assert_eq!(controller.active_tab_id(), opener);
 }
 
 #[test]
-fn a_close_request_from_the_last_tab_leaves_it_open() {
-    let mut controller = controller_with_ready_tab();
-    let tab_id = controller.active_tab_id();
+fn an_adopted_tab_is_titled_after_its_openers_host_and_marked_as_opened_by_a_page() {
+    let mut controller = BrowserController::default();
+    let opener = controller.active_tab_id();
+    controller.handle_event(
+        opener,
+        BrowserEvent::AddressChanged {
+            url: "https://opener.test/page".to_owned(),
+        },
+    );
 
-    assert!(!controller.handle_event(tab_id, BrowserEvent::CloseRequested));
+    let adopted = controller
+        .adopt_tab(opener, TabActivation::Foreground)
+        .expect("the opener exists");
 
-    assert_eq!(tab_ids(&controller), vec![tab_id]);
+    let tab = controller
+        .tabs()
+        .find(|tab| tab.id() == adopted)
+        .expect("the adopted tab exists");
+    assert_eq!(tab.state().page_title(), "opener.test");
+    assert!(tab.is_opened_by_page());
+    assert!(
+        !controller
+            .tabs()
+            .find(|tab| tab.id() == opener)
+            .expect("the opener exists")
+            .is_opened_by_page()
+    );
 }

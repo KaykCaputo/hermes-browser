@@ -126,6 +126,8 @@ pub(crate) fn connect_ui_callbacks(
     let pointer_button_controller = Rc::clone(&controller);
     let pointer_button_window = window.as_weak();
     window.on_web_view_pointer_button(move |button, pressed, x, y| {
+        let tab_id = pointer_button_controller.borrow().active_tab_id();
+        crate::activation::note_user_activation(tab_id, std::time::Instant::now()); // activation (tabs lane)
         let action = if pressed {
             PointerButtonAction::Down
         } else {

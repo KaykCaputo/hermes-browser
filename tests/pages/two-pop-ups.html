@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Two pop-ups</title>
+<style>
+  body { font: 24px -apple-system, sans-serif; margin: 40px; background: #dff; color: #000; }
+</style>
+</head>
+<body>
+<h1>Opens two pop-ups in one task</h1>
+<p>Yellow first, then blue. The blue one must be shown, under its own address.</p>
+<script>
+  window.addEventListener("load", () => {
+    setTimeout(() => {
+      window.open("opened.html");
+      window.open("opened-blue.html");
+    }, 300);
+  });
+</script>
+</body>
+</html>

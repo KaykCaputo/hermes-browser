@@ -5,6 +5,7 @@ mod frame_ready;
 mod load_metrics;
 mod opengl_context;
 mod page_defaults;
+mod page_feedback;
 mod page_tabs;
 mod panics;
 mod runtime;

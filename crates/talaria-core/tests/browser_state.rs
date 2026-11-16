@@ -1,5 +1,6 @@
 use talaria_core::{
-    BrowserEvent, BrowserState, LoadState, PageIcon, PointerCursor, placeholder_title,
+    BrowserEvent, BrowserState, LoadState, PageIcon, PointerCursor, display_origin,
+    placeholder_title,
 };
 
 #[test]
@@ -414,4 +415,47 @@ fn placeholder_title_is_the_host_else_the_url_else_new_tab() {
         "file:///tmp/page.html"
     );
     assert_eq!(placeholder_title("not a url"), "not a url");
+}
+
+#[test]
+fn a_data_url_is_titled_by_its_scheme_only() {
+    assert_eq!(placeholder_title("data:text/html,<p>secret</p>"), "data:");
+}
+
+#[test]
+fn a_blob_url_is_titled_by_its_inner_host() {
+    assert_eq!(
+        placeholder_title("blob:https://a.test/4f8c1a52-7c1e-4c1a-9c55-0d3d3b9e2a10"),
+        "a.test"
+    );
+}
+
+#[test]
+fn a_long_url_fallback_is_shortened() {
+    let long = format!("file:///{}", "x".repeat(300));
+
+    let title = placeholder_title(&long);
+
+    assert_eq!(title.chars().count(), 80);
+    assert!(title.ends_with('…'));
+    assert!(long.starts_with(title.trim_end_matches('…')));
+}
+
+#[test]
+fn display_origins_name_the_scheme_host_and_port_or_local_files() {
+    assert_eq!(
+        display_origin("https://a.test/path?q#f"),
+        Some("https://a.test".to_owned())
+    );
+    assert_eq!(
+        display_origin("http://a.test:8080/"),
+        Some("http://a.test:8080".to_owned())
+    );
+    assert_eq!(
+        display_origin("file:///Users/me/page.html"),
+        Some("file://".to_owned())
+    );
+    assert_eq!(display_origin("data:text/html,x"), None);
+    assert_eq!(display_origin("about:blank"), None);
+    assert_eq!(display_origin(""), None);
 }

@@ -5,16 +5,54 @@ use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
 const INITIAL_ADDRESS: &str = "";
 
-/// Title shown until a document supplies its own: the URL's host, else the URL, else "New Tab".
+/// Longest placeholder title made from a whole URL, ellipsis included.
+const MAX_URL_TITLE_CHARS: usize = 80;
+
+/// Title shown until a document supplies its own: the URL's host (a `blob:` URL's inner host),
+/// else the URL shortened to `MAX_URL_TITLE_CHARS`, else "New Tab". A `data:` URL shows only
+/// its scheme, since the rest is the document itself.
 pub fn placeholder_title(url: &str) -> String {
     if url.is_empty() {
         return DEFAULT_PAGE_TITLE.to_owned();
     }
-    Url::parse(url)
-        .ok()
-        .and_then(|parsed| parsed.host_str().map(str::to_owned))
-        .filter(|host| !host.is_empty())
-        .unwrap_or_else(|| url.to_owned())
+    let Ok(parsed) = Url::parse(url) else {
+        return shortened(url);
+    };
+    let host = match parsed.scheme() {
+        "data" => return "data:".to_owned(),
+        "blob" => match parsed.origin() {
+            url::Origin::Tuple(_, host, _) => Some(host.to_string()),
+            url::Origin::Opaque(_) => None,
+        },
+        _ => parsed.host_str().map(str::to_owned),
+    };
+    host.filter(|host| !host.is_empty())
+        .unwrap_or_else(|| shortened(url))
+}
+
+/// The origin a page's request is shown and remembered under: `scheme://host[:port]` for web
+/// pages, `file://` for local files, None for anything else (opaque origins).
+pub fn display_origin(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    if parsed.scheme() == "file" {
+        return Some("file://".to_owned());
+    }
+    match parsed.origin() {
+        url::Origin::Tuple(..) => Some(parsed.origin().ascii_serialization()),
+        url::Origin::Opaque(_) => None,
+    }
+}
+
+fn shortened(text: &str) -> String {
+    if text.chars().count() <= MAX_URL_TITLE_CHARS {
+        return text.to_owned();
+    }
+    let mut short = text
+        .chars()
+        .take(MAX_URL_TITLE_CHARS - 1)
+        .collect::<String>();
+    short.push('…');
+    short
 }
 
 /// Whether two addresses differ at most in their fragment, which keeps the same document.
@@ -225,6 +263,10 @@ impl BrowserState {
     }
     pub fn is_fullscreen(&self) -> bool {
         self.fullscreen
+    }
+
+    pub(crate) fn set_page_title(&mut self, title: String) {
+        self.page_title = title;
     }
 
     pub(crate) fn set_zoom_percent(&mut self, percent: u16) {
