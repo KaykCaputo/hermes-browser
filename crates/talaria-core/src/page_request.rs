@@ -423,6 +423,13 @@ pub(crate) struct PageRequests {
     reload_requested: bool,
     /// The origin the user last sent credentials to, and when.
     credentials_sent: Option<(String, Duration)>,
+    /// The page whose dialogs or leave prompts the user blocked (its origin, or `None` for a page
+    /// without one).
+    blocked_origin: Option<String>,
+    /// The user navigated away from the blocked page: the blocks end once a new document starts or
+    /// another site asks. They stay if the navigation produces no new document (a same-document
+    /// traversal, a 204, a download) or the user stays.
+    blocks_end_with_navigation: bool,
 }
 
 impl PageRequests {
@@ -451,6 +458,9 @@ impl PageRequests {
     ) -> Option<PageRequestAnswer> {
         let origin = PageOrigin::from_url(&request.url);
         let kind = request.kind.sanitized();
+        if self.blocks_end_with_navigation && origin.key() != self.blocked_origin.as_deref() {
+            self.end_blocks();
+        }
 
         if kind.is_blockable_dialog() && self.dialogs_blocked {
             return Some(PageRequestAnswer::Discard);
@@ -528,8 +538,13 @@ impl PageRequests {
                 self.last_leave_prompt_closed_at = Some(now);
                 // Answered: a later leave prompt comes from another navigation.
                 self.reload_requested = false;
+                // Staying: the page is not left, so its blocks stay too.
+                if reply.answer == PageRequestAnswer::Decline {
+                    self.blocks_end_with_navigation = false;
+                }
                 if reply.block_further_dialogs {
                     self.leave_prompts_blocked = true;
+                    self.blocked_origin = answered.origin.key().map(str::to_owned);
                     discarded = self.take_where(|kind| *kind == PageRequestKind::LeavePage);
                 }
             }
@@ -537,6 +552,7 @@ impl PageRequests {
                 self.last_dialog_closed_at = Some(now);
                 if reply.block_further_dialogs {
                     self.dialogs_blocked = true;
+                    self.blocked_origin = answered.origin.key().map(str::to_owned);
                     discarded = self.take_where(PageRequestKind::is_blockable_dialog);
                 }
             }
@@ -586,17 +602,25 @@ impl PageRequests {
         discarded
     }
 
-    /// The user navigates the page; `reload` when they reload it. Blocking ends here, not when the
-    /// next document is reported: the engine may report none (a page stuck before its head was
-    /// parsed), and the next site's dialogs must not inherit it. What the leaving page's own leave
-    /// prompt needs (whether the user interacted with it) stays until the new document starts.
+    /// The user navigates the page; `reload` when they reload it. The page's blocks are only
+    /// marked to end: they end when the new document starts, or when a request from another site
+    /// arrives first (a page stuck before its head was parsed may never report the next
+    /// document, and the next site's dialogs must not inherit its blocks).
     pub(crate) fn note_user_navigation(&mut self, reload: bool) -> Vec<PageRequestId> {
         self.reload_requested = reload;
+        if self.dialogs_blocked || self.leave_prompts_blocked {
+            self.blocks_end_with_navigation = true;
+        }
+        self.discard_all()
+    }
+
+    fn end_blocks(&mut self) {
         self.dialogs_blocked = false;
         self.leave_prompts_blocked = false;
         self.last_dialog_closed_at = None;
         self.last_leave_prompt_closed_at = None;
-        self.discard_all()
+        self.blocked_origin = None;
+        self.blocks_end_with_navigation = false;
     }
 
     /// The tab's web view is replaced or closed; the engine drops its requests itself.

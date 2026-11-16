@@ -142,6 +142,23 @@ impl DocumentStartTracker {
     }
 }
 
+/// How Mercury asks a web view to navigate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Navigation {
+    Load,
+    Reload,
+    Traverse,
+}
+
+/// Whether Servo will swallow the `Started` of the document this navigation may load, so that the
+/// tracker must infer it. `reload()` always pre-sets `Started` (`servo-0.8.0/webview.rs:552`);
+/// another navigation's `Started` is only dropped as unchanged while the status is still
+/// `Started`. Arming in other cases would let a navigation that loads no document (a fragment)
+/// leave the tracker armed for a `<body>` the page inserts later.
+pub(crate) fn arms_document_start(navigation: Navigation, status: LoadStatus) -> bool {
+    navigation == Navigation::Reload || status == LoadStatus::Started
+}
+
 pub(crate) enum ServoPageRequest {
     Dialog(SimpleDialog),
     Unload(AllowOrDenyRequest),
@@ -491,6 +508,37 @@ mod tests {
             ]),
             vec![0]
         );
+    }
+
+    #[test]
+    fn only_navigations_whose_started_servo_will_swallow_arm_the_tracker() {
+        // `reload()` pre-sets Started, so the new document's Started is always swallowed.
+        for status in [Started, HeadParsed, Complete, Stopped] {
+            assert!(
+                arms_document_start(Navigation::Reload, status),
+                "{status:?}"
+            );
+        }
+        // Other navigations only lose their Started while the status is still Started; from any
+        // other status (a fragment navigation from a loaded page, say) nothing is swallowed.
+        for navigation in [Navigation::Load, Navigation::Traverse] {
+            assert!(arms_document_start(navigation, Started));
+            for status in [HeadParsed, Complete, Stopped] {
+                assert!(!arms_document_start(navigation, status), "{status:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fragment_navigation_from_a_loaded_page_leaves_an_inserted_body_alone() {
+        let mut tracker = DocumentStartTracker::default();
+        assert!(tracker.document_started(Started));
+        assert!(!tracker.document_started(Complete));
+        if arms_document_start(Navigation::Traverse, Complete) {
+            tracker.arm();
+        }
+        // Same document: no Started; later the page inserts a <body>.
+        assert!(!tracker.document_started(HeadParsed));
     }
 
     #[test]

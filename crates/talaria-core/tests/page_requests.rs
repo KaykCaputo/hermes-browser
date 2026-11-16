@@ -1133,21 +1133,23 @@ fn the_users_navigation_ends_the_blocking_of_the_page_it_leaves() {
     });
     drain(&mut controller);
 
-    // The page being left still asks before it goes (the user did interact with it) ...
+    // The page being left keeps its blocks until it is gone: its leave prompt is allowed
+    // without asking ...
     receive(
         &mut controller,
         tab_id,
         request(3, PageRequestKind::LeavePage, 40),
     );
-    assert_eq!(pending_id(&controller, tab_id), Some(3));
-    controller.answer_page_request(
+    assert_eq!(pending_id(&controller, tab_id), None);
+    // ... and the next site's dialogs are shown, even before the engine reports its document.
+    receive(
+        &mut controller,
         tab_id,
-        PageRequestId::new(3),
-        reply(PageRequestAnswer::Accept),
-        Duration::from_millis(50),
+        PageRequest {
+            url: "https://other.test/".to_owned(),
+            ..alert(4, 10_000)
+        },
     );
-    // ... and the next site's dialogs are shown.
-    receive(&mut controller, tab_id, alert(4, 10_000));
     assert_eq!(pending_id(&controller, tab_id), Some(4));
 }
 
@@ -1180,4 +1182,121 @@ fn staying_on_a_page_ends_the_reload_wording() {
             .expect("pending")
             .is_reload_prompt()
     );
+}
+
+// Review round 3
+
+/// A page whose dialogs and leave prompts the user has blocked.
+fn blocked_page() -> (BrowserController, TabId) {
+    let (mut controller, tab_id) = ready_controller();
+    interact(&mut controller);
+    receive(&mut controller, tab_id, alert(1, 0));
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept).blocking_further_dialogs(),
+        Duration::from_millis(10),
+    );
+    receive(
+        &mut controller,
+        tab_id,
+        request(2, PageRequestKind::LeavePage, 20),
+    );
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(2),
+        reply(PageRequestAnswer::Decline).blocking_further_dialogs(),
+        Duration::from_millis(30),
+    );
+    drain(&mut controller);
+    (controller, tab_id)
+}
+
+#[test]
+fn a_block_survives_a_reload_the_user_cancels_by_staying() {
+    let (mut controller, tab_id) = blocked_page();
+    controller.queue_command(BrowserCommand::Reload);
+    drain(&mut controller);
+    // Leave prompts are blocked: the reload's prompt is answered with the default at once...
+    receive(
+        &mut controller,
+        tab_id,
+        request(3, PageRequestKind::LeavePage, 40),
+    );
+    assert_eq!(pending_id(&controller, tab_id), None);
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(3, PageRequestAnswer::Discard)
+        )]
+    );
+    // ... and the page's next alert is still blocked.
+    receive(&mut controller, tab_id, alert(4, 50));
+    assert_eq!(pending_id(&controller, tab_id), None);
+}
+
+#[test]
+fn a_blocked_page_cannot_make_the_user_choose_to_stay() {
+    // Its leave prompts are blocked with its dialogs, so a reload never asks: the only way the
+    // block could survive is a reload that produces no new document, covered above.
+    let (mut controller, tab_id) = blocked_page();
+    controller.queue_command(BrowserCommand::Reload);
+    receive(
+        &mut controller,
+        tab_id,
+        request(3, PageRequestKind::LeavePage, 40),
+    );
+    assert_eq!(pending_id(&controller, tab_id), None);
+}
+
+#[test]
+fn a_block_survives_a_same_document_traversal() {
+    let (mut controller, tab_id) = blocked_page();
+    controller.queue_command(BrowserCommand::GoBack);
+    drain(&mut controller);
+    // No new document: the page keeps running and is still blocked.
+    receive(&mut controller, tab_id, alert(3, 1_000));
+    assert_eq!(pending_id(&controller, tab_id), None);
+    receive(&mut controller, tab_id, alert(4, 100_000));
+    assert_eq!(pending_id(&controller, tab_id), None);
+}
+
+#[test]
+fn a_block_ends_when_another_site_asks_or_a_new_document_starts() {
+    let (mut controller, tab_id) = blocked_page();
+    controller.queue_command(BrowserCommand::Navigate {
+        url: "https://other.test/".to_owned(),
+    });
+    drain(&mut controller);
+    receive(
+        &mut controller,
+        tab_id,
+        PageRequest {
+            url: "https://other.test/".to_owned(),
+            ..alert(3, 1_000)
+        },
+    );
+    assert_eq!(pending_id(&controller, tab_id), Some(3));
+
+    let (mut controller, tab_id) = blocked_page();
+    controller.queue_command(BrowserCommand::Reload);
+    controller.handle_event(tab_id, BrowserEvent::PageLoadStarted);
+    receive(&mut controller, tab_id, alert(3, 1_000));
+    assert_eq!(pending_id(&controller, tab_id), Some(3));
+}
+
+#[test]
+fn another_site_does_not_end_a_block_the_user_did_not_navigate_away_from() {
+    // A frame from another site asks while the user has not navigated: still blocked.
+    let (mut controller, tab_id) = blocked_page();
+    receive(
+        &mut controller,
+        tab_id,
+        PageRequest {
+            url: "https://other.test/".to_owned(),
+            ..alert(3, 1_000)
+        },
+    );
+    assert_eq!(pending_id(&controller, tab_id), None);
 }

@@ -43,8 +43,14 @@ export component RequestButton inherits Rectangle {
     min-width: 84px;
     preferred-width: label-text.preferred-width + 32px;
     border-radius: 7px;
-    border-width: root.primary ? 0px : 1px;
-    border-color: #364556;
+    // A focus ring when Tab has reached the button.
+    border-width: keys.has-focus ? 2px : root.primary ? 0px : 1px;
+    border-color: keys.has-focus ? #edf4fa : #364556;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        root.clicked();
+    }
     background: root.primary
         ? (touch.pressed ? #45a9ed : touch.has-hover ? #78caff : #62bfff)
         : (touch.pressed ? #2b3744 : touch.has-hover ? #263241 : #1f2934);
@@ -61,6 +67,19 @@ export component RequestButton inherits Rectangle {
     touch := TouchArea {
         clicked => {
             root.clicked();
+        }
+    }
+
+    // Reached with Tab only: a click does not move the keyboard here, and nothing focuses it
+    // automatically. Return or Space presses it.
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.clicked();
+                return accept;
+            }
+            reject
         }
     }
 }

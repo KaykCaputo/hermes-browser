@@ -18,7 +18,10 @@ use talaria_core::{PageRequestAnswer, PageRequestId};
 use url::Url;
 
 use crate::frame_ready::FrameReadySignal;
-use crate::page_requests::{ClosesOnDrop, DocumentStartTracker, EngineRequest, ServoPageRequest};
+use crate::page_requests::{
+    ClosesOnDrop, DocumentStartTracker, EngineRequest, Navigation, ServoPageRequest,
+    arms_document_start,
+};
 use crate::{ServoWebViewError, ViewportSize};
 
 pub struct ServoWebView {
@@ -53,8 +56,10 @@ impl ServoWebView {
     }
 
     // dialogs: the navigation's document may start without a `Started` Servo reports.
-    fn arm_document_start(&self) {
-        self.document_start.borrow_mut().arm();
+    fn arm_document_start(&self, navigation: Navigation) {
+        if arms_document_start(navigation, self.inner.load_status()) {
+            self.document_start.borrow_mut().arm();
+        }
     }
 
     pub fn resize(&self, size: ViewportSize) {
@@ -100,25 +105,25 @@ impl TalariaWebView for ServoWebView {
 
     fn navigate(&mut self, url: &str) -> Result<(), Self::Error> {
         let url = Url::parse(url)?;
-        self.arm_document_start(); // dialogs
+        self.arm_document_start(Navigation::Load); // dialogs
         self.inner.load(url);
         Ok(())
     }
 
     fn go_back(&mut self) -> Result<(), Self::Error> {
-        self.arm_document_start(); // dialogs
+        self.arm_document_start(Navigation::Traverse); // dialogs
         let _traversal_id = self.inner.go_back(1);
         Ok(())
     }
 
     fn go_forward(&mut self) -> Result<(), Self::Error> {
-        self.arm_document_start(); // dialogs
+        self.arm_document_start(Navigation::Traverse); // dialogs
         let _traversal_id = self.inner.go_forward(1);
         Ok(())
     }
 
     fn reload(&mut self) -> Result<(), Self::Error> {
-        self.arm_document_start(); // dialogs
+        self.arm_document_start(Navigation::Reload); // dialogs
         self.inner.reload();
         Ok(())
     }

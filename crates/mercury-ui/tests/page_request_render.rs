@@ -471,4 +471,28 @@ fn page_request_components_render_and_answer() {
     fixture.key(Key::Return);
     fixture.key(Key::Escape);
     assert_eq!(fixture.take_answers(), vec![]);
+
+    // Keyboard users reach its buttons with Tab: Block first, then Allow.
+    fixture.key(Key::Tab);
+    fixture.save("12-permission-block-focused");
+    fixture.key(Key::Return);
+    assert_eq!(
+        fixture.take_answers(),
+        vec![(10, false, String::new(), String::new(), false)]
+    );
+    // A new bubble starts without focus.
+    fixture.show(view(0, PageRequestStyle::None));
+    fixture.show(PageRequestView {
+        heading: "127.0.0.1:8123 wants to store data permanently on this device".into(),
+        accept_label: "Allow".into(),
+        decline_label: "Block".into(),
+        ..view(16, PageRequestStyle::Permission)
+    });
+    fixture.key(Key::Tab);
+    fixture.key(Key::Tab);
+    fixture.key(SharedString::from(" "));
+    assert_eq!(
+        fixture.take_answers(),
+        vec![(16, true, String::new(), String::new(), false)]
+    );
 }
