@@ -1,4 +1,5 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use dpi::PhysicalSize;
 use euclid::{Point2D, Scale};
@@ -13,9 +14,14 @@ use talaria_core::{
     ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
     PointerButtonAction, TabId, WebView as TalariaWebView,
 };
+use talaria_core::{PageRequestAnswer, PageRequestId};
 use url::Url;
 
 use crate::frame_ready::FrameReadySignal;
+use crate::page_requests::{
+    ClosesOnDrop, DocumentStartTracker, EngineRequest, Navigation, ServoPageRequest,
+    arms_document_start,
+};
 use crate::{ServoWebViewError, ViewportSize};
 
 pub struct ServoWebView {
@@ -24,6 +30,10 @@ pub struct ServoWebView {
     tab_id: TabId,
     /// Device pixels per logical pixel; pointer positions arrive in logical pixels.
     scale_factor: Cell<f32>,
+    // dialogs: closes the delegate's store when the web view goes, which gives every
+    // unanswered request the engine's default.
+    page_requests: ClosesOnDrop<ServoPageRequest>,
+    document_start: Rc<RefCell<DocumentStartTracker>>,
 }
 
 impl ServoWebView {
@@ -32,12 +42,23 @@ impl ServoWebView {
         frame_ready: FrameReadySignal,
         tab_id: TabId,
         scale_factor: f32,
+        page_requests: ClosesOnDrop<ServoPageRequest>,
+        document_start: Rc<RefCell<DocumentStartTracker>>,
     ) -> Self {
         Self {
             inner,
             frame_ready,
             tab_id,
             scale_factor: Cell::new(scale_factor),
+            page_requests,
+            document_start,
+        }
+    }
+
+    // dialogs: the navigation's document may start without a `Started` Servo reports.
+    fn arm_document_start(&self, navigation: Navigation) {
+        if arms_document_start(navigation, self.inner.load_status()) {
+            self.document_start.borrow_mut().arm();
         }
     }
 
@@ -84,21 +105,25 @@ impl TalariaWebView for ServoWebView {
 
     fn navigate(&mut self, url: &str) -> Result<(), Self::Error> {
         let url = Url::parse(url)?;
+        self.arm_document_start(Navigation::Load); // dialogs
         self.inner.load(url);
         Ok(())
     }
 
     fn go_back(&mut self) -> Result<(), Self::Error> {
+        self.arm_document_start(Navigation::Traverse); // dialogs
         let _traversal_id = self.inner.go_back(1);
         Ok(())
     }
 
     fn go_forward(&mut self) -> Result<(), Self::Error> {
+        self.arm_document_start(Navigation::Traverse); // dialogs
         let _traversal_id = self.inner.go_forward(1);
         Ok(())
     }
 
     fn reload(&mut self) -> Result<(), Self::Error> {
+        self.arm_document_start(Navigation::Reload); // dialogs
         self.inner.reload();
         Ok(())
     }
@@ -207,6 +232,31 @@ impl TalariaWebView for ServoWebView {
         let _event_id = self.inner.notify_input_event(InputEvent::MouseLeftViewport(
             MouseLeftViewportEvent::default(),
         ));
+        Ok(())
+    }
+
+    // dialogs
+    fn answer_page_request(
+        &mut self,
+        id: PageRequestId,
+        answer: PageRequestAnswer,
+    ) -> Result<(), Self::Error> {
+        // Taken out first, so answering never runs while the store is borrowed.
+        let request = self.page_requests.take(id);
+        // Staying on a page that asked before it was left: no new document follows.
+        if matches!(request, Some(ServoPageRequest::Unload(_)))
+            && answer == PageRequestAnswer::Decline
+        {
+            self.document_start.borrow_mut().disarm();
+        }
+        match request {
+            Some(request) => request.respond(answer),
+            None => log::debug!(
+                "tab {}: page request {} is gone",
+                self.tab_id.value(),
+                id.value()
+            ),
+        }
         Ok(())
     }
 }

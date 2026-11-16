@@ -713,6 +713,7 @@ mod tests {
     use talaria_core::{
         ColorScheme, ImeInput, KeyboardInput, PointerButton, PointerButtonAction, TabCommand,
     };
+    use talaria_core::{PageRequestAnswer, PageRequestId};
 
     use super::*;
 
@@ -780,6 +781,14 @@ mod tests {
             Ok(())
         }
         fn pointer_left(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        // dialogs
+        fn answer_page_request(
+            &mut self,
+            _id: PageRequestId,
+            _answer: PageRequestAnswer,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
     }

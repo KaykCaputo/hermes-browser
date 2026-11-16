@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Navigates to a page that alerts in its head</title>
+</head>
+<body>
+  <p>Once loaded, this page navigates to <code>head-alert.html</code> on the port given as
+  <code>?port=N</code> (another origin), which calls <code>alert()</code> from its
+  <code>&lt;head&gt;</code>. Used to see whether a new document's first dialog reaches the browser
+  before or after the browser learns the new address.</p>
+<script>
+  const port = new URLSearchParams(location.search).get("port");
+  window.addEventListener("load", () => setTimeout(() => {
+    location.href = "http://127.0.0.1:" + port + "/pages/head-alert.html";
+  }, 200));
+</script>
+</body>
+</html>

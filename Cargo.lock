@@ -5462,6 +5462,7 @@ dependencies = [
  "image",
  "slint",
  "slint-build",
+ "talaria-core",
 ]
 
 [[package]]

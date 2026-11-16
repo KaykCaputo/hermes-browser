@@ -14,10 +14,13 @@ test-support = []
 [dependencies]
 slint.workspace = true
 
-# Only for `examples/render_settings.rs`, which renders the settings window without a display.
+# Only for rendering without a display: `examples/render_settings.rs` (the settings window) and
+# `tests/page_request_render.rs` (the dialog components, which also uses talaria-core's message
+# cleaning). Dev-only, so the application's Slint features are unchanged.
 [dev-dependencies]
 image.workspace = true
 slint = { workspace = true, features = ["renderer-software"] }
+talaria-core = { path = "../talaria-core" }
 
 [build-dependencies]
 slint-build.workspace = true

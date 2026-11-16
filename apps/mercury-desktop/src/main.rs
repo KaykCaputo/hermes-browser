@@ -25,6 +25,7 @@ mod keyutils;
 mod media_buffers;
 #[cfg(target_os = "macos")]
 mod media_isolation;
+mod page_requests; // dialogs
 mod panic_hook;
 #[cfg(target_os = "macos")]
 mod platform_macos;
