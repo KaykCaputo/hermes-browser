@@ -22,6 +22,8 @@ mod engine;
 mod keyboard;
 mod keyutils;
 mod panic_hook;
+// tabs opened and closed by pages
+mod page_tabs;
 #[cfg(target_os = "macos")]
 mod platform_macos;
 mod profile;

@@ -12,12 +12,15 @@ pub(crate) fn finish_closing_tab(
 ) {
     match outcome {
         CloseTabOutcome::Closed => sync_ui(window, controller),
-        CloseTabOutcome::LastTab => {
-            log::info!("the last tab was closed; quitting");
-            if let Err(error) = slint::quit_event_loop() {
-                log::warn!("could not quit: {error}");
-            }
-        }
+        CloseTabOutcome::LastTab => quit_after_last_tab(),
         CloseTabOutcome::NotFound => {}
+    }
+}
+
+/// Quits because the last tab was closed. Ending the event loop lets `main` shut the engine down.
+pub(crate) fn quit_after_last_tab() {
+    log::info!("the last tab was closed; quitting");
+    if let Err(error) = slint::quit_event_loop() {
+        log::warn!("could not quit: {error}");
     }
 }

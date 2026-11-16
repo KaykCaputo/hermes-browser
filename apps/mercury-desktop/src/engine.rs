@@ -83,10 +83,13 @@ pub(crate) fn connect_servo_runtime(
         let _queued = slint::invoke_from_event_loop(pump_after_wake);
     });
 
+    let runtime = ServoRuntime::new(event_loop_waker, runtime_options);
+    // tabs opened by pages
+    runtime.set_new_tab_allocator(crate::page_tabs::new_tab_allocator(&controller));
     let engine = Rc::new(Engine {
         window: window.as_weak(),
         state: RefCell::new(Some(EngineState {
-            runtime: ServoRuntime::new(event_loop_waker, runtime_options),
+            runtime,
             controller,
             web_view_focused,
             rendering_context: None,
@@ -321,7 +324,8 @@ impl EngineState {
             let controller = self.controller.borrow();
             is_engine_ready(&controller, controller.active_tab_id())
         };
-        let mut state_changed = false;
+        // tabs opened by pages: before the events, so the new tabs' first events are applied
+        let mut state_changed = self.adopt_page_web_views();
         for receiver in self.event_receivers.values() {
             state_changed |= apply_pending_browser_events(&self.controller, receiver);
         }
@@ -466,6 +470,29 @@ impl EngineState {
                 report_web_view_error(window, &self.controller, tab_id, &error);
             }
         }
+    }
+
+    /// Takes the web views pages opened during the last spin, so the creation loop sees that
+    /// their tabs have one. Returns whether any arrived.
+    fn adopt_page_web_views(&mut self) -> bool {
+        let adopted = self.runtime.take_adopted_web_views();
+        let any_adopted = !adopted.is_empty();
+        for (tab_id, mut web_view, event_receiver) in adopted {
+            let controller = self.controller.borrow();
+            if !controller.tabs().any(|tab| tab.id() == tab_id) {
+                continue;
+            }
+            let zoom_percent = tab_zoom_percent(&controller, tab_id);
+            if zoom_percent != DEFAULT_ZOOM_PERCENT {
+                let _zoom_result = web_view.set_page_zoom(zoom_percent);
+            }
+            let _scheme_result = web_view.set_color_scheme(controller.color_scheme());
+            drop(controller);
+            self.web_views.insert(tab_id, web_view);
+            self.event_receivers.insert(tab_id, event_receiver);
+            self.web_view_created = true;
+        }
+        any_adopted
     }
 
     fn update_screen_metrics(&mut self, window: &MainWindow) {
@@ -625,8 +652,14 @@ pub(crate) fn apply_pending_browser_events(
 
     for tab_event in receiver.try_iter() {
         let tab_id = tab_event.tab_id();
+        let event = tab_event.into_event();
+        if event == BrowserEvent::CloseRequested {
+            // tabs closed by pages: closing the last tab quits
+            state_changed |= crate::page_tabs::close_page_tab(&mut controller, tab_id);
+            continue;
+        }
         let was_engine_ready = is_engine_ready(&controller, tab_id);
-        state_changed |= controller.handle_event(tab_id, tab_event.into_event());
+        state_changed |= controller.handle_event(tab_id, event);
         if !was_engine_ready && is_engine_ready(&controller, tab_id) {
             log::info!("tab {} is ready for commands", tab_id.value());
         }

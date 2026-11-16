@@ -148,6 +148,9 @@ pub enum BrowserEvent {
     FullscreenChanged {
         fullscreen: bool,
     },
+    // tabs opened and closed by pages
+    /// The page closed its own tab (`window.close()`).
+    CloseRequested,
 }
 
 impl BrowserEvent {
@@ -276,6 +279,8 @@ impl BrowserState {
             BrowserEvent::FullscreenChanged { fullscreen } => {
                 self.fullscreen = fullscreen;
             }
+            // Closing is the controller's business; the tab's own state does not change.
+            BrowserEvent::CloseRequested => {}
         }
     }
 }

@@ -987,3 +987,99 @@ fn pointer_left_for_a_ready_tab_is_queued() {
         Some(BrowserCommand::PointerLeft)
     );
 }
+
+fn tab_ids(controller: &BrowserController) -> Vec<TabId> {
+    controller.tabs().map(|tab| tab.id()).collect()
+}
+
+#[test]
+fn adopted_tab_is_inserted_after_its_opener_and_activated() {
+    let mut controller = BrowserController::default();
+    let first = controller.active_tab_id();
+    let opener = controller.open_tab();
+    let last = controller.open_tab();
+
+    let adopted = controller
+        .adopt_tab(opener)
+        .expect("the opener exists, so the tab is adopted");
+
+    assert_eq!(tab_ids(&controller), vec![first, opener, adopted, last]);
+    assert_eq!(controller.active_tab_id(), adopted);
+    assert_eq!(controller.state().url(), "");
+}
+
+#[test]
+fn adopted_tab_has_no_initial_url_and_becomes_ready_on_its_first_event() {
+    let mut controller = controller_with_ready_tab();
+    let opener = controller.active_tab_id();
+    let adopted = controller.adopt_tab(opener).expect("the opener exists");
+
+    assert_eq!(controller.take_initial_url(adopted), None);
+    assert!(!tab_is_engine_ready(&controller, adopted));
+    controller.queue_command(BrowserCommand::Reload);
+    assert_eq!(controller.next_command(), None);
+
+    controller.handle_event(
+        adopted,
+        BrowserEvent::AddressChanged {
+            url: "https://a.test/opened".to_owned(),
+        },
+    );
+
+    assert!(tab_is_engine_ready(&controller, adopted));
+    assert_eq!(controller.take_initial_url(adopted), None);
+    assert_eq!(
+        controller.next_command(),
+        Some(TabCommand::new(adopted, BrowserCommand::Reload))
+    );
+}
+
+#[test]
+fn navigating_an_adopted_tab_before_it_is_ready_requests_a_fresh_web_view() {
+    let mut controller = controller_with_ready_tab();
+    let opener = controller.active_tab_id();
+    let adopted = controller.adopt_tab(opener).expect("the opener exists");
+    assert_eq!(controller.take_initial_url(adopted), None);
+
+    controller
+        .queue_navigation("b.test")
+        .expect("the address is valid");
+
+    assert_eq!(
+        controller.take_initial_url(adopted),
+        Some("https://b.test/".to_owned())
+    );
+    assert_eq!(controller.next_command(), None);
+}
+
+#[test]
+fn adopting_from_an_unknown_opener_is_refused() {
+    let mut controller = BrowserController::default();
+    let active = controller.active_tab_id();
+
+    assert_eq!(controller.adopt_tab(TabId::new(999)), None);
+    assert_eq!(controller.tabs().len(), 1);
+    assert_eq!(controller.active_tab_id(), active);
+}
+
+#[test]
+fn close_request_closes_the_tab() {
+    let mut controller = controller_with_ready_tab();
+    let opener = controller.active_tab_id();
+    let adopted = controller.adopt_tab(opener).expect("the opener exists");
+
+    assert!(controller.handle_event(adopted, BrowserEvent::CloseRequested));
+
+    assert_eq!(tab_ids(&controller), vec![opener]);
+    assert_eq!(controller.active_tab_id(), opener);
+}
+
+#[test]
+fn a_close_request_from_the_last_tab_leaves_it_open() {
+    let mut controller = controller_with_ready_tab();
+    let tab_id = controller.active_tab_id();
+
+    assert!(!controller.handle_event(tab_id, BrowserEvent::CloseRequested));
+
+    assert_eq!(tab_ids(&controller), vec![tab_id]);
+}

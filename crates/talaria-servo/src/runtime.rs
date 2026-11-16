@@ -1,9 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
 use std::time::Instant;
 
 use euclid::Scale;
@@ -20,6 +20,7 @@ use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
+use crate::page_tabs::{AdoptedWebView, NewTabAllocator, PageTabs};
 use crate::screen::ScreenMetrics;
 use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
 use crate::{ServoWebView, ServoWebViewError};
@@ -94,6 +95,9 @@ pub struct ServoRuntime {
     /// The user-origin style sheet every web view shares. Servo's `UserContentManager` holds a
     /// handle to Servo of its own, so this field must stay before `after_engine_cleanup`.
     user_content: Rc<servo::UserContentManager>,
+    /// Tabs opened by pages; it holds a handle to Servo too, so it stays before
+    /// `after_engine_cleanup`.
+    page_tabs: Rc<PageTabs>,
     /// Declared after `inner` and `user_content`, the two fields that hold a handle to Servo,
     /// so it is dropped after the last of them. Every web view's delegate holds a clone too;
     /// see `AfterEngineCleanup`.
@@ -142,13 +146,24 @@ impl ServoRuntime {
             content_blocker: Rc::clone(&content_blocker),
         }));
         let user_content = page_defaults_user_content(&inner);
+        let screen_metrics = Rc::default();
+        // tabs opened by pages
+        let page_tabs = Rc::new(PageTabs {
+            adopted: RefCell::default(),
+            allocator: RefCell::default(),
+            content_blocker: Rc::clone(&content_blocker),
+            screen_metrics: Rc::clone(&screen_metrics),
+            user_content: Rc::clone(&user_content),
+            after_engine_cleanup: after_engine_cleanup.clone(),
+        });
 
         Self {
             inner,
             redraw_waker,
             content_blocker,
-            screen_metrics: Rc::default(),
+            screen_metrics,
             user_content,
+            page_tabs,
             after_engine_cleanup,
         }
     }
@@ -175,6 +190,7 @@ impl ServoRuntime {
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
+            page_tabs: Rc::downgrade(&self.page_tabs),
             _after_engine_cleanup: self.after_engine_cleanup.clone(),
         });
 
@@ -196,11 +212,26 @@ impl ServoRuntime {
         self.redraw_waker.acknowledge();
         self.inner.spin_event_loop();
     }
+
+    // tabs opened by pages
+    /// Lets pages open tabs (`window.open`, `target=_blank`). Without an allocator, or when it
+    /// returns None, such requests are refused.
+    pub fn set_new_tab_allocator(&self, allocator: NewTabAllocator) {
+        self.page_tabs.allocator.replace(Some(allocator));
+    }
+
+    /// Web views created by pages since the last call, in creation order, each with the channel
+    /// its tab's events arrive on.
+    pub fn take_adopted_web_views(&self) -> Vec<AdoptedWebView> {
+        self.page_tabs.adopted.take()
+    }
 }
 
 impl Drop for ServoRuntime {
     /// Ends the session cookies while Servo still runs, before it saves its cookie jar.
     fn drop(&mut self) {
+        // Web views opened by pages and never taken close while Servo still runs.
+        drop(self.page_tabs.adopted.take());
         if self.after_engine_cleanup.is_some() {
             end_session_cookies(&self.inner);
         }
@@ -318,6 +349,8 @@ struct BrowserDelegate {
     load_metrics: RefCell<PageLoadMetrics>,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
+    /// Weak: queued web views hold their delegates, which must not keep the queue alive.
+    page_tabs: Weak<PageTabs>,
     /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
     _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }
@@ -426,6 +459,66 @@ impl servo::WebViewDelegate for BrowserDelegate {
         for event in crash_feedback(reason, web_view.cursor(), web_view.status_text()) {
             self.send_browser_event(event);
         }
+    }
+
+    // tabs opened and closed by pages
+    /// Must be answered here: the constellation and the opener's script thread wait for it.
+    fn request_create_new(&self, parent: servo::WebView, request: servo::CreateNewWebViewRequest) {
+        let Some(page_tabs) = self.page_tabs.upgrade() else {
+            return;
+        };
+        let Some(allocator) = page_tabs.allocator() else {
+            info!(
+                "tab {}: refused a page's new tab: no allocator",
+                self.tab_id.value()
+            );
+            return;
+        };
+        let Some(tab_id) = allocator(self.tab_id) else {
+            info!("tab {}: refused a page's new tab", self.tab_id.value());
+            return;
+        };
+
+        let (browser_event_sender, event_receiver) = mpsc::channel::<TabEvent>();
+        let frame_ready = FrameReadySignal::default();
+        let delegate = Rc::new(BrowserDelegate {
+            tab_id,
+            browser_event_sender: browser_event_sender.clone(),
+            frame_ready: frame_ready.clone(),
+            load_metrics: RefCell::new(PageLoadMetrics::default()),
+            content_blocker: Rc::clone(&page_tabs.content_blocker),
+            screen_metrics: Rc::clone(&page_tabs.screen_metrics),
+            page_tabs: Rc::downgrade(&page_tabs),
+            _after_engine_cleanup: page_tabs.after_engine_cleanup.clone(),
+        });
+        let scale_factor = parent.hidpi_scale_factor();
+        let inner = request
+            .builder(parent.rendering_context())
+            .hidpi_scale_factor(scale_factor)
+            .delegate(delegate)
+            .user_content_manager(Rc::clone(&page_tabs.user_content))
+            .build();
+        // New auxiliary web views start visible and share the opener's rendering context.
+        parent.hide();
+
+        for event in new_web_view_feedback(inner.cursor(), inner.status_text()) {
+            let _send_result = browser_event_sender.send(TabEvent::new(tab_id, event));
+        }
+        info!(
+            "tab {}: page opened tab {}",
+            self.tab_id.value(),
+            tab_id.value()
+        );
+        let web_view = ServoWebView::new(inner, frame_ready, tab_id, scale_factor.get());
+        page_tabs
+            .adopted
+            .borrow_mut()
+            .push((tab_id, web_view, event_receiver));
+    }
+
+    fn notify_closed(&self, _web_view: servo::WebView) {
+        info!("tab {}: the page closed its tab", self.tab_id.value());
+        self.send_browser_event(BrowserEvent::CloseRequested);
     }
 }
 
