@@ -134,7 +134,16 @@ mod tests {
     #[test]
     fn the_version_is_the_workspace_version() {
         let workspace = include_str!("../../../Cargo.toml");
-        assert!(workspace.contains(&format!("version = \"{}\"", env!("CARGO_PKG_VERSION"))));
+        let package = workspace
+            .split("[workspace.package]")
+            .nth(1)
+            .and_then(|section| section.split("\n[").next())
+            .expect("the workspace has a [workspace.package] section");
+        let version = package
+            .lines()
+            .find_map(|line| line.strip_prefix("version = "))
+            .expect("[workspace.package] has a version");
+        assert_eq!(version, format!("\"{}\"", env!("CARGO_PKG_VERSION")));
         assert_eq!(
             version_line(),
             format!("Version {}", env!("CARGO_PKG_VERSION"))

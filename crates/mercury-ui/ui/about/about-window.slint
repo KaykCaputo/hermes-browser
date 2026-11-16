@@ -22,7 +22,9 @@ component LinkText inherits Text {
 }
 
 // "About Mercury Browser": a small window of its own, reached from the application menu and
-// from the browser menu. It follows the system appearance.
+// from the browser menu. Its colours come from Slint's `Palette`, so it follows the system
+// appearance, not the user's theme setting; at the merge with the settings lane's
+// `ChromePalette` they map onto its roles (background, foreground, accent, border).
 export component AboutWindow inherits Window {
     in property <string> version-line;
     in property <string> engine-line;
@@ -41,7 +43,7 @@ export component AboutWindow inherits Window {
     title: "About Mercury Browser";
     icon: @image-url("../../../../apps/mercury-desktop/resources/mercury-browser.svg");
     width: 380px;
-    height: 350px;
+    height: 370px;
     background: Palette.background;
     forward-focus: key-scope;
 

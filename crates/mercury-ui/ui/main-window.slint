@@ -1,6 +1,7 @@
 import { Palette } from "std-widgets.slint";
 import { AddressBarEdit, BrowserMenu, BrowserMenuCommand, BrowserMenuEntry } from "menus/browser-menu.slint";
 export { AboutLink, AboutWindow } from "about/about-window.slint";
+export { BrowserMenuPreview } from "menus/browser-menu.slint";
 
 export enum WebViewPointerButton {
     left,
@@ -485,6 +486,20 @@ export component MainWindow inherits Window {
                 browser-menu-button := ChromeButton {
                     label: "⋮";
                     clicked => { root.show-browser-menu(); }
+
+                    // menus: the browser menu, below the button, right edges aligned. A child of the
+                    // button because Slint 1.17.1's `absolute-position` of this component instance
+                    // counts its own offset twice (measured: x 1700 for a button at 850).
+                    browser-menu := BrowserMenu {
+                        x: browser-menu-button.width - self.width;
+                        y: browser-menu-button.height + 4px;
+                        top-entries: root.browser-menu-top-entries;
+                        bottom-entries: root.browser-menu-bottom-entries;
+                        zoom-percent: root.zoom-percent;
+                        activated(command) => {
+                            root.browser-menu-activated(command);
+                        }
+                    }
                 }
             }
 
@@ -767,17 +782,5 @@ export component MainWindow inherits Window {
     MenuBar {
         visible: false;
         Menu { }
-    }
-
-    // menus: the browser menu, anchored below the right edge of the "⋮" button.
-    browser-menu := BrowserMenu {
-        x: browser-menu-button.absolute-position.x + browser-menu-button.width - 264px;
-        y: browser-menu-button.absolute-position.y + browser-menu-button.height + 4px;
-        top-entries: root.browser-menu-top-entries;
-        bottom-entries: root.browser-menu-bottom-entries;
-        zoom-percent: root.zoom-percent;
-        activated(command) => {
-            root.browser-menu-activated(command);
-        }
     }
 }

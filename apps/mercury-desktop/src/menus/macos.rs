@@ -10,36 +10,46 @@
 //! still the main menu whenever one of our windows becomes key.
 //!
 //! The main menu is an `NSMenu` subclass: AppKit offers every key equivalent to the main menu
-//! (`performKeyEquivalent:`) before the key window gets the key down, and the override declines
-//! the keys the window owns.
+//! (`performKeyEquivalent:`) before the key window gets the key down. The override only gathers
+//! the inputs of `model::decide_key_equivalent` and carries out its decision.
+//!
+//! Nothing called from AppKit here touches Slint or the controller: commands are posted with
+//! `slint::invoke_from_event_loop` (`super::dispatch`), and the state read here is a snapshot.
 
 use std::cell::RefCell;
 use std::time::Duration;
 
 use objc2::rc::Retained;
-use objc2::runtime::{Bool, NSObject, NSObjectProtocol, ProtocolObject, Sel};
+use objc2::runtime::{AnyClass, Bool, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventModifierFlags,
     NSEventType, NSMenu, NSMenuDelegate, NSMenuItem,
 };
 use objc2_foundation::NSString;
-use slint::winit_030::winit::keyboard::PhysicalKey;
+use slint::winit_030::winit::keyboard::{Key, PhysicalKey};
 use slint::winit_030::winit::platform::scancode::PhysicalKeyExtScancode;
 
 use super::model::{
-    self, KeyEquivalent, MenuCommand, MenuItem, Modifiers, SystemAction, key_from_appkit_characters,
+    self, KeyDecision, KeyEquivalent, KeyWindow, MatchedItem, MenuCommand, MenuItem, Modifiers,
+    StandardAction, SystemAction, key_from_appkit_characters,
 };
 use crate::shortcuts::ShortcutAction;
 
 /// Tags of the Window menu's tab items: this plus the tab's index.
 const FIRST_TAB_TAG: isize = 10_000;
+/// Tags of the Bookmarks menu's bar items: this plus the entry's index.
+const FIRST_BOOKMARK_TAG: isize = 20_000;
 
 struct NativeMenu {
     main_menu: Retained<MainMenu>,
-    /// Target of every Mercury item and delegate of the Window menu (both are weak references
-    /// in AppKit, so this keeps it alive).
-    _target: Retained<MenuTarget>,
+    /// Target of every Mercury item and delegate of every submenu (both are weak references in
+    /// AppKit, so this keeps it alive).
+    target: Retained<MenuTarget>,
+    window_menu: Retained<NSMenu>,
+    bookmarks_menu: Retained<NSMenu>,
+    /// Items that become AppKit's standard ones while a native panel is key (Edit, Close).
+    routable: Vec<(Retained<NSMenuItem>, MenuCommand)>,
 }
 
 thread_local! {
@@ -49,68 +59,83 @@ thread_local! {
 }
 
 define_class!(
+    // SAFETY: NSMenu may be subclassed; the subclass adds no instance variables and no `Drop`.
     #[unsafe(super(NSMenu))]
     #[thread_kind = MainThreadOnly]
     #[name = "MercuryMainMenu"]
     struct MainMenu;
 
     impl MainMenu {
+        // SAFETY: the signature is NSMenu's `- (BOOL)performKeyEquivalent:(NSEvent *)event`.
         #[unsafe(method(performKeyEquivalent:))]
         fn perform_key_equivalent(&self, event: &NSEvent) -> Bool {
-            Bool::new(self.decide_key_equivalent(event))
+            Bool::new(self.handle_key_equivalent(event))
         }
     }
 );
 
 define_class!(
+    // SAFETY: NSObject may be subclassed; no instance variables, no `Drop`.
     #[unsafe(super(NSObject))]
     #[thread_kind = MainThreadOnly]
     #[name = "MercuryMenuTarget"]
     struct MenuTarget;
 
     impl MenuTarget {
+        // SAFETY: an action method, `- (void)action:(id)sender`; AppKit passes the menu item,
+        // and a nil sender (possible through `sendAction:to:from:`) is handled.
         #[unsafe(method(mercuryMenuItemChosen:))]
-        fn item_chosen(&self, item: &NSMenuItem) {
-            let Some(command) = command_for_tag(item.tag()) else {
+        fn item_chosen(&self, item: Option<&NSMenuItem>) {
+            let Some(command) = item.and_then(|item| command_for_tag(item.tag())) else {
                 return;
             };
             let mtm = MainThreadMarker::from(self);
             if command == MenuCommand::Shortcut(ShortcutAction::CloseTab)
-                && !super::browser_window_focused()
+                && key_window(mtm) == KeyWindow::OtherMercury
             {
-                // Cmd+W in the About window (or any other window of ours) closes that window.
-                if let Some(window) = NSApplication::sharedApplication(mtm).keyWindow() {
-                    window.performClose(None);
-                }
+                // Cmd+W in the About window (or another window of ours) closes that window.
+                close_key_window_later();
                 return;
             }
             super::dispatch(command);
         }
 
+        // SAFETY: `- (BOOL)validateMenuItem:(NSMenuItem *)item` (NSMenuItemValidation).
         #[unsafe(method(validateMenuItem:))]
         fn validate_menu_item(&self, item: &NSMenuItem) -> Bool {
             Bool::new(validate(item))
         }
     }
 
+    // SAFETY: NSObject's protocol, implemented by the superclass.
     unsafe impl NSObjectProtocol for MenuTarget {}
 
+    // SAFETY: only `menuNeedsUpdate:` is implemented, with the protocol's signature.
     unsafe impl NSMenuDelegate for MenuTarget {
-        /// The Window menu is about to open (or be searched for a key): list the tabs.
+        /// A menu is about to open or be searched for a key equivalent.
         #[unsafe(method(menuNeedsUpdate:))]
         fn menu_needs_update(&self, menu: &NSMenu) {
             let mtm = MainThreadMarker::from(self);
-            for index in (0..menu.numberOfItems()).rev() {
-                if menu.itemAtIndex(index).is_some_and(|item| tab_index(item.tag()).is_some()) {
-                    menu.removeItemAtIndex(index);
-                }
+            update_routing(key_window(mtm));
+            let (is_window_menu, is_bookmarks_menu) = NATIVE.with(|native| {
+                native.borrow().as_ref().map_or((false, false), |native| {
+                    (
+                        std::ptr::eq(menu, &*native.window_menu),
+                        std::ptr::eq(menu, &*native.bookmarks_menu),
+                    )
+                })
+            });
+            let snapshot = super::snapshot();
+            if is_window_menu {
+                let items = snapshot.tab_titles.iter().enumerate().map(|(index, title)| {
+                    let title = if title.is_empty() { "New Tab" } else { title.as_str() };
+                    (title.to_owned(), model::tab_key(index))
+                });
+                replace_dynamic_items(self, menu, FIRST_TAB_TAG, items);
             }
-            for (index, title) in super::snapshot().tab_titles.iter().enumerate() {
-                let title = if title.is_empty() { "New Tab" } else { title.as_str() };
-                let item = new_item(mtm, title, Some(sel!(mercuryMenuItemChosen:)), model::tab_key(index));
-                item.setTag(FIRST_TAB_TAG.saturating_add(isize::try_from(index).unwrap_or(isize::MAX)));
-                unsafe { item.setTarget(Some(self)) };
-                menu.addItem(&item);
+            if is_bookmarks_menu {
+                let items = snapshot.bookmarks_bar.iter().map(|title| (title.clone(), None));
+                replace_dynamic_items(self, menu, FIRST_BOOKMARK_TAG, items);
             }
         }
     }
@@ -118,40 +143,126 @@ define_class!(
 
 impl MainMenu {
     fn super_perform_key_equivalent(&self, event: &NSEvent) -> bool {
+        // SAFETY: calls NSMenu's own implementation with the same, valid event.
         let handled: Bool = unsafe { msg_send![super(self), performKeyEquivalent: event] };
         handled.as_bool()
     }
 
-    fn decide_key_equivalent(&self, event: &NSEvent) -> bool {
+    fn handle_key_equivalent(&self, event: &NSEvent) -> bool {
         let Some((key, modifiers)) = key_of(event) else {
             return self.super_perform_key_equivalent(event);
         };
-        let window_focused = super::browser_window_focused();
-        if window_focused && model::window_owns_key(&key, modifiers) {
-            // `shortcuts.rs`, the address bar or the page handles it, once.
-            return false;
+        let mtm = MainThreadMarker::from(self);
+        let key_window = key_window(mtm);
+        update_routing(key_window);
+        let snapshot = super::snapshot();
+        let item = model::item_for_key(&key, modifiers, snapshot.tab_titles.len()).map(|command| {
+            MatchedItem {
+                command,
+                enabled: model::is_enabled(command, &snapshot, super::current_edit_target()),
+            }
+        });
+        match model::decide_key_equivalent(&key, modifiers, key_window, event.isARepeat(), item) {
+            KeyDecision::Decline => false,
+            KeyDecision::Swallow => true,
+            KeyDecision::Perform => {
+                let handled = self.super_perform_key_equivalent(event);
+                if handled && key_window == KeyWindow::Browser {
+                    // The window never sees this press: swallow its release too.
+                    super::claim_key(PhysicalKey::from_scancode(u32::from(event.keyCode())));
+                }
+                handled
+            }
         }
-        if model::menu_owns_key(&key, modifiers) && event.isARepeat() {
-            // Menu actions do not repeat, like most `shortcuts.rs` actions.
-            return true;
-        }
-        let handled = self.super_perform_key_equivalent(event);
-        if handled && window_focused {
-            super::claim_key(PhysicalKey::from_scancode(u32::from(event.keyCode())));
-        }
-        handled
     }
 }
 
 impl MenuTarget {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        // SAFETY: plain `init` of an NSObject subclass without instance variables.
         unsafe { msg_send![Self::alloc(mtm), init] }
     }
 }
 
+/// Which window has keyboard focus. Every Slint window is a winit `WinitWindow`; anything else
+/// that becomes key (an open panel, a sheet, an alert) was made by AppKit.
+fn key_window(mtm: MainThreadMarker) -> KeyWindow {
+    if super::browser_window_focused() {
+        return KeyWindow::Browser;
+    }
+    let Some(window) = NSApplication::sharedApplication(mtm).keyWindow() else {
+        return KeyWindow::None;
+    };
+    let is_winit_window =
+        AnyClass::get(c"WinitWindow").is_some_and(|class| window.isKindOfClass(class));
+    if is_winit_window {
+        KeyWindow::OtherMercury
+    } else {
+        KeyWindow::Native
+    }
+}
+
+fn standard_selector(action: StandardAction) -> Sel {
+    match action {
+        StandardAction::Undo => sel!(undo:),
+        StandardAction::Redo => sel!(redo:),
+        StandardAction::Cut => sel!(cut:),
+        StandardAction::Copy => sel!(copy:),
+        StandardAction::Paste => sel!(paste:),
+        StandardAction::SelectAll => sel!(selectAll:),
+        StandardAction::PerformClose => sel!(performClose:),
+    }
+}
+
+/// While a native panel is key, the Edit items and Close are AppKit's standard items: a nil
+/// target sends the action to the first responder (`sendAction:to:nil from:`), and AppKit
+/// validates them along the responder chain. Otherwise they are Mercury's.
+fn update_routing(key_window: KeyWindow) {
+    NATIVE.with(|native| {
+        let native = native.borrow();
+        let Some(native) = native.as_ref() else {
+            return;
+        };
+        for (item, command) in &native.routable {
+            let standard = model::standard_action(*command)
+                .filter(|_| model::uses_responder_chain(*command, key_window));
+            // SAFETY: the selectors are AppKit's standard actions or ours, which `MenuTarget`
+            // implements; the target is kept alive by `NATIVE`.
+            unsafe {
+                match standard {
+                    Some(action) => {
+                        item.setAction(Some(standard_selector(action)));
+                        item.setTarget(None);
+                    }
+                    None => {
+                        item.setAction(Some(sel!(mercuryMenuItemChosen:)));
+                        item.setTarget(Some(&native.target));
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// Closes the key window from the event loop, if it is still one of ours other than the
+/// browser window.
+fn close_key_window_later() {
+    let _ = slint::invoke_from_event_loop(|| {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        if key_window(mtm) != KeyWindow::OtherMercury {
+            return;
+        }
+        if let Some(window) = NSApplication::sharedApplication(mtm).keyWindow() {
+            window.performClose(None);
+        }
+    });
+}
+
 fn validate(item: &NSMenuItem) -> bool {
     let tag = item.tag();
-    if let Some(index) = tab_index(tag) {
+    if let Some(index) = dynamic_index(tag, FIRST_TAB_TAG) {
         let snapshot = super::snapshot();
         item.setState(if index == snapshot.active_tab_index {
             NSControlStateValueOn
@@ -166,20 +277,49 @@ fn validate(item: &NSMenuItem) -> bool {
 }
 
 fn command_for_tag(tag: isize) -> Option<MenuCommand> {
-    if let Some(index) = tab_index(tag) {
+    if let Some(index) = dynamic_index(tag, FIRST_TAB_TAG) {
         return Some(MenuCommand::Shortcut(ShortcutAction::SelectTab(index)));
+    }
+    if let Some(index) = dynamic_index(tag, FIRST_BOOKMARK_TAG) {
+        return Some(MenuCommand::OpenBookmarksBarItem(index));
     }
     let index = usize::try_from(tag).ok()?;
     COMMANDS.with(|commands| commands.borrow().get(index).copied())
 }
 
-fn tab_index(tag: isize) -> Option<usize> {
-    tag.checked_sub(FIRST_TAB_TAG)
-        .and_then(|index| usize::try_from(index).ok())
+/// The index of a dynamic item (tab or bookmark) from its tag.
+fn dynamic_index(tag: isize, first: isize) -> Option<usize> {
+    let index = usize::try_from(tag.checked_sub(first)?).ok()?;
+    (index < 10_000).then_some(index)
+}
+
+/// Replaces a menu's items tagged from `first_tag` on with `items`, at the end of the menu.
+fn replace_dynamic_items(
+    target: &MenuTarget,
+    menu: &NSMenu,
+    first_tag: isize,
+    items: impl Iterator<Item = (String, Option<KeyEquivalent>)>,
+) {
+    let mtm = MainThreadMarker::from(target);
+    for index in (0..menu.numberOfItems()).rev() {
+        if menu
+            .itemAtIndex(index)
+            .is_some_and(|item| dynamic_index(item.tag(), first_tag).is_some())
+        {
+            menu.removeItemAtIndex(index);
+        }
+    }
+    for (index, (title, key)) in items.enumerate() {
+        let item = new_item(mtm, &title, Some(sel!(mercuryMenuItemChosen:)), key);
+        item.setTag(first_tag.saturating_add(isize::try_from(index).unwrap_or(isize::MAX)));
+        // SAFETY: `target` implements the action and is kept alive by `NATIVE`.
+        unsafe { item.setTarget(Some(target)) };
+        menu.addItem(&item);
+    }
 }
 
 /// The key and modifiers of a key-down event, as `model` matches them.
-fn key_of(event: &NSEvent) -> Option<(slint::winit_030::winit::keyboard::Key, Modifiers)> {
+fn key_of(event: &NSEvent) -> Option<(Key, Modifiers)> {
     if event.r#type() != NSEventType::KeyDown {
         return None;
     }
@@ -201,6 +341,7 @@ fn new_item(
     key: Option<KeyEquivalent>,
 ) -> Retained<NSMenuItem> {
     let key_equivalent = key.map(|key| key.key.to_string()).unwrap_or_default();
+    // SAFETY: a fresh item; the action is a selector AppKit or `MenuTarget` implements.
     let item = unsafe {
         NSMenuItem::initWithTitle_action_keyEquivalent(
             mtm.alloc(),
@@ -240,12 +381,17 @@ fn system_selector(action: SystemAction) -> Sel {
 fn build(mtm: MainThreadMarker) -> NativeMenu {
     let application = NSApplication::sharedApplication(mtm);
     let target = MenuTarget::new(mtm);
+    // SAFETY: NSMenu's designated initialiser, on our subclass, which adds no state.
     let main_menu: Retained<MainMenu> =
         unsafe { msg_send![MainMenu::alloc(mtm), initWithTitle: &*NSString::from_str("")] };
     let mut commands = Vec::new();
+    let mut routable = Vec::new();
+    let mut window_menu = None;
+    let mut bookmarks_menu = None;
 
     for menu in model::menu_bar() {
         let submenu = NSMenu::initWithTitle(mtm.alloc(), &NSString::from_str(menu.title));
+        submenu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
         for entry in &menu.items {
             match *entry {
                 MenuItem::Action {
@@ -263,8 +409,13 @@ fn build(mtm: MainThreadMarker) -> NativeMenu {
                             let item =
                                 new_item(mtm, title, Some(sel!(mercuryMenuItemChosen:)), key);
                             item.setTag(isize::try_from(commands.len()).unwrap_or(isize::MAX));
+                            // SAFETY: `target` implements the action and is kept alive with
+                            // the menu in `NATIVE`.
                             unsafe { item.setTarget(Some(&target)) };
                             commands.push(command);
+                            if model::standard_action(command).is_some() {
+                                routable.push((item.clone(), command));
+                            }
                             item
                         }
                     };
@@ -279,9 +430,8 @@ fn build(mtm: MainThreadMarker) -> NativeMenu {
                     submenu.addItem(&item);
                     application.setServicesMenu(Some(&services));
                 }
-                MenuItem::TabList => {
-                    submenu.setDelegate(Some(ProtocolObject::from_ref(&*target)));
-                }
+                MenuItem::TabList => window_menu = Some(submenu.clone()),
+                MenuItem::BookmarksBarFolder => bookmarks_menu = Some(submenu.clone()),
             }
         }
         let top_item = new_item(mtm, menu.title, None, None);
@@ -295,7 +445,10 @@ fn build(mtm: MainThreadMarker) -> NativeMenu {
     COMMANDS.with(|stored| stored.replace(commands));
     NativeMenu {
         main_menu,
-        _target: target,
+        target,
+        window_menu: window_menu.expect("the Window menu lists the tabs"),
+        bookmarks_menu: bookmarks_menu.expect("the Bookmarks menu lists the bar"),
+        routable,
     }
 }
 
@@ -372,10 +525,11 @@ fn main_menu_is_ours(application: &NSApplication) -> bool {
         .is_some_and(|menu| menu.isKindOfClass(MainMenu::class()))
 }
 
-/// `MERCURY_MENU_DIAGNOSTICS=<directory>`: reads the main menu back after start-up, after the
-/// About window opens and after it closes, and logs it; saves the About window, rendered by the
-/// app's renderer, as `about-window.png` in the directory. Works in `--background` runs and
-/// needs no input.
+/// `MERCURY_MENU_DIAGNOSTICS=<directory>` (a diagnostic, documented in
+/// docs/developer-guide/testing.md): reads the main menu back after start-up, after the About
+/// window opens and after it closes, and logs it; saves the About window, rendered by the app's
+/// renderer, as `about-window.png` in the directory. Works in `--background` runs and needs no
+/// input.
 fn start_diagnostics() {
     let Some(directory) = std::env::var_os("MERCURY_MENU_DIAGNOSTICS") else {
         return;
@@ -415,10 +569,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tab_tags_do_not_collide_with_command_tags() {
-        assert_eq!(tab_index(FIRST_TAB_TAG), Some(0));
-        assert_eq!(tab_index(FIRST_TAB_TAG + 3), Some(3));
-        assert_eq!(tab_index(5), None);
+    fn dynamic_tags_do_not_collide_with_command_tags() {
+        assert_eq!(dynamic_index(FIRST_TAB_TAG, FIRST_TAB_TAG), Some(0));
+        assert_eq!(dynamic_index(FIRST_TAB_TAG + 3, FIRST_TAB_TAG), Some(3));
+        assert_eq!(dynamic_index(5, FIRST_TAB_TAG), None);
+        assert_eq!(dynamic_index(FIRST_BOOKMARK_TAG, FIRST_TAB_TAG), None);
+        assert_eq!(
+            dynamic_index(FIRST_BOOKMARK_TAG + 2, FIRST_BOOKMARK_TAG),
+            Some(2)
+        );
         let item_count = model::menu_bar()
             .iter()
             .map(|menu| menu.items.len())

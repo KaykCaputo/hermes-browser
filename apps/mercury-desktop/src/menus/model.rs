@@ -22,6 +22,11 @@ pub(crate) enum MenuCommand {
     RestorePreviousSession,
     ShowHistory,
     ClearBrowsingData,
+    BookmarkThisPage,
+    ToggleBookmarksBar,
+    ShowBookmarksManager,
+    /// An entry of the bookmarks bar's first level, by position.
+    OpenBookmarksBarItem(usize),
     // No engine API in Servo 0.8.0: always disabled.
     Find,
     Stop,
@@ -143,6 +148,7 @@ impl KeyEquivalent {
     }
 
     /// Who handles this key when the browser window has keyboard focus.
+    #[cfg(test)]
     pub(crate) fn owner(self) -> KeyOwner {
         let key = match self.key {
             DELETE_KEY => Key::Named(NamedKey::Backspace),
@@ -156,6 +162,7 @@ impl KeyEquivalent {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeyOwner {
     /// The window's key path: `shortcuts.rs`, or the focused text field or page for the Edit
@@ -195,25 +202,135 @@ pub(crate) fn key_from_appkit_characters(characters: &str) -> Key {
     Key::Named(named)
 }
 
-/// Whether one of the menu's own key equivalents matches a key press.
-pub(crate) fn menu_owns_key(key: &Key, modifiers: Modifiers) -> bool {
-    menu_bar()
+/// The menu item whose key equivalent a key press matches: the table's items and the Window
+/// menu's tab items (Cmd+1 to Cmd+8, as many as there are tabs).
+pub(crate) fn item_for_key(
+    key: &Key,
+    modifiers: Modifiers,
+    tab_count: usize,
+) -> Option<MenuCommand> {
+    let matches = |equivalent: KeyEquivalent| {
+        equivalent.modifiers == modifiers
+            && match (equivalent.key, key) {
+                (DELETE_KEY, Key::Named(NamedKey::Backspace)) => true,
+                (character, Key::Character(text)) => {
+                    let text = text.to_lowercase();
+                    // With Shift held AppKit reports the shifted character of these keys.
+                    text == character.to_string()
+                        || matches!((character, text.as_str()), ('[', "{") | (']', "}"))
+                }
+                _ => false,
+            }
+    };
+    let from_table = menu_bar()
         .iter()
         .flat_map(|menu| menu.items.iter())
-        .filter_map(|item| match item {
-            MenuItem::Action { key: Some(key), .. } if key.owner() == KeyOwner::Menu => Some(*key),
+        .find_map(|item| match *item {
+            MenuItem::Action {
+                key: Some(key),
+                command,
+                ..
+            } if matches(key) => Some(command),
             _ => None,
-        })
-        .any(|equivalent| {
-            equivalent.modifiers == modifiers
-                && match (equivalent.key, key) {
-                    (DELETE_KEY, Key::Named(NamedKey::Backspace)) => true,
-                    (character, Key::Character(text)) => {
-                        text.to_lowercase() == character.to_string()
-                    }
-                    _ => false,
-                }
-        })
+        });
+    from_table.or_else(|| {
+        (0..tab_count.min(8))
+            .find(|index| tab_key(*index).is_some_and(matches))
+            .map(|index| MenuCommand::Shortcut(ShortcutAction::SelectTab(index)))
+    })
+}
+
+/// Which window has keyboard focus, as the menu bar sees it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyWindow {
+    /// The browser window.
+    Browser,
+    /// Another of Mercury's Slint windows (About, settings).
+    OtherMercury,
+    /// A window AppKit made: an open or save panel, a sheet, an alert.
+    Native,
+    None,
+}
+
+/// A menu item a key matched, and whether it is enabled right now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MatchedItem {
+    pub(crate) command: MenuCommand,
+    pub(crate) enabled: bool,
+}
+
+/// What the main menu does with a key equivalent AppKit offers it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeyDecision {
+    /// Not the menu's: AppKit sends the key-down to the key window.
+    Decline,
+    /// Taken and dropped: an auto-repeat of an action that does not repeat.
+    Swallow,
+    /// Let `NSMenu` find and perform the item as usual.
+    Perform,
+}
+
+/// The single decision behind "runs once": who handles a key equivalent.
+pub(crate) fn decide_key_equivalent(
+    key: &Key,
+    modifiers: Modifiers,
+    key_window: KeyWindow,
+    is_repeat: bool,
+    item: Option<MatchedItem>,
+) -> KeyDecision {
+    if key_window == KeyWindow::Browser && window_owns_key(key, modifiers) {
+        return KeyDecision::Decline;
+    }
+    let Some(item) = item else {
+        // AppKit's own items (Services, Emoji & Symbols), or nothing: AppKit as usual.
+        return KeyDecision::Perform;
+    };
+    if uses_responder_chain(item.command, key_window)
+        && matches!(item.command, MenuCommand::Edit(_))
+    {
+        // Standard editing in a native panel; AppKit validates it and repeats it like any app.
+        return KeyDecision::Perform;
+    }
+    if !item.enabled {
+        return KeyDecision::Decline;
+    }
+    let repeats = matches!(item.command, MenuCommand::Shortcut(action) if action.repeats());
+    if is_repeat && !repeats {
+        KeyDecision::Swallow
+    } else {
+        KeyDecision::Perform
+    }
+}
+
+/// AppKit's standard action for the Edit items and Close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StandardAction {
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    PerformClose,
+}
+
+pub(crate) const fn standard_action(command: MenuCommand) -> Option<StandardAction> {
+    match command {
+        MenuCommand::Edit(EditCommand::Undo) => Some(StandardAction::Undo),
+        MenuCommand::Edit(EditCommand::Redo) => Some(StandardAction::Redo),
+        MenuCommand::Edit(EditCommand::Cut) => Some(StandardAction::Cut),
+        MenuCommand::Edit(EditCommand::Copy) => Some(StandardAction::Copy),
+        MenuCommand::Edit(EditCommand::Paste) => Some(StandardAction::Paste),
+        MenuCommand::Edit(EditCommand::SelectAll) => Some(StandardAction::SelectAll),
+        MenuCommand::Shortcut(ShortcutAction::CloseTab) => Some(StandardAction::PerformClose),
+        _ => None,
+    }
+}
+
+/// While a native panel or sheet has keyboard focus, the Edit items and Close are AppKit's
+/// standard items: sent to the first responder and validated along the responder chain.
+pub(crate) fn uses_responder_chain(command: MenuCommand, key_window: KeyWindow) -> bool {
+    key_window == KeyWindow::Native && standard_action(command).is_some()
 }
 
 /// Cmd+Z, Shift+Cmd+Z, Cmd+X, Cmd+C, Cmd+V and Cmd+A.
@@ -243,6 +360,9 @@ pub(crate) enum MenuItem {
     Services,
     /// The open tabs, one item each (built when the Window menu opens).
     TabList,
+    /// The first level of the bookmarks bar folder (built when the Bookmarks menu opens, from
+    /// what the bookmarks lane provides through `seams::bookmarks_bar_items`).
+    BookmarksBarFolder,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,7 +386,7 @@ const fn key(key: char, modifiers: Modifiers) -> Option<KeyEquivalent> {
 /// The macOS menu bar, top to bottom. The first menu is the application menu.
 pub(crate) fn menu_bar() -> Vec<Menu> {
     use MenuCommand::*;
-    use MenuItem::{Separator, Services, TabList};
+    use MenuItem::{BookmarksBarFolder, Separator, Services, TabList};
     use ShortcutAction as A;
 
     vec![
@@ -361,6 +481,21 @@ pub(crate) fn menu_bar() -> Vec<Menu> {
             ],
         },
         Menu {
+            title: "Bookmarks",
+            items: vec![
+                // Bookmarks lane (see `seams.rs`).
+                action("Bookmark This Page…", key('d', CMD), BookmarkThisPage),
+                action(
+                    "Show Bookmarks Bar",
+                    key('b', SHIFT_CMD),
+                    ToggleBookmarksBar,
+                ),
+                action("Bookmarks Manager", None, ShowBookmarksManager),
+                Separator,
+                BookmarksBarFolder,
+            ],
+        },
+        Menu {
             title: "Window",
             items: vec![
                 action("Minimize", key('m', CMD), System(SystemAction::Minimize)),
@@ -403,6 +538,9 @@ pub(crate) const fn is_available(command: MenuCommand) -> bool {
         RestorePreviousSession => super::seams::RESTORE_PREVIOUS_SESSION_AVAILABLE,
         ShowHistory => super::seams::SHOW_HISTORY_AVAILABLE,
         ClearBrowsingData => super::seams::CLEAR_BROWSING_DATA_AVAILABLE,
+        BookmarkThisPage | ToggleBookmarksBar | ShowBookmarksManager | OpenBookmarksBarItem(_) => {
+            super::seams::BOOKMARKS_AVAILABLE
+        }
         Find | Stop => false,
     }
 }
@@ -441,6 +579,8 @@ pub(crate) struct MenuSnapshot {
     pub(crate) can_go_forward: bool,
     pub(crate) tab_titles: Vec<String>,
     pub(crate) active_tab_index: usize,
+    /// Titles of the bookmarks bar's first level (bookmarks lane).
+    pub(crate) bookmarks_bar: Vec<String>,
 }
 
 pub(crate) fn is_enabled(command: MenuCommand, snapshot: &MenuSnapshot, edit: EditTarget) -> bool {
@@ -698,6 +838,8 @@ mod tests {
                 ("Enter Full Screen", "⌃⌘F".to_owned()),
                 ("Show All History", "⌘Y".to_owned()),
                 ("Clear Browsing Data…", "⇧⌘⌫".to_owned()),
+                ("Bookmark This Page…", "⌘D".to_owned()),
+                ("Show Bookmarks Bar", "⇧⌘B".to_owned()),
                 ("Minimize", "⌘M".to_owned()),
             ]
         );
@@ -714,6 +856,7 @@ mod tests {
                 "Edit",
                 "View",
                 "History",
+                "Bookmarks",
                 "Window",
                 "Help"
             ]
@@ -729,6 +872,10 @@ mod tests {
             MenuCommand::RestorePreviousSession,
             MenuCommand::ShowHistory,
             MenuCommand::ClearBrowsingData,
+            MenuCommand::BookmarkThisPage,
+            MenuCommand::ToggleBookmarksBar,
+            MenuCommand::ShowBookmarksManager,
+            MenuCommand::OpenBookmarksBarItem(0),
             MenuCommand::Find,
             MenuCommand::Stop,
         ] {
@@ -890,19 +1037,121 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_recognises_only_its_own_keys() {
+    fn a_key_finds_the_item_that_shows_it() {
+        use MenuCommand::*;
         let character = |text: &str| Key::Character(text.into());
-        assert!(menu_owns_key(&character("h"), CMD));
-        assert!(menu_owns_key(&character("H"), OPTION_CMD));
-        assert!(menu_owns_key(&character("m"), CMD));
-        assert!(menu_owns_key(&character("f"), CONTROL_CMD));
-        assert!(menu_owns_key(
-            &key_from_appkit_characters("\u{7f}"),
-            SHIFT_CMD
-        ));
-        assert!(!menu_owns_key(&character("t"), CMD));
-        assert!(!menu_owns_key(&character("c"), CMD));
-        assert!(!menu_owns_key(&character("h"), SHIFT_CMD));
+        assert_eq!(
+            item_for_key(&character("t"), CMD, 1),
+            Some(Shortcut(ShortcutAction::NewTab))
+        );
+        assert_eq!(
+            item_for_key(&character("H"), OPTION_CMD, 1),
+            Some(System(SystemAction::HideOthers))
+        );
+        assert_eq!(
+            item_for_key(&key_from_appkit_characters("\u{7f}"), SHIFT_CMD, 1),
+            Some(ClearBrowsingData)
+        );
+        // AppKit reports Shift+Cmd+] as "}".
+        assert_eq!(
+            item_for_key(&character("}"), SHIFT_CMD, 1),
+            Some(Shortcut(ShortcutAction::NextTab))
+        );
+        assert_eq!(
+            item_for_key(&character("2"), CMD, 3),
+            Some(Shortcut(ShortcutAction::SelectTab(1)))
+        );
+        assert_eq!(item_for_key(&character("5"), CMD, 3), None);
+        assert_eq!(item_for_key(&character("k"), CMD, 1), None);
+        assert_eq!(item_for_key(&character("h"), SHIFT_CMD, 1), None);
+    }
+
+    fn matched(command: MenuCommand, enabled: bool) -> Option<MatchedItem> {
+        Some(MatchedItem { command, enabled })
+    }
+
+    /// The whole key-equivalent decision, as a table: (key, modifiers, key window, repeat,
+    /// matched item) → decision.
+    #[test]
+    fn key_equivalent_decisions() {
+        use KeyDecision::*;
+        use KeyWindow::*;
+        use MenuCommand::*;
+        let character = |text: &str| Key::Character(text.into());
+        let new_tab = matched(Shortcut(ShortcutAction::NewTab), true);
+        let zoom_in = matched(Shortcut(ShortcutAction::ZoomIn), true);
+        let quit = matched(Shortcut(ShortcutAction::Quit), true);
+        let close = matched(Shortcut(ShortcutAction::CloseTab), true);
+        let hide = matched(System(SystemAction::Hide), true);
+        let find = matched(Find, false);
+        let copy_disabled = matched(Edit(EditCommand::Copy), false);
+        let undo_disabled = matched(Edit(EditCommand::Undo), false);
+
+        let cases = [
+            // The browser window owns its shortcuts and the editing keys, repeats included.
+            ("t", CMD, Browser, false, new_tab, Decline),
+            ("t", CMD, Browser, true, new_tab, Decline),
+            ("c", CMD, Browser, false, copy_disabled, Decline),
+            // Keys only the menu has: performed once, repeats swallowed.
+            ("h", CMD, Browser, false, hide, Perform),
+            ("h", CMD, Browser, true, hide, Swallow),
+            // A disabled item: press, repeats and release all reach the window, as before.
+            ("f", CMD, Browser, false, find, Decline),
+            ("f", CMD, Browser, true, find, Decline),
+            // Another Mercury window (About, settings): the menu performs the item once.
+            ("t", CMD, OtherMercury, false, new_tab, Perform),
+            ("t", CMD, OtherMercury, true, new_tab, Swallow),
+            ("q", CMD, OtherMercury, true, quit, Swallow),
+            ("w", CMD, OtherMercury, true, close, Swallow),
+            // ... except actions that repeat on purpose.
+            ("=", CMD, OtherMercury, true, zoom_in, Perform),
+            // A native panel or sheet: the Edit items are AppKit's standard ones, repeats too.
+            ("c", CMD, Native, false, copy_disabled, Perform),
+            ("z", CMD, Native, true, undo_disabled, Perform),
+            ("w", CMD, Native, false, close, Perform),
+            ("w", CMD, Native, true, close, Swallow),
+            ("t", CMD, Native, true, new_tab, Swallow),
+            // No item of ours: AppKit's own items (Services, Emoji & Symbols) or nothing.
+            ("k", CMD, Browser, false, Option::None, Perform),
+            ("k", CMD, Browser, true, Option::None, Perform),
+            ("t", CMD, KeyWindow::None, false, new_tab, Perform),
+        ];
+        for (text, modifiers, key_window, repeat, item, expected) in cases {
+            assert_eq!(
+                decide_key_equivalent(&character(text), modifiers, key_window, repeat, item),
+                expected,
+                "{text} {modifiers:?} {key_window:?} repeat={repeat} {item:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_and_close_items_become_standard_in_native_panels() {
+        use MenuCommand::*;
+        for key_window in [KeyWindow::Browser, KeyWindow::OtherMercury, KeyWindow::None] {
+            assert!(!uses_responder_chain(Edit(EditCommand::Copy), key_window));
+            assert!(!uses_responder_chain(
+                Shortcut(ShortcutAction::CloseTab),
+                key_window
+            ));
+        }
+        let native = |command| {
+            uses_responder_chain(command, KeyWindow::Native).then(|| standard_action(command))
+        };
+        assert_eq!(
+            native(Edit(EditCommand::Undo)),
+            Some(Some(StandardAction::Undo))
+        );
+        assert_eq!(
+            native(Edit(EditCommand::SelectAll)),
+            Some(Some(StandardAction::SelectAll))
+        );
+        assert_eq!(
+            native(Shortcut(ShortcutAction::CloseTab)),
+            Some(Some(StandardAction::PerformClose))
+        );
+        assert_eq!(native(Shortcut(ShortcutAction::NewTab)), None);
+        assert_eq!(native(About), None);
     }
 
     #[test]

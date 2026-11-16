@@ -1,5 +1,26 @@
-// The browser menu behind the toolbar's "⋮" button. Its colours follow the browser chrome,
-// which is dark in both system appearances.
+// The browser menu behind the toolbar's "⋮" button.
+
+import { Palette } from "std-widgets.slint";
+
+// Every colour the menus lane's chrome uses. They match the browser chrome, which is dark in
+// both system appearances today; at the merge with the settings lane's `ChromePalette`
+// (crates/mercury-ui/ui/theme/chrome-palette.slint) each one maps onto a palette role.
+export global MenuColors {
+    out property <color> panel: #1a222c;
+    out property <color> panel-border: #29323d;
+    out property <color> separator: #29323d;
+    out property <color> shadow: #00000080;
+    out property <color> row-highlight: #222d39;
+    out property <color> text: #edf4fa;
+    out property <color> text-disabled: #56616f;
+    out property <color> shortcut: #8b98a8;
+    out property <color> shortcut-disabled: #48525e;
+    out property <color> button: #161e28;
+    out property <color> button-hover: #222d39;
+    out property <color> button-pressed: #2b3744;
+    out property <color> button-text: #c9d3de;
+    out property <color> button-text-hover: #71c5ff;
+}
 
 export enum BrowserMenuCommand {
     new-tab,
@@ -34,23 +55,35 @@ export struct BrowserMenuEntry {
 
 component MenuSeparatorLine inherits Rectangle {
     height: 9px;
+    accessible-role: none;
 
     Rectangle {
         x: 8px;
         y: 4px;
         width: parent.width - 16px;
         height: 1px;
-        background: #29323d;
+        background: MenuColors.separator;
     }
 }
 
 component BrowserMenuRow inherits Rectangle {
     in property <BrowserMenuEntry> entry;
+    // Chosen with the arrow keys.
+    in property <bool> highlighted;
     callback activated(BrowserMenuCommand);
 
     height: 30px;
     border-radius: 6px;
-    background: touch.has-hover && root.entry.enabled ? #222d39 : transparent;
+    background: (touch.has-hover || root.highlighted) && root.entry.enabled ? MenuColors.row-highlight : transparent;
+    accessible-role: button;
+    accessible-label: root.entry.title;
+    accessible-description: root.entry.shortcut;
+    accessible-enabled: root.entry.enabled;
+    accessible-action-default => {
+        if root.entry.enabled {
+            root.activated(root.entry.command);
+        }
+    }
 
     HorizontalLayout {
         padding-left: 10px;
@@ -60,17 +93,19 @@ component BrowserMenuRow inherits Rectangle {
         Text {
             horizontal-stretch: 1;
             text: root.entry.title;
-            color: root.entry.enabled ? #edf4fa : #56616f;
+            color: root.entry.enabled ? MenuColors.text : MenuColors.text-disabled;
             font-size: 13px;
             vertical-alignment: center;
             overflow: elide;
+            accessible-role: none;
         }
 
         Text {
             text: root.entry.shortcut;
-            color: root.entry.enabled ? #8b98a8 : #48525e;
+            color: root.entry.enabled ? MenuColors.shortcut : MenuColors.shortcut-disabled;
             font-size: 12px;
             vertical-alignment: center;
+            accessible-role: none;
         }
     }
 
@@ -90,16 +125,20 @@ component ZoomButton inherits Rectangle {
     width: 32px;
     height: 26px;
     border-radius: 6px;
-    background: touch.pressed ? #2b3744 : touch.has-hover ? #222d39 : #161e28;
+    background: touch.pressed ? MenuColors.button-pressed : touch.has-hover ? MenuColors.button-hover : MenuColors.button;
     accessible-role: button;
     accessible-label: root.accessible-name;
+    accessible-action-default => {
+        root.clicked();
+    }
 
     Text {
         text: root.label;
-        color: touch.has-hover ? #71c5ff : #c9d3de;
+        color: touch.has-hover ? MenuColors.button-text-hover : MenuColors.button-text;
         font-size: 16px;
         horizontal-alignment: center;
         vertical-alignment: center;
+        accessible-role: none;
     }
 
     touch := TouchArea {
@@ -114,28 +153,33 @@ export component BrowserMenuPanel inherits Rectangle {
     in property <[BrowserMenuEntry]> top-entries;
     in property <[BrowserMenuEntry]> bottom-entries;
     in property <int> zoom-percent: 100;
+    // The row chosen with the arrow keys: an index into the top entries followed by the bottom
+    // ones, or -1.
+    in property <int> highlighted: -1;
     // An item other than the zoom buttons was chosen: the popup closes.
     callback activated(BrowserMenuCommand);
     // The zoom buttons keep the menu open, so the new percentage can be seen.
     callback zoom(BrowserMenuCommand);
 
-    width: 264px;
     border-radius: 10px;
     border-width: 1px;
-    border-color: #29323d;
-    background: #1a222c;
+    border-color: MenuColors.panel-border;
+    background: MenuColors.panel;
     drop-shadow-blur: 18px;
-    drop-shadow-color: #00000080;
+    drop-shadow-color: MenuColors.shadow;
     drop-shadow-offset-y: 4px;
+    accessible-role: list;
+    accessible-label: "Browser menu";
 
     VerticalLayout {
         padding: 6px;
         spacing: 0px;
 
-        for entry in root.top-entries: VerticalLayout {
+        for entry[index] in root.top-entries: VerticalLayout {
             if entry.separator-before: MenuSeparatorLine { }
             BrowserMenuRow {
                 entry: entry;
+                highlighted: root.highlighted == index;
                 activated(command) => {
                     root.activated(command);
                 }
@@ -153,9 +197,10 @@ export component BrowserMenuPanel inherits Rectangle {
             Text {
                 horizontal-stretch: 1;
                 text: "Zoom";
-                color: #edf4fa;
+                color: MenuColors.text;
                 font-size: 13px;
                 vertical-alignment: center;
+                accessible-role: none;
             }
 
             ZoomButton {
@@ -167,19 +212,24 @@ export component BrowserMenuPanel inherits Rectangle {
                 }
             }
 
-            zoom-reset := Rectangle {
+            Rectangle {
                 width: 52px;
                 border-radius: 6px;
-                background: reset-touch.has-hover ? #222d39 : transparent;
+                background: reset-touch.has-hover ? MenuColors.row-highlight : transparent;
                 accessible-role: button;
                 accessible-label: "Actual size";
+                accessible-value: root.zoom-percent + "%";
+                accessible-action-default => {
+                    root.zoom(BrowserMenuCommand.zoom-reset);
+                }
 
                 Text {
                     text: root.zoom-percent + "%";
-                    color: #c9d3de;
+                    color: MenuColors.button-text;
                     font-size: 12px;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                    accessible-role: none;
                 }
 
                 reset-touch := TouchArea {
@@ -201,10 +251,11 @@ export component BrowserMenuPanel inherits Rectangle {
 
         MenuSeparatorLine { }
 
-        for entry in root.bottom-entries: VerticalLayout {
+        for entry[index] in root.bottom-entries: VerticalLayout {
             if entry.separator-before: MenuSeparatorLine { }
             BrowserMenuRow {
                 entry: entry;
+                highlighted: root.highlighted == root.top-entries.length + index;
                 activated(command) => {
                     root.activated(command);
                 }
@@ -219,20 +270,107 @@ export component BrowserMenu inherits PopupWindow {
     in property <int> zoom-percent: 100;
     callback activated(BrowserMenuCommand);
 
+    property <int> highlighted: -1;
+    property <int> count: root.top-entries.length + root.bottom-entries.length;
+
+    pure function entry-at(index: int) -> BrowserMenuEntry {
+        if index < root.top-entries.length {
+            return root.top-entries[index];
+        }
+        root.bottom-entries[index - root.top-entries.length]
+    }
+
+    pure function wrap(index: int) -> int {
+        Math.mod(index + root.count, root.count)
+    }
+
+    // The next enabled row from `from` in direction `step` (1 or -1). Slint has no loops: this
+    // looks up to four rows ahead, more than the longest run of disabled rows in this menu.
+    pure function next-enabled(from: int, step: int) -> int {
+        if root.count == 0 {
+            return -1;
+        }
+        if root.entry-at(root.wrap(from + step)).enabled {
+            return root.wrap(from + step);
+        }
+        if root.entry-at(root.wrap(from + 2 * step)).enabled {
+            return root.wrap(from + 2 * step);
+        }
+        if root.entry-at(root.wrap(from + 3 * step)).enabled {
+            return root.wrap(from + 3 * step);
+        }
+        if root.entry-at(root.wrap(from + 4 * step)).enabled {
+            return root.wrap(from + 4 * step);
+        }
+        from
+    }
+
     close-policy: close-on-click-outside;
     width: 264px;
 
+    keys := FocusScope {
+        // Arrow keys move through the rows, Return chooses, Escape closes (Slint closes popups
+        // on Escape). Zoom keys keep working: they are browser shortcuts handled before Slint.
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if event.text == Key.DownArrow {
+                root.highlighted = root.next-enabled(root.highlighted < 0 ? -1 : root.highlighted, 1);
+                return accept;
+            }
+            if event.text == Key.UpArrow {
+                root.highlighted = root.next-enabled(root.highlighted < 0 ? root.count : root.highlighted, -1);
+                return accept;
+            }
+            if (event.text == Key.Return || event.text == " ") && root.highlighted >= 0 {
+                if root.entry-at(root.highlighted).enabled {
+                    root.close();
+                    root.activated(root.entry-at(root.highlighted).command);
+                }
+                return accept;
+            }
+            reject
+        }
+
+        BrowserMenuPanel {
+            width: root.width;
+            top-entries: root.top-entries;
+            bottom-entries: root.bottom-entries;
+            zoom-percent: root.zoom-percent;
+            highlighted: root.highlighted;
+            activated(command) => {
+                root.close();
+                root.activated(command);
+            }
+            zoom(command) => {
+                root.activated(command);
+            }
+        }
+    }
+}
+
+// The menu's panel in a window of its own, for the rendering test (crates/mercury-ui/tests).
+export component BrowserMenuPreview inherits Window {
+    in property <[BrowserMenuEntry]> top-entries;
+    in property <[BrowserMenuEntry]> bottom-entries;
+    in property <int> zoom-percent: 100;
+    in property <ColorScheme> preview-color-scheme: ColorScheme.unknown;
+
+    changed preview-color-scheme => {
+        Palette.color-scheme = self.preview-color-scheme;
+    }
+
+    width: 280px;
+    height: 320px;
+    background: Palette.background;
+
     BrowserMenuPanel {
-        width: parent.width;
+        x: 8px;
+        y: 8px;
+        width: 264px;
         top-entries: root.top-entries;
         bottom-entries: root.bottom-entries;
         zoom-percent: root.zoom-percent;
-        activated(command) => {
-            root.close();
-            root.activated(command);
-        }
-        zoom(command) => {
-            root.activated(command);
-        }
     }
 }

@@ -24,7 +24,7 @@ On macOS, ++cmd++ takes the place of ++ctrl++, `Cmd+[` and `Cmd+]` go back and f
 
 ## Menus
 
-On macOS, Mercury has a menu bar with Mercury Browser, File, Edit, View, History, Window and Help menus. Each menu item shows its keyboard shortcut, and the Window menu lists the open tabs. The ⋮ button at the end of the toolbar opens the browser menu on every platform. It has New Tab, zoom controls showing the current zoom level, About Mercury Browser, Help and Quit. Find and Settings appear greyed out because they are not available yet.
+On macOS, Mercury has a menu bar with Mercury Browser, File, Edit, View, History, Bookmarks, Window and Help menus. Each menu item shows its keyboard shortcut, and the Window menu lists the open tabs. The ⋮ button at the end of the toolbar opens the browser menu on every platform. It has New Tab, zoom controls showing the current zoom level, About Mercury Browser, Help and Quit; the arrow keys move through it, Return chooses and Escape closes it. Find and Settings appear greyed out because they are not available yet, as do the Bookmarks menu items.
 
 **About Mercury Browser** shows the version, the engine, the licence and the third-party notices.
 

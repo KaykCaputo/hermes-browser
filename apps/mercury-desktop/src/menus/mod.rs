@@ -111,6 +111,7 @@ pub(crate) fn sync(controller: &BrowserController) {
             .tabs()
             .position(|tab| tab.id() == active_tab_id)
             .unwrap_or(0),
+        bookmarks_bar: seams::bookmarks_bar_items(controller),
     };
     STATE.with(|menu_state| {
         if *menu_state.snapshot.borrow() != snapshot {
@@ -183,6 +184,10 @@ fn run_command(
         MenuCommand::RestorePreviousSession => seams::restore_previous_session(window),
         MenuCommand::ShowHistory => seams::show_history(window),
         MenuCommand::ClearBrowsingData => seams::clear_browsing_data(window),
+        MenuCommand::BookmarkThisPage => seams::bookmark_this_page(window),
+        MenuCommand::ToggleBookmarksBar => seams::toggle_bookmarks_bar(window),
+        MenuCommand::ShowBookmarksManager => seams::show_bookmarks_manager(window),
+        MenuCommand::OpenBookmarksBarItem(index) => seams::open_bookmarks_bar_item(window, index),
         MenuCommand::Find | MenuCommand::Stop => {}
     }
 }
