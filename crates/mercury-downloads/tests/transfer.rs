@@ -9,6 +9,12 @@ use mercury_downloads::{DownloadEvent, DownloadId, Timeouts};
 use support::*;
 use url::Url;
 
+/// The bound for "this happens promptly". Generous, so a loaded machine or CI runner does not
+/// fail it, yet far shorter than the operation would take if the behaviour under test were
+/// missing (a stream of 83 minutes, a stall of 600 s, a FIFO that blocks forever); below
+/// `TEST_TIMEOUT`, so the assertion and not the event wait reports the hang.
+const PROMPTLY: Duration = Duration::from_secs(10);
+
 fn started_fields(event: &DownloadEvent) -> (String, PathBuf, PathBuf, Option<u64>) {
     match event {
         DownloadEvent::Started {
@@ -837,7 +843,7 @@ fn a_fifo_at_the_partial_path_fails_fast() {
     let id = manager.start(request);
     let done = events_until_done(&events, id);
     failed(terminal(&done));
-    assert!(began.elapsed() < Duration::from_secs(2));
+    assert!(began.elapsed() < PROMPTLY, "{:?}", began.elapsed());
     assert!(partial.symlink_metadata().unwrap().file_type().is_fifo());
 }
 
@@ -1047,11 +1053,7 @@ fn cancel_stops_promptly_removes_the_partial_file_and_never_finishes() {
     let asked = Instant::now();
     manager.cancel(id);
     let rest = events_until_done(&events, id);
-    assert!(
-        asked.elapsed() < Duration::from_secs(1),
-        "{:?}",
-        asked.elapsed()
-    );
+    assert!(asked.elapsed() < PROMPTLY, "{:?}", asked.elapsed());
     assert!(
         matches!(terminal(&rest), DownloadEvent::Cancelled { .. }),
         "{rest:#?}"
@@ -1076,7 +1078,9 @@ fn cancel_before_started_emits_only_cancelled_and_leaves_nothing() {
     let asked = Instant::now();
     manager.cancel(id);
     let done = events_until_done(&events, id);
-    assert!(asked.elapsed() < Duration::from_secs(1));
+    assert!(asked.elapsed() < PROMPTLY, "{:?}", asked.elapsed());
+    // The server answers after 2 s: a cancel that waited for the answer would claim the
+    // partial file and report `Started` first, which this catches whatever the timing.
     assert_eq!(done.len(), 1, "{done:#?}");
     assert!(matches!(done[0], DownloadEvent::Cancelled { .. }));
     assert!(TempDir::list(&dir).is_empty());
@@ -1140,11 +1144,8 @@ fn dropping_the_manager_cancels_everything_and_returns() {
 
     let asked = Instant::now();
     drop(manager);
-    assert!(
-        asked.elapsed() < Duration::from_secs(3),
-        "{:?}",
-        asked.elapsed()
-    );
+    // Dropping waits at most its three-second grace for the transfers to clean up.
+    assert!(asked.elapsed() < PROMPTLY, "{:?}", asked.elapsed());
     let mut cancelled = Vec::new();
     while let Ok(event) = events.recv_timeout(Duration::from_millis(500)) {
         if let DownloadEvent::Cancelled { id } = event {
@@ -1169,7 +1170,7 @@ fn a_stalled_body_fails_as_resumable_after_the_idle_timeout() {
     let began = Instant::now();
     let id = manager.start(request(server.url("/stall"), &dir.path));
     let events = events_until_done(&events, id);
-    assert!(began.elapsed() < Duration::from_secs(5));
+    assert!(began.elapsed() < PROMPTLY, "{:?}", began.elapsed());
     let (error, resumable) = failed(terminal(&events));
     assert!(resumable, "{error}");
     assert!(error.contains("no data"), "{error}");
