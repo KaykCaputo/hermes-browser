@@ -159,16 +159,19 @@ BIG_LISTING="$(awk 'BEGIN {
 check "the generated listing is larger than a pipe buffer" yes \
     "$([ "${#BIG_LISTING}" -gt 500000 ] && echo yes || echo "no (${#BIG_LISTING} bytes)")"
 early_exit_reader() { awk '$1 == "minos" { print $2; exit }' >/dev/null; }
+# Each pipes the big listing into a reader; they run under the script's pipefail.
+big_into_early_exit_reader() { printf '%s\n' "$BIG_LISTING" | early_exit_reader; }
+big_into_has_rpath() { printf '%s\n' "$BIG_LISTING" | listing_has_rpath "$1"; }
 check "control: an early-exit reader fails on it under pipefail" fails \
-    "$(status eval 'printf "%s\n" "$BIG_LISTING" | early_exit_reader' 2>/dev/null)"
+    "$(status big_into_early_exit_reader 2>/dev/null)"
 check "listing_minos reads it through a pipe" "13.0 ok" \
     "$(set -o pipefail; result="$(printf '%s\n' "$BIG_LISTING" | listing_minos)" && echo "$result ok" || echo "$result fails ($?)")"
 check "listing_has_rpath finds the last rpath through a pipe" ok \
-    "$(status eval 'printf "%s\n" "$BIG_LISTING" | listing_has_rpath @executable_path/lib/')"
+    "$(status big_into_has_rpath @executable_path/lib/)"
 check "listing_has_rpath reports a missing rpath" fails \
-    "$(status eval 'printf "%s\n" "$BIG_LISTING" | listing_has_rpath @loader_path/')"
+    "$(status big_into_has_rpath @loader_path/)"
 check "an LC_LOAD_DYLIB name is not an rpath" fails \
-    "$(status eval 'printf "%s\n" "$BIG_LISTING" | listing_has_rpath @rpath/libgstexample00001-1.0.0.dylib')"
+    "$(status big_into_has_rpath @rpath/libgstexample00001-1.0.0.dylib)"
 
 # ── Version and deployment target ─────────────────────────────────────────
 check "deployment target, plain form" 13.0 "$(config_deployment_target <<<'MACOSX_DEPLOYMENT_TARGET = "13.0"')"
@@ -178,6 +181,27 @@ check "deployment target from .cargo/config.toml is a version" yes \
     "$([[ "$(config_deployment_target <.cargo/config.toml)" =~ ^[0-9]+(\.[0-9]+)*$ ]] && echo yes || echo no)"
 check "workspace version" 1.2.3 \
     "$(workspace_version <<<$'[package]\nversion = "9.9.9"\n[workspace.package]\nversion = "1.2.3"\nedition = "2024"')"
+
+# ── No bundle without its media libraries ─────────────────────────────────
+# Each run stops before writing anything; the --out directory must not appear.
+NO_OUT="$(mktemp -u -t mercury-test-bundle)"
+bundle_status() {
+    local output code=0
+    output="$(scripts/macos/bundle.sh --out "$NO_OUT" "$@" 2>&1)" || code=$?
+    printf '%s (exit %s)' "$output" "$code"
+}
+check "bundle.sh refuses to build without a GStreamer prefix" \
+    "bundle: error: no GStreamer prefix: pass --gstreamer-prefix or set MERCURY_GSTREAMER_PREFIX (see scripts/macos/gstreamer.sh; make app-macos does this) (exit 1)" \
+    "$(unset MERCURY_GSTREAMER_PREFIX; bundle_status)"
+# Captured first and matched as a string: no pipe into an early-exiting reader.
+contains_text() { case "$1" in *"$2"*) echo yes ;; *) echo no ;; esac; }
+check "an empty MERCURY_GSTREAMER_PREFIX is refused too" yes \
+    "$(contains_text "$(MERCURY_GSTREAMER_PREFIX='' bundle_status)" 'no GStreamer prefix')"
+check "a prefix that does not exist is refused" yes \
+    "$(contains_text "$(bundle_status --gstreamer-prefix "$NO_OUT-prefix")" 'does not exist (exit 1)')"
+check "a directory that is not a GStreamer prefix is refused" yes \
+    "$(contains_text "$(bundle_status --gstreamer-prefix "$PWD/scripts")" 'is not a GStreamer prefix')"
+check "the refusals wrote nothing" no "$([ -e "$NO_OUT" ] && echo yes || echo no)"
 
 [ "$failures" -eq 0 ] || { printf '%d check(s) failed\n' "$failures"; exit 1; }
 printf 'all checks passed\n'

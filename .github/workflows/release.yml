@@ -1,3 +1,9 @@
+# The macOS job, the signing steps and the publishing job are adapted from
+# Zervo, https://github.com/Goddv/Zervo, commit 86cb7126,
+# .github/workflows/macos.yml and .github/workflows/release.yml, MPL-2.0.
+#
+# The secrets this workflow understands, and what happens without them:
+# docs/developer-guide/continuous-integration.md.
 name: Release builds
 
 on:
@@ -6,11 +12,15 @@ on:
     tags:
       - "v*"
 
+# Read-only by default; only the publishing job may write, and only it can
+# mint the token that signs the provenance attestation.
 permissions:
   contents: read
 
 concurrency:
   group: release-${{ github.ref }}
+  # Never cancel a release build halfway: two runs for one tag is already a
+  # mistake, and stopping a multi-hour build is worse than letting it finish.
   cancel-in-progress: false
 
 env:
@@ -20,13 +30,56 @@ env:
   CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  version:
+    name: Check the version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the workspace version and compare it with the tag
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="$(awk '
+            /^\[/ { in_package = ($0 == "[workspace.package]") }
+            in_package && /^version[[:space:]]*=/ {
+              sub(/^[^"]*"/, ""); sub(/".*$/, ""); print; exit
+            }' Cargo.toml)"
+          if [[ -z "${version}" ]]; then
+            echo "No version in the [workspace.package] table of Cargo.toml." >&2
+            exit 1
+          fi
+          echo "Workspace version: ${version}"
+
+          # The disk image is named after this version; a tag that says
+          # otherwise would publish files that contradict their release.
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" != "v${version}" ]]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match the Cargo.toml version ${version}." >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
   build-linux:
     name: Linux x86-64
+    needs: version
     # Build against glibc 2.35 so the release also runs on distributions older
     # than the runner used to publish it. Linux binaries cannot use an older
     # glibc than the one they were linked against.
     runs-on: ubuntu-22.04
     timeout-minutes: 120
+    # The archive's digest, recorded by GitHub with the job rather than as an
+    # artefact; the publishing job checks the downloaded file against it.
+    outputs:
+      archive-sha256: ${{ steps.archive.outputs.sha256 }}
     env:
       # Keep bindgen's clang executable and dynamically loaded libclang on the
       # same version. The runner also ships Clang 15, and mixing its libclang
@@ -36,7 +89,9 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Free disk space for Servo
         shell: bash
@@ -53,14 +108,13 @@ jobs:
 
           df -h /
 
-      - name: Install Rust
+      - name: Install the pinned Rust toolchain
         shell: bash
         run: |
           set -euo pipefail
 
-          rustup update stable
-          rustup default stable
-          rustup component add clippy rustfmt
+          # Reads rust-toolchain.toml: channel, profile and components.
+          rustup toolchain install
 
           rustc --version
           cargo --version
@@ -180,6 +234,7 @@ jobs:
           fi
 
       - name: Create Linux archive
+        id: archive
         shell: bash
         run: |
           set -euo pipefail
@@ -224,9 +279,10 @@ jobs:
 
           test -f "${archive}"
           test -f "${checksum}"
+          echo "sha256=$(sha256sum "${archive}" | cut -d ' ' -f 1)" >> "${GITHUB_OUTPUT}"
 
       - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: mercury-browser-linux-x86_64
           path: |
@@ -235,31 +291,678 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  publish-release:
-    name: Publish GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs:
-      - build-linux
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-
-    permissions:
-      contents: write
+  # Builds the macOS executable. No secret and no environment: this job runs
+  # the build scripts and procedural macros of about 1,100 crates, so it gets
+  # nothing that could sign or notarise. The signing job below runs on a fresh
+  # runner and receives only the executable, pinned by the digest recorded
+  # here as a job output.
+  build-macos:
+    name: macOS Apple Silicon (build)
+    needs: version
+    # The same image as the CI job; see .github/workflows/ci.yml.
+    runs-on: macos-26
+    # A release build without CI's clippy and test passes.
+    timeout-minutes: 240
+    outputs:
+      executable-sha256: ${{ steps.digest.outputs.sha256 }}
 
     steps:
-      - name: Download release artifacts
-        uses: actions/download-artifact@v8
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          path: dist
-          merge-multiple: true
+          persist-credentials: false
 
-      - name: List release artifacts
+      - name: Free disk space for Servo
         shell: bash
         run: |
           set -euo pipefail
-          find dist -maxdepth 1 -type f -print
 
-      - name: Create or update the GitHub Release
+          df -h /
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}" ]; then
+            sudo rm -rf "${ANDROID_HOME}"
+          fi
+          default_xcode="$(cd "$(xcode-select -p)" && pwd -P)"
+          for xcode in /Applications/Xcode_*.app; do
+            if [ -L "${xcode}" ] || [ ! -d "${xcode}" ]; then
+              continue
+            fi
+            real="$(cd "${xcode}" && pwd -P)"
+            case "${default_xcode}/" in
+              "${real}"/*) echo "keeping ${xcode} (the selected Xcode)" ;;
+              *) sudo rm -rf "${xcode}" ;;
+            esac
+          done
+          xcode-select -p
+          df -h /
+
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      # The cache serves only this unprivileged job (and CI). The signing job
+      # never restores it: see the comment above package-macos.
+      - name: Restore the GStreamer packages
+        id: gstreamer-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/mercury-browser/gstreamer/**/*.pkg
+          key: gstreamer-macos-arm64-${{ hashFiles('scripts/macos/gstreamer.sh') }}
+
+      - name: Fetch and verify the GStreamer packages
+        run: scripts/macos/gstreamer.sh fetch
+
+      - name: Save the GStreamer packages
+        if: steps.gstreamer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/mercury-browser/gstreamer/**/*.pkg
+          key: ${{ steps.gstreamer-cache.outputs.cache-primary-key }}
+
+      - name: Unpack and check GStreamer
+        run: make gstreamer-macos
+
+      - name: Export the GStreamer build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scripts/ci/github-env.sh scripts/macos/gstreamer.sh env
+
+      - name: Check the GStreamer prefix
+        # As in CI, so a wrong prefix fails here and not after the approval.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          expected="$(scripts/macos/gstreamer.sh prefix)"
+          if [ -z "${MERCURY_GSTREAMER_PREFIX:-}" ] ||
+            [ "$(cd "${MERCURY_GSTREAMER_PREFIX}" && pwd -P)" != "$(cd "${expected}" && pwd -P)" ]; then
+            echo "MERCURY_GSTREAMER_PREFIX='${MERCURY_GSTREAMER_PREFIX:-}' is not ${expected}" >&2
+            exit 1
+          fi
+          test -f "${MERCURY_GSTREAMER_PREFIX}/lib/libgstreamer-1.0.0.dylib"
+          pkg-config --modversion gstreamer-1.0
+
+      - name: Build the release executable
+        run: cargo build --locked --release --package mercury-desktop
+
+      - name: Record the executable's digest
+        id: digest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test "$(lipo -archs target/release/mercury-browser)" = arm64
+          sha256="$(shasum -a 256 target/release/mercury-browser | cut -d ' ' -f 1)"
+          echo "sha256=${sha256}" >> "${GITHUB_OUTPUT}"
+          echo "target/release/mercury-browser: ${sha256}"
+
+      - name: Upload the unsigned executable
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Not named mercury-browser-*: the publishing job takes those.
+          name: unsigned-macos-arm64-executable
+          path: target/release/mercury-browser
+          if-no-files-found: error
+          # As long as the other artefacts: the signing job may wait days for
+          # an approval.
+          retention-days: 14
+
+  # Assembles, signs, notarises and checks Mercury Browser.app and its disk
+  # image from the executable built above.
+  #
+  # What keeps the credentials away from the build: this job runs on a fresh
+  # runner, has no step that builds, and takes in nothing that an
+  # unprivileged job or a third party can write except the executable, whose
+  # digest it checks and which it only copies and signs, never runs:
+  #   - no cache of any kind (a cache entry is a tar extracted with -P, so the
+  #     build job could plant files anywhere through it);
+  #   - GStreamer is downloaded afresh into $RUNNER_TEMP and checked against
+  #     the checksums pinned in scripts/macos/gstreamer.sh; nothing of it goes
+  #     on PATH and none of its programs is run;
+  #   - Servo's plugin lists come from the servo crate, checked against the
+  #     checksum in Cargo.lock;
+  #   - the Rust toolchain is taken off PATH, and failing stand-ins for cargo,
+  #     rustc, rustup and make go first on it to catch a mistake.
+  # Only the steps that need a secret receive it, through `env:`. The secrets
+  # live in the `release` environment, which the owner restricts to `v*` tags
+  # and to a reviewer (docs/developer-guide/continuous-integration.md).
+  #
+  # The limit: a compromised build can still have its own output signed and
+  # notarised. What this keeps out of its reach is the credentials.
+  package-macos:
+    name: macOS Apple Silicon (sign and package)
+    needs:
+      - version
+      - build-macos
+    # Skipped, not failed, for a manual run from a branch: the release
+    # environment would refuse it anyway. CI's ad-hoc bundle is the build to
+    # use from a branch.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-26
+    environment: release
+    timeout-minutes: 90
+    outputs:
+      dmg-sha256: ${{ steps.shipped.outputs.sha256 }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      EXECUTABLE_SHA256: ${{ needs.build-macos.outputs.executable-sha256 }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Take the Rust toolchain off PATH
+        # Nothing in this job builds; that is what prevents a rebuild. The
+        # stand-ins only make a mistake (a step that calls one of them) fail
+        # loudly instead of quietly compiling third-party code here.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          guard="${RUNNER_TEMP}/no-build-tools"
+          mkdir -p "${guard}"
+          for tool in cargo rustc rustup make; do
+            printf '#!/bin/sh\necho "%s must not run in the signing job" >&2\nexit 1\n' "${tool}" \
+              > "${guard}/${tool}"
+            chmod 755 "${guard}/${tool}"
+          done
+
+          kept=""
+          old_ifs="${IFS}"
+          IFS=:
+          for entry in ${PATH}; do
+            case "${entry}" in
+              "" | */.cargo/bin | */.cargo/bin/ | */.rustup/*) continue ;;
+            esac
+            if [ -x "${entry}/cargo" ] || [ -x "${entry}/rustc" ] || [ -x "${entry}/rustup" ]; then
+              echo "removing ${entry} from PATH"
+              continue
+            fi
+            kept="${kept:+${kept}:}${entry}"
+          done
+          IFS="${old_ifs}"
+          echo "PATH=${kept}" >> "${GITHUB_ENV}"
+          echo "${guard}" >> "${GITHUB_PATH}"
+
+      - name: Confirm that no build tool is reachable
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for tool in cargo rustc rustup make; do
+            found="$(command -v "${tool}")"
+            if [ "${found}" != "${RUNNER_TEMP}/no-build-tools/${tool}" ]; then
+              echo "${tool} resolves to ${found}" >&2
+              exit 1
+            fi
+          done
+          echo "PATH=${PATH}"
+
+      - name: Stop XProtect
+        # XProtect scans a freshly written disk image and can make hdiutil
+        # fail; Servo's own macOS CI stops it the same way.
+        run: sudo pkill -9 XProtect || true
+
+      - name: Download and unpack GStreamer into a fresh directory
+        # No cache: downloaded here, checked against the checksums pinned in
+        # scripts/macos/gstreamer.sh, expanded with pkgutil (which runs no
+        # package scripts). `check` is not run, since it executes the
+        # framework's pkg-config, and nothing is added to PATH.
+        shell: bash
+        env:
+          MERCURY_GSTREAMER_CACHE: ${{ runner.temp }}/gstreamer
+        run: |
+          set -euo pipefail
+
+          scripts/macos/gstreamer.sh fetch
+          scripts/macos/gstreamer.sh unpack
+          prefix="$(scripts/macos/gstreamer.sh prefix)"
+          test -f "${prefix}/lib/libgstreamer-1.0.0.dylib"
+          echo "GStreamer prefix: ${prefix}"
+
+      - name: Fetch Servo's plugin lists from the pinned crate
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          lists="${RUNNER_TEMP}/servo-plugin-lists"
+          scripts/ci/fetch-servo-plugin-lists.sh "${lists}"
+          # Read by scripts/macos/gstreamer-plugins.sh (the collector and the
+          # bundle check) instead of asking cargo.
+          echo "MERCURY_SERVO_PLUGIN_LISTS=${lists}" >> "${GITHUB_ENV}"
+
+      - name: Download the unsigned executable
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned-macos-arm64-executable
+          path: ${{ runner.temp }}/unsigned
+
+      - name: Verify the unsigned executable against the build's digest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          executable="${RUNNER_TEMP}/unsigned/mercury-browser"
+          case "${EXECUTABLE_SHA256}" in
+            "" | *[!0-9a-f]*) echo "the build job recorded no usable digest" >&2; exit 1 ;;
+          esac
+          if [ -L "${executable}" ] || [ ! -f "${executable}" ]; then
+            echo "${executable} is not a regular file" >&2
+            exit 1
+          fi
+          listing="$(find "${RUNNER_TEMP}/unsigned" -mindepth 1)"
+          if [ "${listing}" != "${executable}" ]; then
+            echo "the artefact holds more than the executable: ${listing}" >&2
+            exit 1
+          fi
+          actual="$(shasum -a 256 "${executable}" | cut -d ' ' -f 1)"
+          if [ "${actual}" != "${EXECUTABLE_SHA256}" ]; then
+            echo "digest ${actual} is not the build's ${EXECUTABLE_SHA256}" >&2
+            exit 1
+          fi
+          test "$(lipo -archs "${executable}")" = arm64
+          # The artefact zip does not keep the mode.
+          chmod 755 "${executable}"
+          echo "MERCURY_UNSIGNED_EXECUTABLE=${executable}" >> "${GITHUB_ENV}"
+
+      - name: Which signing secrets are there?
+        # The secrets context cannot be used in a step's `if:`, so only the
+        # answers leave this step, never the secrets.
+        id: signing
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          count() {
+            local n=0 value
+            for value in "$@"; do
+              [ -n "${value}" ] && n=$((n + 1))
+            done
+            echo "${n}"
+          }
+          complete() {
+            # complete <name of the set> <count>: 0 or 3, never in between.
+            if [ "$2" != 0 ] && [ "$2" != 3 ]; then
+              echo "::error::Some but not all of the $1 secrets are set."
+              exit 1
+            fi
+          }
+          signing="$(count "${MACOS_CERTIFICATE}" "${MACOS_CERTIFICATE_PASSWORD}" "${MACOS_SIGN_IDENTITY}")"
+          api_key="$(count "${APPLE_API_KEY}" "${APPLE_API_KEY_ID}" "${APPLE_API_ISSUER}")"
+          apple_id="$(count "${APPLE_ID}" "${APPLE_TEAM_ID}" "${APPLE_APP_PASSWORD}")"
+          complete "signing (MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, MACOS_SIGN_IDENTITY)" "${signing}"
+          complete "API key (APPLE_API_KEY, APPLE_API_KEY_ID, APPLE_API_ISSUER)" "${api_key}"
+          complete "Apple ID (APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD)" "${apple_id}"
+
+          sign=false
+          notarize=none
+          [ "${signing}" = 3 ] && sign=true
+          if [ "${api_key}" = 3 ]; then
+            notarize=api-key
+            [ "${apple_id}" = 3 ] &&
+              echo "::notice::Both notarisation routes are configured; the App Store Connect API key is used."
+          elif [ "${apple_id}" = 3 ]; then
+            notarize=apple-id
+          fi
+          if [ "${notarize}" != none ] && [ "${sign}" != true ]; then
+            echo "::error::Notarisation secrets are set but the signing secrets are not; notarisation needs a Developer ID signature."
+            exit 1
+          fi
+          echo "sign=${sign}" >> "${GITHUB_OUTPUT}"
+          echo "notarize=${notarize}" >> "${GITHUB_OUTPUT}"
+          echo "Developer ID signing: ${sign}; notarisation: ${notarize}"
+
+      - name: Import the signing certificate into a temporary keychain
+        if: steps.signing.outputs.sign == 'true'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+
+          # Files written from here on are readable by this user only.
+          umask 077
+          # A keychain of its own, made for this job and deleted as soon as
+          # signing and notarisation are done; the login keychain is never
+          # touched.
+          keychain="${RUNNER_TEMP}/mercury-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          certificate="${RUNNER_TEMP}/mercury-signing.p12"
+          identities="${RUNNER_TEMP}/mercury-identities.txt"
+          trap 'rm -f -- "${certificate}" "${identities}"' EXIT
+
+          printf '%s' "${MACOS_CERTIFICATE}" | base64 --decode > "${certificate}"
+          security create-keychain -p "${keychain_password}" "${keychain}"
+          security set-keychain-settings -lut 21600 "${keychain}"
+          security unlock-keychain -p "${keychain_password}" "${keychain}"
+          # -x: the private key cannot be exported from the keychain again.
+          # -P puts the .p12 password on a command line, visible to process
+          # listings while `security` runs; `security import` has no other
+          # non-interactive way to take it. What limits that: this runner is
+          # fresh, and no step of this job runs third-party code.
+          security import "${certificate}" -k "${keychain}" -x \
+            -P "${MACOS_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+          rm -f -- "${certificate}"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "${keychain_password}" "${keychain}" > /dev/null
+          # Searched first, ahead of the existing list, for codesign.
+          existing="$(security list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"$//')"
+          # shellcheck disable=SC2086 # one keychain path per line, none with spaces
+          security list-keychains -d user -s "${keychain}" ${existing}
+          echo "MERCURY_SIGNING_KEYCHAIN=${keychain}" >> "${GITHUB_ENV}"
+
+          # Written to a file and searched there: grep -q on a pipe can stop
+          # reading early and turn the producer's SIGPIPE into a failure.
+          security find-identity -v -p codesigning "${keychain}" > "${identities}"
+          if ! grep -qF "\"${MACOS_SIGN_IDENTITY}\"" "${identities}"; then
+            echo "::error::MACOS_SIGN_IDENTITY does not name a valid code-signing identity in the imported certificate."
+            exit 1
+          fi
+
+      - name: Store the Apple ID notarisation credentials in the keychain
+        # The alternative route; the API key (below) is preferred because it
+        # puts no password on a command line. notarytool store-credentials
+        # takes the app-specific password with --password or interactively,
+        # and there is no terminal here, so the same limits apply as for the
+        # certificate password above.
+        if: steps.signing.outputs.notarize == 'apple-id'
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          xcrun notarytool store-credentials mercury-notary \
+            --apple-id "${APPLE_ID}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_PASSWORD}" \
+            --keychain "${MERCURY_SIGNING_KEYCHAIN}" > /dev/null
+
+      - name: Assemble, sign and package Mercury Browser.app
+        # bundle.sh directly (no make target, nothing that could rebuild):
+        # it copies the executable, collects GStreamer from
+        # MERCURY_GSTREAMER_PREFIX, signs with the identity and makes the dmg.
+        shell: bash
+        env:
+          # The identity's name only; the key stays in the keychain. Empty
+          # without a certificate, and bundle.sh then signs ad hoc.
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          SIGN: ${{ steps.signing.outputs.sign }}
+          MERCURY_GSTREAMER_CACHE: ${{ runner.temp }}/gstreamer
+        run: |
+          set -euo pipefail
+
+          MERCURY_GSTREAMER_PREFIX="$(scripts/macos/gstreamer.sh prefix)"
+          export MERCURY_GSTREAMER_PREFIX
+          if [ "${SIGN}" = true ]; then
+            identity="${MACOS_SIGN_IDENTITY}"
+          else
+            identity="-"
+          fi
+          scripts/macos/bundle.sh \
+            --binary "${MERCURY_UNSIGNED_EXECUTABLE}" \
+            --out dist \
+            --identity "${identity}" \
+            --dmg
+
+          dmg="dist/mercury-browser-${VERSION}-macos-arm64.dmg"
+          test -f "${dmg}"
+          test -f "${dmg}.sha256"
+
+      - name: Check the bundle before notarising
+        shell: bash
+        env:
+          SIGN: ${{ steps.signing.outputs.sign }}
+        run: |
+          set -euo pipefail
+
+          if [ "${SIGN}" = true ]; then signature=developer-id; else signature=adhoc; fi
+          scripts/ci/check-macos-bundle.sh --signature "${signature}" --require-media \
+            "dist/Mercury Browser.app"
+
+      - name: Notarise the disk image (App Store Connect API key)
+        if: steps.signing.outputs.notarize == 'api-key'
+        shell: bash
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+
+          # The key goes to a file only this user can read, removed when the
+          # step ends; only its path, id and issuer appear on the command line.
+          umask 077
+          key="${RUNNER_TEMP}/mercury-notary-key.p8"
+          trap 'rm -f -- "${key}"' EXIT
+          printf '%s\n' "${APPLE_API_KEY}" > "${key}"
+          xcrun notarytool submit "dist/mercury-browser-${VERSION}-macos-arm64.dmg" \
+            --key "${key}" \
+            --key-id "${APPLE_API_KEY_ID}" \
+            --issuer "${APPLE_API_ISSUER}" \
+            --wait
+
+      - name: Notarise the disk image (Apple ID)
+        if: steps.signing.outputs.notarize == 'apple-id'
+        # No secret here: notarytool reads the credentials stored in the
+        # temporary keychain.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcrun notarytool submit "dist/mercury-browser-${VERSION}-macos-arm64.dmg" \
+            --keychain-profile mercury-notary \
+            --keychain "${MERCURY_SIGNING_KEYCHAIN}" \
+            --wait
+
+      - name: Delete the signing keychain
+        # Straight after the last step that signs or notarises: nothing after
+        # this needs the key. The final step repeats it as a backstop.
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          keychain="${RUNNER_TEMP}/mercury-signing.keychain-db"
+          if [ -e "${keychain}" ]; then
+            security delete-keychain "${keychain}"
+            echo "deleted ${keychain}"
+          fi
+
+      - name: Staple the notarisation ticket
+        if: steps.signing.outputs.notarize != 'none'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          name="mercury-browser-${VERSION}-macos-arm64.dmg"
+          xcrun stapler staple "dist/${name}"
+          # Stapling changes the file, so its checksum is written again.
+          (cd dist && shasum -a 256 "${name}" > "${name}.sha256")
+
+      - name: Check the disk image as it will ship
+        id: shipped
+        shell: bash
+        env:
+          SIGN: ${{ steps.signing.outputs.sign }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+        run: |
+          set -euo pipefail
+
+          name="mercury-browser-${VERSION}-macos-arm64.dmg"
+          (cd dist && shasum -a 256 -c "${name}.sha256")
+          if [ "${SIGN}" = true ]; then
+            signature=developer-id
+            codesign --verify --strict --verbose=2 "dist/${name}"
+          else
+            signature=adhoc
+          fi
+          if [ "${NOTARIZE}" != none ]; then
+            xcrun stapler validate "dist/${name}"
+            spctl --assess --type open --context context:primary-signature --verbose=2 "dist/${name}"
+          fi
+
+          mountpoint="${RUNNER_TEMP}/mercury-dmg"
+          mkdir -p "${mountpoint}"
+          hdiutil attach -readonly -nobrowse -noautoopen -mountpoint "${mountpoint}" "dist/${name}"
+          trap 'hdiutil detach "${mountpoint}" || hdiutil detach -force "${mountpoint}"' EXIT
+          scripts/ci/check-macos-bundle.sh --signature "${signature}" --require-media \
+            "${mountpoint}/Mercury Browser.app"
+
+          echo "sha256=$(shasum -a 256 "dist/${name}" | cut -d ' ' -f 1)" >> "${GITHUB_OUTPUT}"
+
+      - name: Describe the signature in the job summary
+        shell: bash
+        env:
+          SIGN: ${{ steps.signing.outputs.sign }}
+          NOTARIZE: ${{ steps.signing.outputs.notarize }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "### macOS disk image"
+            echo
+            echo "\`mercury-browser-${VERSION}-macos-arm64.dmg\`"
+            echo
+            if [ "${SIGN}" != true ]; then
+              echo "**Ad-hoc signature.** The release environment has no Developer ID secrets"
+              echo "(MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, MACOS_SIGN_IDENTITY), so"
+              echo "the app is signed ad hoc and not notarised. Gatekeeper will refuse to open"
+              echo "it after a download until the quarantine attribute is removed."
+            elif [ "${NOTARIZE}" = none ]; then
+              echo "**Developer ID signature, not notarised.** The release environment has no"
+              echo "notarisation secrets (an App Store Connect API key, or an Apple ID)."
+            else
+              echo "**Developer ID signature, notarised (${NOTARIZE}) and stapled.**"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload the macOS artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mercury-browser-macos-arm64
+          path: |
+            dist/mercury-browser-${{ needs.version.outputs.version }}-macos-arm64.dmg
+            dist/mercury-browser-${{ needs.version.outputs.version }}-macos-arm64.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Delete the keychain and key files (backstop)
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          keychain="${RUNNER_TEMP}/mercury-signing.keychain-db"
+          if [ -e "${keychain}" ]; then
+            security delete-keychain "${keychain}"
+          fi
+          rm -f -- "${RUNNER_TEMP}/mercury-signing.p12" "${RUNNER_TEMP}/mercury-notary-key.p8"
+
+  # Only a push of a v* tag publishes. A manual run (workflow_dispatch) builds
+  # and leaves its artefacts on the run; it never touches a release, so it
+  # cannot replace published files with different bytes.
+  publish-release:
+    name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - version
+      - build-linux
+      - package-macos
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # Recorded by the jobs that made the files, as job outputs.
+      LINUX_SHA256: ${{ needs.build-linux.outputs.archive-sha256 }}
+      MACOS_SHA256: ${{ needs.package-macos.outputs.dmg-sha256 }}
+
+    permissions:
+      contents: write
+      # actions/attest: the OIDC token signs the attestation and
+      # `attestations` stores it.
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: mercury-browser-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify the artefacts and write SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          linux="mercury-browser-linux-x86_64.tar.gz"
+          macos="mercury-browser-${VERSION}-macos-arm64.dmg"
+          cd dist
+
+          # Exactly these four files, nothing else.
+          expected="$(printf '%s\n' "${linux}" "${linux}.sha256" "${macos}" "${macos}.sha256" | sort)"
+          present="$(find . -mindepth 1 -printf '%P\n' | sort)"
+          if [ "${present}" != "${expected}" ]; then
+            printf 'expected:\n%s\nfound:\n%s\n' "${expected}" "${present}" >&2
+            exit 1
+          fi
+
+          # Each artefact against the digest its job recorded, then against
+          # the .sha256 file that travelled with it.
+          check() {
+            local file="$1" want="$2" got
+            case "${want}" in
+              "" | *[!0-9a-f]*) echo "no usable recorded digest for ${file}" >&2; exit 1 ;;
+            esac
+            got="$(sha256sum "${file}" | cut -d ' ' -f 1)"
+            if [ "${got}" != "${want}" ]; then
+              echo "${file}: ${got}, but its job recorded ${want}" >&2
+              exit 1
+            fi
+            sha256sum --check "${file}.sha256"
+          }
+          check "${linux}" "${LINUX_SHA256}"
+          check "${macos}" "${MACOS_SHA256}"
+
+          # One file covering every platform's artefacts, written outside the
+          # directory being listed and then moved in.
+          sha256sum -- "${linux}" "${macos}" > "${RUNNER_TEMP}/SHA256SUMS"
+          mv "${RUNNER_TEMP}/SHA256SUMS" SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Publish the GitHub Release
+        # Draft first, every asset uploaded, then published: a release is
+        # never public without its files. An already published release is
+        # left alone rather than given different bytes.
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -268,10 +971,18 @@ jobs:
           set -euo pipefail
 
           tag="${GITHUB_REF_NAME}"
+          state="${RUNNER_TEMP}/release-state"
 
-          if ! gh release view "${tag}" >/dev/null 2>&1; then
+          if gh release view "${tag}" --json isDraft --jq .isDraft > "${state}" 2>/dev/null; then
+            if [ "$(cat "${state}")" != true ]; then
+              echo "::error::Release ${tag} is already published; its assets are not replaced."
+              exit 1
+            fi
+            echo "Reusing the draft release ${tag}."
+          else
             gh release create \
               "${tag}" \
+              --draft \
               --verify-tag \
               --generate-notes \
               --title "${tag}"
@@ -281,3 +992,5 @@ jobs:
             "${tag}" \
             dist/* \
             --clobber
+
+          gh release edit "${tag}" --draft=false

@@ -16,6 +16,7 @@ The codebase is small enough to read, but the engine underneath it is not. This 
 3. [Servo integration](servo-integration.md) — understand rendering, media, content blocking, and process mode.
 4. [Testing and quality](testing.md) — run the right checks for the area you changed.
 5. [Vendored patches](vendored-patches.md) — preserve the project's narrow patch policy.
+6. [Continuous integration](continuous-integration.md) — what CI and the release workflow check, the dependency policy, and how to update the pins.
 
 ## Repository map
 
