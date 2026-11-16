@@ -63,6 +63,9 @@ Options:
                                    Leave off Servo's experimental web-platform features
                                    (servoshell's list minus the async clipboard and
                                    WebGPU, which are always off)
+                                   Both --disable options turn the feature off for this
+                                   run whatever the setting says; they cannot turn on a
+                                   feature the settings turned off
   --profile-dir <directory>        Keep cookies and site data in this directory
                                    (screenshot and background runs otherwise use a temporary one)
   --help                           Print this help and exit
@@ -511,6 +514,15 @@ mod tests {
             reject_non_utf8_paths(&[OsString::from("--screenshot"), OsString::from("out.png")]),
             None
         );
+    }
+
+    #[test]
+    fn help_says_the_disable_options_win_over_the_settings() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        assert!(text.contains("run whatever the setting says"));
     }
 
     #[test]

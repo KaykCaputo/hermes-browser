@@ -5369,9 +5369,11 @@ dependencies = [
  "gl_generator",
  "gleam",
  "glow",
+ "i-slint-backend-testing",
  "image",
  "libc",
  "log",
+ "mercury-settings",
  "mercury-ui",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
@@ -5383,6 +5385,7 @@ dependencies = [
  "surfman",
  "talaria-core",
  "talaria-servo",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -5438,7 +5441,6 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "talaria-core",
  "tempfile",
  "thiserror 2.0.21",
  "url",
@@ -10931,6 +10933,7 @@ dependencies = [
  "serde_json",
  "servo",
  "talaria-core",
+ "tempfile",
  "url",
 ]
 

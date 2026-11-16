@@ -6,13 +6,19 @@ edition.workspace = true
 license.workspace = true
 build = "build.rs"
 
+[features]
+# Names the elements in the generated code, so tests can find them through Slint's testing
+# backend. Only for tests: it also turns off one of Slint's optimisations for the whole UI.
+test-support = []
+
 [dependencies]
 slint.workspace = true
 
-[build-dependencies]
-slint-build.workspace = true
-
-# `examples/render_controls.rs` draws the page-control popups without a display.
+# Only for `examples/render_settings.rs` and `examples/render_controls.rs`, which render the
+# settings window and the page-control popups without a display.
 [dev-dependencies]
 image.workspace = true
 slint = { workspace = true, features = ["renderer-software"] }
+
+[build-dependencies]
+slint-build.workspace = true

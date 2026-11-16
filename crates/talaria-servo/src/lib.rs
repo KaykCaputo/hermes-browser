@@ -2,6 +2,7 @@ mod adblocker;
 mod content_process;
 mod embedder_controls;
 mod error;
+mod exit_clearing;
 mod frame_ready;
 mod load_metrics;
 mod opengl_context;
@@ -16,6 +17,7 @@ pub use content_process::{
     ContentProcessArgumentError, record_browser_process_id, run_content_process_if_requested,
 };
 pub use error::ServoWebViewError;
+pub use exit_clearing::{EngineSwitches, ExitClearing};
 pub use opengl_context::ViewportSize;
 pub use panics::{hard_fail_in_single_process, should_panic_hook_suppress_termination};
 pub use runtime::{EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ServoRuntime};
