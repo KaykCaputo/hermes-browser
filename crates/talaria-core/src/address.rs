@@ -26,6 +26,8 @@ pub enum AddressResolutionError {
     EmptyInput,
     InvalidUrl(url::ParseError),
     UnsupportedScheme(String),
+    /// The search engine could not build a URL for this text.
+    Search(String),
 }
 
 impl Display for AddressResolutionError {
@@ -36,6 +38,7 @@ impl Display for AddressResolutionError {
             Self::UnsupportedScheme(scheme) => {
                 write!(formatter, "unsupported URL scheme: {scheme}")
             }
+            Self::Search(reason) => write!(formatter, "cannot search for this text: {reason}"),
         }
     }
 }
@@ -44,7 +47,7 @@ impl Error for AddressResolutionError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidUrl(error) => Some(error),
-            Self::EmptyInput | Self::UnsupportedScheme(_) => None,
+            Self::EmptyInput | Self::UnsupportedScheme(_) | Self::Search(_) => None,
         }
     }
 }
@@ -84,6 +87,42 @@ pub fn classify_address(input: &str) -> Result<NavigationTarget, AddressResoluti
 
 pub fn resolve_address(input: &str) -> Result<Url, AddressResolutionError> {
     classify_address(input)?.into_url()
+}
+
+/// Builds the results-page URL for address-bar text that is not an address. The application
+/// supplies it (from its search-engine settings), so the core never builds search URLs itself
+/// once one is set; without one, `NavigationTarget::into_url` is used.
+pub struct SearchUrlBuilder(Box<BuildSearchUrl>);
+
+type BuildSearchUrl = dyn Fn(&str) -> Result<Url, String>;
+
+impl SearchUrlBuilder {
+    /// `build` receives the whole trimmed text, keywords included, and returns the URL or why
+    /// it cannot make one.
+    pub fn new(build: impl Fn(&str) -> Result<Url, String> + 'static) -> Self {
+        Self(Box::new(build))
+    }
+
+    pub fn build(&self, text: &str) -> Result<Url, AddressResolutionError> {
+        (self.0)(text).map_err(AddressResolutionError::Search)
+    }
+}
+
+impl std::fmt::Debug for SearchUrlBuilder {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SearchUrlBuilder")
+    }
+}
+
+/// Like `resolve_address`, with searches built by `search` when one is given.
+pub fn resolve_address_with(
+    input: &str,
+    search: Option<&SearchUrlBuilder>,
+) -> Result<Url, AddressResolutionError> {
+    match (classify_address(input)?, search) {
+        (NavigationTarget::SearchQuery(query), Some(search)) => search.build(&query),
+        (target, _) => target.into_url(),
+    }
 }
 
 fn is_supported_scheme(scheme: &str) -> bool {

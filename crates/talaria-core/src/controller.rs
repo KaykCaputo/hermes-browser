@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use crate::address::{AddressResolutionError, resolve_address};
+use crate::address::{AddressResolutionError, SearchUrlBuilder, resolve_address_with};
 use crate::browser::LoadState;
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
 use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, Tab, TabActivation, TabCommand, TabId};
@@ -12,6 +12,12 @@ pub struct BrowserController {
     next_tab_id: u64,
     command_queue: VecDeque<TabCommand>,
     color_scheme: ColorScheme,
+    // settings
+    /// The system's scheme, as last reported; `color_scheme` is what pages see.
+    system_color_scheme: ColorScheme,
+    forced_color_scheme: Option<ColorScheme>,
+    default_zoom_percent: u16,
+    search: Option<SearchUrlBuilder>,
 }
 
 impl BrowserController {
@@ -24,6 +30,10 @@ impl BrowserController {
             next_tab_id: 2,
             command_queue: VecDeque::new(),
             color_scheme: ColorScheme::default(),
+            system_color_scheme: ColorScheme::default(),
+            forced_color_scheme: None,
+            default_zoom_percent: DEFAULT_ZOOM_PERCENT,
+            search: None,
         }
     }
 
@@ -31,7 +41,7 @@ impl BrowserController {
     /// cannot navigate it, so the pending page is replaced instead: the URL becomes the tab's
     /// initial URL again and the engine recreates the tab's web view with it.
     pub fn queue_navigation(&mut self, input: &str) -> Result<(), AddressResolutionError> {
-        let url = resolve_address(input)?.to_string();
+        let url = resolve_address_with(input, self.search.as_ref())?.to_string();
         let tab_id = self.active_tab_id;
         let tab = self
             .tab_mut(tab_id)
@@ -81,7 +91,9 @@ impl BrowserController {
         activation: TabActivation,
     ) -> Result<TabId, AddressResolutionError> {
         let initial_url = initial_address
-            .map(|address| resolve_address(address).map(|url| url.to_string()))
+            .map(|address| {
+                resolve_address_with(address, self.search.as_ref()).map(|url| url.to_string())
+            })
             .transpose()?;
         let tab_id = self.open_blank_tab(activation);
 
@@ -102,7 +114,7 @@ impl BrowserController {
         tab_id: TabId,
         address: &str,
     ) -> Result<bool, AddressResolutionError> {
-        let url = resolve_address(address)?.to_string();
+        let url = resolve_address_with(address, self.search.as_ref())?.to_string();
         Ok(self
             .tab_mut(tab_id)
             .is_some_and(|tab| set_tab_initial_url(tab, url)))
@@ -168,7 +180,7 @@ impl BrowserController {
     }
 
     pub fn reset_zoom(&mut self) {
-        self.set_active_zoom(DEFAULT_ZOOM_PERCENT);
+        self.set_active_zoom(self.default_zoom_percent);
     }
 
     /// The colour scheme pages should see; the engine gives it to every new web view.
@@ -178,7 +190,16 @@ impl BrowserController {
 
     /// Records the scheme and queues it for every tab. Tabs that are not engine-ready hold it
     /// until they are, like other non-pointer commands.
+    /// While a scheme is forced (`set_forced_color_scheme`), the system's is only remembered.
     pub fn set_color_scheme(&mut self, scheme: ColorScheme) {
+        self.system_color_scheme = scheme;
+        if self.forced_color_scheme.is_some() {
+            return;
+        }
+        self.send_color_scheme(scheme);
+    }
+
+    fn send_color_scheme(&mut self, scheme: ColorScheme) {
         self.color_scheme = scheme;
         let tab_ids = self.tabs.iter().map(Tab::id).collect::<Vec<_>>();
         for tab_id in tab_ids {
@@ -348,11 +369,55 @@ impl BrowserController {
     fn open_blank_tab(&mut self, activation: TabActivation) -> TabId {
         let tab_id = TabId::new(self.next_tab_id);
         self.next_tab_id += 1;
-        self.tabs.push(Tab::new(tab_id, BrowserState::default()));
+        let mut state = BrowserState::default();
+        state.set_zoom_percent(self.default_zoom_percent);
+        self.tabs.push(Tab::new(tab_id, state));
         if activation == TabActivation::Foreground {
             self.active_tab_id = tab_id;
         }
         tab_id
+    }
+
+    // settings
+
+    /// Searches typed in the address bar are built by `search` from now on.
+    pub fn set_search_url_builder(&mut self, search: SearchUrlBuilder) {
+        self.search = Some(search);
+    }
+
+    /// The zoom of a tab that has no zoom of its own.
+    pub const fn default_zoom_percent(&self) -> u16 {
+        self.default_zoom_percent
+    }
+
+    /// New tabs open at `percent`, and every tab still at the old default moves to it.
+    pub fn set_default_zoom_percent(&mut self, percent: u16) {
+        let old = std::mem::replace(&mut self.default_zoom_percent, percent);
+        if old == percent {
+            return;
+        }
+        let at_old_default = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.state().zoom_percent() == old)
+            .map(Tab::id)
+            .collect::<Vec<_>>();
+        for tab_id in at_old_default {
+            if let Some(tab) = self.tab_mut(tab_id) {
+                tab.state_mut().set_zoom_percent(percent);
+            }
+            self.queue_command_for(tab_id, BrowserCommand::SetPageZoom { percent });
+        }
+    }
+
+    /// Makes pages see `scheme` whatever the system's is, or follow the system again with
+    /// `None`. Tabs are told only when what they see changes.
+    pub fn set_forced_color_scheme(&mut self, scheme: Option<ColorScheme>) {
+        self.forced_color_scheme = scheme;
+        let effective = scheme.unwrap_or(self.system_color_scheme);
+        if effective != self.color_scheme {
+            self.send_color_scheme(effective);
+        }
     }
 
     fn is_engine_ready(&self, tab_id: TabId) -> bool {
