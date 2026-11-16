@@ -1,15 +1,31 @@
+# The macOS job and the lint, policy and fast jobs are adapted from Zervo,
+# https://github.com/Goddv/Zervo, commit 86cb7126, .github/workflows/check.yml
+# and .github/workflows/macos.yml, MPL-2.0.
+#
+# What each job checks, how long it takes and how to run the same checks
+# locally: docs/developer-guide/continuous-integration.md.
 name: Continuous integration
 
 on:
+  # The default and working branches, and pull requests. Not every branch: a
+  # push to a pull request's branch would otherwise run the multi-hour macOS
+  # job twice. Tags run the release workflow instead.
   push:
+    branches:
+      - master
+      - mercury
   pull_request:
+  workflow_dispatch:
 
+# Every job reads the repository and nothing else. No job here uses a secret.
 permissions:
   contents: read
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # A newer push to the same branch or pull request supersedes this run; a tag
+  # never does (and this workflow does not run on tags, but say so anyway).
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,10 +41,12 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
           cache: pip
@@ -40,6 +58,54 @@ jobs:
       - name: Build documentation
         run: make docs
 
+  # Formatting, then clippy and the tests of every workspace crate that
+  # depends on neither Servo nor Slint, on both platforms (some of those crates
+  # have platform-specific code). Minutes, not hours: nothing here compiles the
+  # engine.
+  fast:
+    name: Fast checks (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            runner: ubuntu-24.04
+          - name: macOS
+            runner: macos-26
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Reads rust-toolchain.toml: channel, profile and components.
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Lint and test the engine-free crates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scripts/ci/light-crates.sh --explain
+          # Assigned first so that a failure of the script stops the step.
+          arguments="$(scripts/ci/light-crates.sh)"
+          read -r -a packages <<<"${arguments}"
+          cargo clippy --locked --release "${packages[@]}" --all-targets -- -D warnings
+          cargo test --locked --release "${packages[@]}"
+
   test-linux:
     name: Linux quality checks
     runs-on: ubuntu-22.04
@@ -50,7 +116,9 @@ jobs:
 
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Free disk space for Servo
         shell: bash
@@ -65,14 +133,13 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      - name: Install Rust
+      - name: Install the pinned Rust toolchain
         shell: bash
         run: |
           set -euo pipefail
 
-          rustup update stable
-          rustup default stable
-          rustup component add clippy rustfmt
+          # Reads rust-toolchain.toml: channel, profile and components.
+          rustup toolchain install
 
           rustc --version
           cargo --version
@@ -142,3 +209,306 @@ jobs:
             -- \
             -D warnings
           cargo test --locked --workspace
+
+  # The whole browser on Apple Silicon: format, release build, bundle, bundle
+  # checks, a rendering smoke test, then clippy and the tests. Everything uses
+  # the release profile, so the engine's code is generated once (`cargo test
+  # --release` reuses the dependencies `cargo build --release` produced);
+  # clippy still type-checks the graph separately, as it always does.
+  macos:
+    name: macOS (Apple Silicon)
+    # macos-26 is GitHub's newest generally available arm64 image (3 M1 cores,
+    # 7 GB of memory) and what macos-latest points to; named explicitly so an
+    # image change is a commit, not a surprise.
+    runs-on: macos-26
+    # The Linux job allows 120 minutes for a debug clippy and test run on 4
+    # cores. This job does a release build, a clippy pass and the tests on 3
+    # cores, which is roughly two and a half times the work: about 180-240
+    # minutes. 330 leaves room and stays under GitHub's 360-minute job limit.
+    timeout-minutes: 330
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Free disk space for Servo
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          df -h /
+          # The Android SDK (ANDROID_HOME in the image's README) and the
+          # non-default Xcode versions are the largest things this job does
+          # not use.
+          if [ -n "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_HOME}" ]; then
+            sudo rm -rf "${ANDROID_HOME}"
+          fi
+          # Compare real paths: /Applications/Xcode.app and the Xcode_x.y.0
+          # names are symbolic links to the versioned directories.
+          default_xcode="$(cd "$(xcode-select -p)" && pwd -P)"
+          for xcode in /Applications/Xcode_*.app; do
+            if [ -L "${xcode}" ] || [ ! -d "${xcode}" ]; then
+              continue
+            fi
+            real="$(cd "${xcode}" && pwd -P)"
+            case "${default_xcode}/" in
+              "${real}"/*) echo "keeping ${xcode} (the selected Xcode)" ;;
+              *) sudo rm -rf "${xcode}" ;;
+            esac
+          done
+          xcode-select -p
+          df -h /
+
+      - name: Show the build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sw_vers
+          xcode-select -p
+          bash --version | sed -n 1p
+          cmake --version | sed -n 1p
+          pkg-config --version
+          python3 --version
+
+      - name: Install the pinned Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Reads rust-toolchain.toml: channel, profile and components.
+          rustup toolchain install
+          rustc --version
+          cargo --version
+
+      # Only the downloaded .pkg files are cached (from a server outside
+      # GitHub); unpacking them takes a minute. The key is the script that pins
+      # the version and the checksums, so changing either starts a new cache.
+      - name: Restore the GStreamer packages
+        id: gstreamer-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/mercury-browser/gstreamer/**/*.pkg
+          key: gstreamer-macos-arm64-${{ hashFiles('scripts/macos/gstreamer.sh') }}
+
+      - name: Fetch and verify the GStreamer packages
+        run: scripts/macos/gstreamer.sh fetch
+
+      # Saved straight after the checksums pass, so a run that fails later
+      # does not make the next one download them again.
+      - name: Save the GStreamer packages
+        if: steps.gstreamer-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/mercury-browser/gstreamer/**/*.pkg
+          key: ${{ steps.gstreamer-cache.outputs.cache-primary-key }}
+
+      - name: Unpack and check GStreamer
+        run: make gstreamer-macos
+
+      - name: Export the GStreamer build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # The variables `gstreamer.sh env` sets (an allow-list in the
+          # script, MERCURY_GSTREAMER_PREFIX among them), passed to later steps
+          # through $GITHUB_ENV and $GITHUB_PATH without parsing their values.
+          scripts/ci/github-env.sh scripts/macos/gstreamer.sh env
+
+      - name: Check the GStreamer prefix
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # bundle.sh refuses to build without MERCURY_GSTREAMER_PREFIX; it
+          # must be the prefix gstreamer.sh unpacked.
+          expected="$(scripts/macos/gstreamer.sh prefix)"
+          if [ -z "${MERCURY_GSTREAMER_PREFIX:-}" ] ||
+            [ "$(cd "${MERCURY_GSTREAMER_PREFIX}" && pwd -P)" != "$(cd "${expected}" && pwd -P)" ]; then
+            echo "MERCURY_GSTREAMER_PREFIX='${MERCURY_GSTREAMER_PREFIX:-}' is not ${expected}" >&2
+            exit 1
+          fi
+          test -f "${MERCURY_GSTREAMER_PREFIX}/lib/libgstreamer-1.0.0.dylib"
+          pkg-config --modversion gstreamer-1.0
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      # Building compiles and links against GStreamer (found through
+      # pkg-config) but runs nothing that loads its libraries, so, like
+      # clippy, it needs no library path. Only the tests do; see "Test".
+      - name: Build the release executable
+        id: build
+        run: cargo build --locked --release --package mercury-desktop
+
+      - name: Assemble Mercury Browser.app
+        # The executable is already built; this signs ad hoc and bundles the
+        # GStreamer libraries from MERCURY_GSTREAMER_PREFIX.
+        run: make app-macos
+
+      - name: Check the bundle
+        run: scripts/ci/check-macos-bundle.sh --signature adhoc --require-media "dist/Mercury Browser.app"
+
+      - name: Archive the bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "dist/Mercury Browser.app" \
+            "dist/mercury-browser-macos-arm64-app.zip"
+
+      # Banked before the steps that follow, so that a timeout or a failure in
+      # them cannot lose a bundle that took hours to build.
+      - name: Upload the bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mercury-browser-macos-arm64-app
+          path: dist/mercury-browser-macos-arm64-app.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Render a test page with the bundled app
+        # Whether a hosted runner can render at all (it needs a window server
+        # and a GPU: Servo draws with OpenGL, the window with Metal) has not
+        # been seen yet. This is a real gate regardless.
+        id: smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p dist/smoke
+          "dist/Mercury Browser.app/Contents/MacOS/mercury-browser" \
+            --screenshot dist/smoke/colors.png \
+            --window-size 900x700 \
+            "file://${GITHUB_WORKSPACE}/tests/pages/colors.html"
+          scripts/ci/check-colors-screenshot.py dist/smoke/colors.png
+
+      - name: Upload the screenshot
+        # Whether the smoke test passed or failed, if it ran.
+        if: ${{ !cancelled() && steps.smoke.outcome != 'skipped' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mercury-browser-macos-arm64-screenshot
+          path: dist/smoke/
+          if-no-files-found: warn
+          retention-days: 7
+
+      # Lint and tests run once the build has succeeded, even if a bundle or
+      # smoke-test step failed, so one failure does not hide the others. The
+      # job fails if any step did.
+      # Clippy only type-checks; it loads no GStreamer library.
+      - name: Lint
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: cargo clippy --locked --release --workspace --all-targets -- -D warnings
+
+      - name: Test
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Test binaries have no rpath to the GStreamer libraries (only the
+          # app's executable gets @executable_path/lib/), so dyld finds them
+          # through DYLD_FALLBACK_LIBRARY_PATH. It is set on cargo's own command
+          # line: macOS strips DYLD_* from the environment of SIP-protected
+          # programs such as /bin/bash, so it cannot come from $GITHUB_ENV.
+          # cargo is not protected and passes it on to the test binaries.
+          # Setting the variable replaces dyld's own fallback list, so its
+          # traditional entries (man dyld: /usr/local/lib:/usr/lib, the
+          # default for binaries built before late 2023) follow the GStreamer
+          # directory, and leaf-name loads behave as they would without it.
+          DYLD_FALLBACK_LIBRARY_PATH="${MERCURY_GSTREAMER_PREFIX}/lib:/usr/local/lib:/usr/lib" \
+            cargo test --locked --release --workspace
+
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned shellcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scripts/ci/install-tools.sh --dir "${RUNNER_TEMP}/ci-tools" shellcheck
+          echo "${RUNNER_TEMP}/ci-tools/bin" >> "${GITHUB_PATH}"
+
+      - name: shellcheck
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          shellcheck --version
+          find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck -x
+
+      - name: Byte-compile the Python scripts
+        # A syntax error in the screenshot checker would otherwise surface
+        # only in the macOS job, hours in.
+        shell: bash
+        env:
+          PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache
+        run: |
+          set -euo pipefail
+
+          python3 --version
+          find scripts -type f -name '*.py' -print0 | xargs -0 python3 -m py_compile
+
+  workflows:
+    name: Workflows
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned actionlint and shellcheck
+        # actionlint runs shellcheck over every `run:` block, using whichever
+        # one is first on PATH; the pinned one, so this agrees with the job
+        # above and with `make lint-scripts`.
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          scripts/ci/install-tools.sh --dir "${RUNNER_TEMP}/ci-tools" shellcheck actionlint
+          echo "${RUNNER_TEMP}/ci-tools/bin" >> "${GITHUB_PATH}"
+
+      - name: actionlint
+        run: actionlint -color
+
+  deny:
+    name: Dependency policy
+    runs-on: ubuntu-24.04
+    # Reads Cargo.lock and compiles nothing.
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain and cargo-deny
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # cargo-deny asks cargo for the dependency graph.
+          rustup toolchain install
+          scripts/ci/install-tools.sh --dir "${RUNNER_TEMP}/ci-tools" cargo-deny
+          echo "${RUNNER_TEMP}/ci-tools/bin" >> "${GITHUB_PATH}"
+
+      - name: cargo deny check
+        run: cargo-deny --locked check --show-stats
