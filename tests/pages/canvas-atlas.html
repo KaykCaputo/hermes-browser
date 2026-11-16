@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury canvas atlas-pressure test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  #results { margin: 10px; font: bold 26px/1.35 monospace; }
+  #grid { margin: 0 10px; line-height: 0; }
+  canvas { width: 120px; height: 120px; margin: 1px; border: 1px solid #cccccc; }
+  .pass { color: #006400; }
+  .fail { color: #b00000; }
+</style>
+</head>
+<body>
+  <div id="results">running</div>
+  <div id="grid"></div>
+  <script>
+    // Large canvases drawn in turns, each step forcing a render with a one-pixel read-back,
+    // to check that no canvas loses earlier drawing when many large images compete for the
+    // GPU backend's image atlas. Query: n (canvases), w, h, steps, put (index of a canvas that
+    // receives a full-size putImageData every turn, or -1), sources (small canvases drawn with
+    // drawImage onto the current canvas every step); or sizes=WxH,WxH,... for mixed sizes.
+    const q = new URLSearchParams(location.search);
+    const sizes = q.get("sizes") ? q.get("sizes").split(",").map((s) => s.split("x").map(Number))
+      : Array.from({ length: Number(q.get("n") || 3) },
+        () => [Number(q.get("w") || 4096), Number(q.get("h") || 4096)]);
+    const n = sizes.length;
+    const steps = Number(q.get("steps") || 300), put = Number(q.get("put") ?? -1);
+    const sources = Number(q.get("sources") || 0);
+    const grid = document.getElementById("grid");
+    const contexts = [];
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement("canvas");
+      [c.width, c.height] = sizes[i];
+      grid.appendChild(c);
+      contexts.push(c.getContext("2d"));
+    }
+    const sourceCanvases = [];
+    for (let k = 0; k < sources; k++) {
+      const s = document.createElement("canvas");
+      s.width = 64; s.height = 64;
+      const sc = s.getContext("2d");
+      sc.fillStyle = "rgb(" + ((k * 53) % 256) + ",200," + ((k * 97) % 256) + ")";
+      sc.fillRect(0, 0, 64, 64);
+      sourceCanvases.push(s);
+    }
+    let image = null;
+    if (put >= 0) {
+      image = contexts[put].createImageData(sizes[put][0], sizes[put][1]);
+      for (let i = 0; i < image.data.length; i += 4) { image.data.set([200, 220, 240, 255], i); }
+    }
+    // Marks: 8x8 squares in rows along the top of each canvas, one per turn of that canvas.
+    function markPos(turn, i) {
+      const perRow = Math.floor((sizes[i][0] - 20) / 10);
+      return [10 + (turn % perRow) * 10, 10 + Math.floor(turn / perRow) * 10];
+    }
+    function markColour(i, turn) {
+      return [(turn * 37 + i * 80) % 200 + 40, (turn * 11) % 200 + 40, (i * 60 + 30) % 256];
+    }
+    const t0 = performance.now();
+    let step = 0;
+    // Steps run in batches after the load event so that the page loads at once.
+    function batch() {
+      for (const end = Math.min(step + 10, steps); step < end; step++) {
+        oneStep(step);
+      }
+      if (step < steps) { setTimeout(batch, 0); } else { finish(); }
+    }
+    window.addEventListener("load", () => setTimeout(batch, 0));
+    function oneStep(step) {
+      const i = step % n, turn = Math.floor(step / n), c = contexts[i];
+      if (i === put) { c.putImageData(image, 0, 0); }
+      const [x, y] = markPos(turn, i), [w, h] = sizes[i];
+      c.fillStyle = "rgb(" + markColour(i, turn).join(",") + ")";
+      c.fillRect(x, y, 8, 8);
+      for (let k = 0; k < sources; k++) {
+        c.drawImage(sourceCanvases[k], (k * 70) % Math.max(w - 64, 1), h - 70);
+      }
+      c.getImageData(x + 4, y + 4, 1, 1);
+    }
+    function finish() {
+    const elapsed = performance.now() - t0;
+    let lost = 0, checked = 0, firstLost = "";
+    const turns = Math.ceil(steps / n);
+    for (let i = 0; i < n; i++) {
+      for (let turn = 0; turn < turns; turn++) {
+        if (turn * n + i >= steps) break;
+        // The putImageData canvas only keeps its last mark.
+        if (i === put && turn * n + i < steps - n) continue;
+        const [x, y] = markPos(turn, i);
+        const d = contexts[i].getImageData(x + 4, y + 4, 1, 1).data;
+        const want = markColour(i, turn);
+        checked++;
+        if (Math.abs(d[0] - want[0]) > 1 || Math.abs(d[1] - want[1]) > 1 || Math.abs(d[2] - want[2]) > 1 || d[3] !== 255) {
+          lost++;
+          if (!firstLost) firstLost = " first lost: canvas " + i + " turn " + turn + " got " + Array.from(d).join(",");
+        }
+      }
+    }
+    if (put >= 0) {
+      const [w, h] = sizes[put];
+      const d = contexts[put].getImageData(w - 5, h / 2, 1, 1).data;
+      checked++;
+      if (d[0] !== 200 || d[1] !== 220 || d[2] !== 240) { lost++; firstLost += " put content " + Array.from(d).join(","); }
+    }
+    const verdict = lost === 0 ? "PASS" : "FAIL";
+    const text = "sizes=" + sizes.map((s) => s.join("x")).join(",") + " steps=" + steps + " put=" + put + " sources=" + sources
+      + " | checked " + checked + " lost " + lost + " " + verdict + firstLost + " | " + elapsed.toFixed(0) + " ms";
+    const results = document.getElementById("results");
+    results.className = lost === 0 ? "pass" : "fail";
+    results.textContent = text;
+    document.title = "ATLAS " + text;
+    }
+  </script>
+</body>
+</html>

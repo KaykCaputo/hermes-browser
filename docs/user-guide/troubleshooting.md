@@ -39,6 +39,10 @@ Mercury removes an inherited `DRI_PRIME` value before graphics or media threads 
 
 If rendering still uses the wrong device, inspect system-level Mesa configuration instead of adding a process-global override inside Mercury. Include `glxinfo -B` or the Wayland equivalent in the report when available.
 
+## Canvas drawings are missing or wrong
+
+Mercury draws 2D canvases on the GPU. When the GPU canvas cannot start (for example on a Linux machine without Vulkan), canvases are drawn on the CPU instead and the log shows one warning, `GPU 2D canvas unavailable (…); drawing 2D canvases on the CPU`. If a canvas still looks wrong, run Mercury with `--disable-gpu-canvas` to draw every 2D canvas on the CPU, and mention in the report whether that changes the result.
+
 ## Media does not play
 
 1. Compare the affected page with a direct MP4 or WebM resource.
