@@ -87,6 +87,8 @@ pub(crate) fn release() {
 
 fn create() -> Result<AboutWindow, slint::PlatformError> {
     let about = AboutWindow::new()?;
+    // Its own copy of `ChromePalette`, following the appearance setting.
+    crate::settings::apply_chrome_theme(&about);
     about.set_version_line(version_line().into());
     about.set_engine_line(ENGINE_LINE.into());
     about.set_media_line(media_line(option_env!("MERCURY_GSTREAMER_VERSION")).into());
@@ -100,15 +102,7 @@ fn create() -> Result<AboutWindow, slint::PlatformError> {
     });
     about.on_close_requested(hide);
     #[cfg(target_os = "macos")]
-    {
-        use slint::winit_030::{EventResult, WinitWindowAccessor, winit::event::WindowEvent};
-        about.window().on_winit_window_event(|_window, event| {
-            if matches!(event, WindowEvent::Focused(true)) {
-                menus::ensure_installed_later("the About window became key");
-            }
-            EventResult::Propagate
-        });
-    }
+    menus::reinstall_when_key(about.window(), "the About window became key");
     Ok(about)
 }
 

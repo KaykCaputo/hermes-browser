@@ -558,6 +558,18 @@ pub(crate) fn ensure_installed_later(reason: &'static str) {
     let _ = slint::invoke_from_event_loop(move || ensure_installed(reason));
 }
 
+/// For a window of ours other than the browser window (About, settings): reinstall Mercury's
+/// menu whenever it becomes key. Takes the window's winit event hook.
+pub(crate) fn reinstall_when_key(window: &slint::Window, reason: &'static str) {
+    use slint::winit_030::{EventResult, winit::event::WindowEvent};
+    window.on_winit_window_event(move |_window, event| {
+        if matches!(event, WindowEvent::Focused(true)) {
+            ensure_installed_later(reason);
+        }
+        EventResult::Propagate
+    });
+}
+
 fn main_menu_titles(application: &NSApplication) -> Vec<String> {
     application
         .mainMenu()
@@ -580,10 +592,10 @@ fn main_menu_is_ours(application: &NSApplication) -> bool {
 }
 
 /// `MERCURY_MENU_DIAGNOSTICS=<directory>`, in builds with the `menu-diagnostics` feature
-/// (documented in docs/developer-guide/testing.md): reads the main menu back after start-up, after the About
-/// window opens and after it closes, and logs it; saves the About window, rendered by the app's
-/// renderer, as `about-window.png` in the directory. Works in `--background` runs and needs no
-/// input.
+/// (documented in docs/developer-guide/testing.md): reads the main menu back after start-up,
+/// with the About window open and after it closes, and the same for the settings window, and
+/// logs it; saves the About window, rendered by the app's renderer, as `about-window.png` in
+/// the directory. Works in `--background` runs and needs no input.
 #[cfg(feature = "menu-diagnostics")]
 fn start_diagnostics() {
     use std::time::Duration;
@@ -616,6 +628,16 @@ fn start_diagnostics() {
             crate::about::hide();
             slint::Timer::single_shot(Duration::from_millis(1500), || {
                 report("after the About window closed");
+                // The settings window, opened the way its menu item opens it.
+                super::dispatch(MenuCommand::Shortcut(ShortcutAction::ShowSettings));
+                slint::Timer::single_shot(Duration::from_secs(3), || {
+                    report("with the settings window open");
+                    // Closes the settings window (what the browser does when it closes).
+                    crate::settings::main_window_closing();
+                    slint::Timer::single_shot(Duration::from_millis(1500), || {
+                        report("after the settings window closed");
+                    });
+                });
             });
         });
     });

@@ -1,4 +1,5 @@
 import { AboutSlint, Palette } from "std-widgets.slint";
+import { ChromePalette, ChromeTheme } from "../theme/chrome-palette.slint";
 
 export enum AboutLink {
     licence,
@@ -8,7 +9,7 @@ export enum AboutLink {
 component LinkText inherits Text {
     callback clicked;
 
-    color: touch.has-hover ? Palette.accent-background.brighter(0.2) : Palette.accent-background;
+    color: touch.has-hover ? ChromePalette.button-label-hover : ChromePalette.accent;
     font-size: 12px;
     accessible-role: button;
     accessible-label: self.text;
@@ -22,29 +23,41 @@ component LinkText inherits Text {
 }
 
 // "About Mercury Browser": a small window of its own, reached from the application menu and
-// from the browser menu. Its colours come from Slint's `Palette`, so it follows the system
-// appearance, not the user's theme setting; at the merge with the settings lane's
-// `ChromePalette` they map onto its roles (background, foreground, accent, border).
+// from the browser menu. Its colours come from `ChromePalette`, so it follows the appearance
+// setting; the Rust side calls `settings::apply_chrome_theme` when it creates the window.
 export component AboutWindow inherits Window {
     in property <string> version-line;
     in property <string> engine-line;
     // Empty when the GStreamer version was not recorded at build time.
     in property <string> media-line;
     in property <string> copyright-line;
-    // Rendering tests force a colour scheme; left at `unknown` the window follows the system.
-    in property <ColorScheme> preview-color-scheme: ColorScheme.unknown;
+    // The appearance setting, mirrored so that a change can be seen here.
+    property <ChromeTheme> chrome-theme: ChromePalette.theme;
     callback open-link(AboutLink);
     callback close-requested();
 
-    changed preview-color-scheme => {
-        Palette.color-scheme = self.preview-color-scheme;
+    // `AboutSlint` picks its badge by Slint's `Palette`: give it the scheme the appearance setting
+    // forces. Under "Follow the system" the palette is left to follow the system.
+    // With no system scheme known, the chrome stays dark (see `ChromePalette.dark`); so does
+    // the badge.
+    init => {
+        if self.chrome-theme == ChromeTheme.system && Palette.color-scheme == ColorScheme.unknown {
+            Palette.color-scheme = ColorScheme.dark;
+        }
+    }
+    changed chrome-theme => {
+        if self.chrome-theme == ChromeTheme.light {
+            Palette.color-scheme = ColorScheme.light;
+        } else if self.chrome-theme == ChromeTheme.dark {
+            Palette.color-scheme = ColorScheme.dark;
+        }
     }
 
     title: "About Mercury Browser";
     icon: @image-url("../../../../apps/mercury-desktop/resources/mercury-browser.svg");
     width: 380px;
     height: 370px;
-    background: Palette.background;
+    background: ChromePalette.window-background;
     forward-focus: key-scope;
 
     // Keeps Slint from installing its default macOS menu bar when this window becomes active:
@@ -85,7 +98,7 @@ export component AboutWindow inherits Window {
 
             Text {
                 text: "Mercury Browser";
-                color: Palette.foreground;
+                color: ChromePalette.text;
                 font-size: 20px;
                 font-weight: 650;
                 horizontal-alignment: center;
@@ -93,28 +106,28 @@ export component AboutWindow inherits Window {
 
             Text {
                 text: root.version-line;
-                color: Palette.foreground;
+                color: ChromePalette.text;
                 font-size: 12px;
                 horizontal-alignment: center;
             }
 
             Text {
                 text: root.engine-line;
-                color: Palette.foreground.transparentize(0.3);
+                color: ChromePalette.text-secondary;
                 font-size: 12px;
                 horizontal-alignment: center;
             }
 
             if root.media-line != "": Text {
                 text: root.media-line;
-                color: Palette.foreground.transparentize(0.3);
+                color: ChromePalette.text-secondary;
                 font-size: 12px;
                 horizontal-alignment: center;
             }
 
             Text {
                 text: root.copyright-line;
-                color: Palette.foreground.transparentize(0.3);
+                color: ChromePalette.text-secondary;
                 font-size: 11px;
                 horizontal-alignment: center;
                 wrap: word-wrap;
@@ -142,7 +155,7 @@ export component AboutWindow inherits Window {
 
             Rectangle {
                 height: 1px;
-                background: Palette.border;
+                background: ChromePalette.separator;
             }
 
             // Required by the Slint Royalty-free License 2.0, §2(a).

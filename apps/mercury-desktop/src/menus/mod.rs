@@ -33,7 +33,7 @@ mod model;
 mod seams;
 
 #[cfg(target_os = "macos")]
-pub(crate) use macos::ensure_installed_later;
+pub(crate) use macos::reinstall_when_key;
 use model::{BrowserMenuItem, EditCommand, EditTarget, MenuSnapshot};
 pub(crate) use model::{Document, MenuCommand};
 
@@ -191,7 +191,6 @@ fn run_command(
         }
         // Performed by AppKit itself; never dispatched.
         MenuCommand::System(_) => {}
-        MenuCommand::Settings => seams::show_settings(window),
         MenuCommand::ReopenClosedTab => seams::reopen_closed_tab(window),
         MenuCommand::RestorePreviousSession => seams::restore_previous_session(window),
         MenuCommand::ShowHistory => seams::show_history(window),

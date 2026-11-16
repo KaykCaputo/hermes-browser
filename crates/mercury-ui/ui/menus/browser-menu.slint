@@ -1,24 +1,7 @@
 // The browser menu behind the toolbar's "⋮" button.
 
-// Every colour the menus lane's chrome uses. They match the browser chrome, which is dark in
-// both system appearances today; at the merge with the settings lane's `ChromePalette`
-// (crates/mercury-ui/ui/theme/chrome-palette.slint) each one maps onto a palette role.
-export global MenuColors {
-    out property <color> panel: #1a222c;
-    out property <color> panel-border: #29323d;
-    out property <color> separator: #29323d;
-    out property <color> shadow: #00000080;
-    out property <color> row-highlight: #222d39;
-    out property <color> text: #edf4fa;
-    out property <color> text-disabled: #56616f;
-    out property <color> shortcut: #8b98a8;
-    out property <color> shortcut-disabled: #48525e;
-    out property <color> button: #161e28;
-    out property <color> button-hover: #222d39;
-    out property <color> button-pressed: #2b3744;
-    out property <color> button-text: #c9d3de;
-    out property <color> button-text-hover: #71c5ff;
-}
+// Colours come only from `ChromePalette`, so the menu follows the appearance setting.
+import { ChromePalette } from "../theme/chrome-palette.slint";
 
 export enum BrowserMenuCommand {
     new-tab,
@@ -60,7 +43,7 @@ component MenuSeparatorLine inherits Rectangle {
         y: 4px;
         width: parent.width - 16px;
         height: 1px;
-        background: MenuColors.separator;
+        background: ChromePalette.separator;
     }
 }
 
@@ -72,7 +55,7 @@ component BrowserMenuRow inherits Rectangle {
 
     height: 30px;
     border-radius: 6px;
-    background: (touch.has-hover || root.highlighted) && root.entry.enabled ? MenuColors.row-highlight : transparent;
+    background: !root.entry.enabled ? transparent : root.highlighted ? ChromePalette.item-selected : touch.has-hover ? ChromePalette.item-hover : transparent;
     accessible-role: button;
     accessible-label: root.entry.title;
     accessible-description: root.entry.shortcut;
@@ -91,7 +74,7 @@ component BrowserMenuRow inherits Rectangle {
         Text {
             horizontal-stretch: 1;
             text: root.entry.title;
-            color: root.entry.enabled ? MenuColors.text : MenuColors.text-disabled;
+            color: !root.entry.enabled ? ChromePalette.disabled-text : root.highlighted ? ChromePalette.item-selected-text : ChromePalette.text;
             font-size: 13px;
             vertical-alignment: center;
             overflow: elide;
@@ -100,7 +83,7 @@ component BrowserMenuRow inherits Rectangle {
 
         Text {
             text: root.entry.shortcut;
-            color: root.entry.enabled ? MenuColors.shortcut : MenuColors.shortcut-disabled;
+            color: !root.entry.enabled ? ChromePalette.disabled-text : root.highlighted ? ChromePalette.item-selected-text : ChromePalette.shortcut-text;
             font-size: 12px;
             vertical-alignment: center;
             accessible-role: none;
@@ -123,7 +106,7 @@ component ZoomButton inherits Rectangle {
     width: 32px;
     height: 26px;
     border-radius: 6px;
-    background: touch.pressed ? MenuColors.button-pressed : touch.has-hover ? MenuColors.button-hover : MenuColors.button;
+    background: touch.pressed ? ChromePalette.button-pressed : touch.has-hover ? ChromePalette.button-hover : ChromePalette.field-background;
     accessible-role: button;
     accessible-label: root.accessible-name;
     accessible-action-default => {
@@ -132,7 +115,7 @@ component ZoomButton inherits Rectangle {
 
     Text {
         text: root.label;
-        color: touch.has-hover ? MenuColors.button-text-hover : MenuColors.button-text;
+        color: touch.has-hover ? ChromePalette.button-label-hover : ChromePalette.button-label;
         font-size: 16px;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -161,10 +144,10 @@ export component BrowserMenuPanel inherits Rectangle {
 
     border-radius: 10px;
     border-width: 1px;
-    border-color: MenuColors.panel-border;
-    background: MenuColors.panel;
+    border-color: ChromePalette.popup-border;
+    background: ChromePalette.popup-background;
     drop-shadow-blur: 18px;
-    drop-shadow-color: MenuColors.shadow;
+    drop-shadow-color: ChromePalette.shadow;
     drop-shadow-offset-y: 4px;
     accessible-role: list;
     accessible-label: "Browser menu";
@@ -195,7 +178,7 @@ export component BrowserMenuPanel inherits Rectangle {
             Text {
                 horizontal-stretch: 1;
                 text: "Zoom";
-                color: MenuColors.text;
+                color: ChromePalette.text;
                 font-size: 13px;
                 vertical-alignment: center;
                 accessible-role: none;
@@ -213,7 +196,7 @@ export component BrowserMenuPanel inherits Rectangle {
             Rectangle {
                 width: 52px;
                 border-radius: 6px;
-                background: reset-touch.has-hover ? MenuColors.row-highlight : transparent;
+                background: reset-touch.has-hover ? ChromePalette.item-hover : transparent;
                 accessible-role: button;
                 accessible-label: "Actual size";
                 accessible-value: root.zoom-percent + "%";
@@ -223,7 +206,7 @@ export component BrowserMenuPanel inherits Rectangle {
 
                 Text {
                     text: root.zoom-percent + "%";
-                    color: MenuColors.button-text;
+                    color: ChromePalette.button-label;
                     font-size: 12px;
                     horizontal-alignment: center;
                     vertical-alignment: center;

@@ -5,8 +5,6 @@
 use mercury_ui::MainWindow;
 use talaria_core::BrowserController;
 
-/// Settings lane: "Settings…" (Cmd+,), in the application menu and the browser menu.
-pub(crate) const SETTINGS_AVAILABLE: bool = false;
 /// Session lane: File ▸ "Reopen Closed Tab" (Shift+Cmd+T). When the lane adds a
 /// `ShortcutAction` for it, change the item's command to `MenuCommand::Shortcut(…)` in
 /// `model.rs`; the table test then checks that `shortcuts.rs` owns the key.
@@ -21,9 +19,6 @@ pub(crate) const CLEAR_BROWSING_DATA_AVAILABLE: bool = false;
 /// Bookmarks lane: the Bookmarks menu ("Bookmark This Page…" Cmd+D, "Show Bookmarks Bar"
 /// Shift+Cmd+B, "Bookmarks Manager", and the bookmarks bar folder's first level).
 pub(crate) const BOOKMARKS_AVAILABLE: bool = false;
-
-/// Settings lane: `window.invoke_show_settings();`
-pub(crate) fn show_settings(_window: &MainWindow) {}
 
 /// Session lane: reopen the most recently closed tab.
 pub(crate) fn reopen_closed_tab(_window: &MainWindow) {}

@@ -17,7 +17,6 @@ pub(crate) enum MenuCommand {
     /// Handled entirely by AppKit (standard selectors, macOS only).
     System(SystemAction),
     // Seams other lanes fill in (`seams.rs`); disabled until they do.
-    Settings,
     ReopenClosedTab,
     RestorePreviousSession,
     ShowHistory,
@@ -395,7 +394,7 @@ pub(crate) fn menu_bar() -> Vec<Menu> {
             items: vec![
                 action("About Mercury Browser", None, About),
                 Separator,
-                action("Settings…", key(',', CMD), Settings),
+                action("Settings…", key(',', CMD), Shortcut(A::ShowSettings)),
                 Separator,
                 Services,
                 Separator,
@@ -533,7 +532,6 @@ pub(crate) const fn is_available(command: MenuCommand) -> bool {
     use MenuCommand::*;
     match command {
         Shortcut(_) | About | Edit(_) | OpenDocument(_) | System(_) => true,
-        Settings => super::seams::SETTINGS_AVAILABLE,
         ReopenClosedTab => super::seams::REOPEN_CLOSED_TAB_AVAILABLE,
         RestorePreviousSession => super::seams::RESTORE_PREVIOUS_SESSION_AVAILABLE,
         ShowHistory => super::seams::SHOW_HISTORY_AVAILABLE,
@@ -631,7 +629,7 @@ impl BrowserMenuItem {
             Self::ZoomOut => MenuCommand::Shortcut(ShortcutAction::ZoomOut),
             Self::ZoomReset => MenuCommand::Shortcut(ShortcutAction::ZoomReset),
             Self::Find => MenuCommand::Find,
-            Self::Settings => MenuCommand::Settings,
+            Self::Settings => MenuCommand::Shortcut(ShortcutAction::ShowSettings),
             Self::About => MenuCommand::About,
             Self::Help => MenuCommand::OpenDocument(Document::Help),
             Self::Quit => MenuCommand::Shortcut(ShortcutAction::Quit),
@@ -831,7 +829,6 @@ mod tests {
         assert_eq!(
             menu_keys,
             vec![
-                ("Settings…", "⌘,".to_owned()),
                 ("Hide Mercury Browser", "⌘H".to_owned()),
                 ("Hide Others", "⌥⌘H".to_owned()),
                 ("Reopen Closed Tab", "⇧⌘T".to_owned()),
@@ -868,7 +865,6 @@ mod tests {
     fn actions_that_do_not_exist_yet_are_disabled() {
         let snapshot = MenuSnapshot::default();
         for command in [
-            MenuCommand::Settings,
             MenuCommand::ReopenClosedTab,
             MenuCommand::RestorePreviousSession,
             MenuCommand::ShowHistory,
@@ -987,7 +983,7 @@ mod tests {
             vec![
                 ("New Tab", "⌘T".to_owned()),
                 ("Find…", String::new()),
-                ("Settings…", String::new()),
+                ("Settings…", "⌘,".to_owned()),
                 ("About Mercury Browser", String::new()),
                 ("Mercury Browser Help", String::new()),
                 ("Quit Mercury Browser", "⌘Q".to_owned()),
@@ -998,7 +994,7 @@ mod tests {
             vec![
                 ("New Tab", "Ctrl+T".to_owned()),
                 ("Find…", String::new()),
-                ("Settings…", String::new()),
+                ("Settings…", "Ctrl+,".to_owned()),
                 ("About Mercury Browser", String::new()),
                 ("Mercury Browser Help", String::new()),
                 ("Quit Mercury Browser", "Ctrl+Q".to_owned()),
