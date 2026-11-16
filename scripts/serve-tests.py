@@ -38,11 +38,17 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path.split("?", 1)[0] == PRIVATE_PATH:
-            self.send_private()
+            self.send_private(include_body=True)
             return
         super().do_GET()
 
-    def send_private(self):
+    def do_HEAD(self):
+        if self.path.split("?", 1)[0] == PRIVATE_PATH:
+            self.send_private(include_body=False)
+            return
+        super().do_HEAD()
+
+    def send_private(self, include_body):
         """401 with a Basic challenge unless the test credentials are sent."""
         if self.headers.get("Authorization") == PRIVATE_CREDENTIALS:
             status, body = 200, b"Signed in.\n"
@@ -54,7 +60,8 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if include_body:
+            self.wfile.write(body)
 
     def send_head(self):
         self._remaining = None

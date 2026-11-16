@@ -174,6 +174,7 @@ impl ServoRuntime {
         let initial_url = Url::parse(initial_url)?;
         let frame_ready = FrameReadySignal::default();
         let page_requests = ClosesOnDrop::new(PendingEngineRequests::default());
+        let document_start = Rc::new(RefCell::new(DocumentStartTracker::default()));
         let delegate = Rc::new(BrowserDelegate {
             tab_id,
             browser_event_sender: browser_event_sender.clone(),
@@ -182,7 +183,7 @@ impl ServoRuntime {
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
             page_requests: page_requests.shared(),
-            document_start: RefCell::default(),
+            document_start: Rc::clone(&document_start),
             _after_engine_cleanup: self.after_engine_cleanup.clone(),
         });
 
@@ -203,6 +204,7 @@ impl ServoRuntime {
             tab_id,
             scale_factor,
             page_requests,
+            document_start,
         ))
     }
 
@@ -335,7 +337,8 @@ struct BrowserDelegate {
     /// Dialogs, leave prompts, sign-ins and permission prompts waiting for the user; shared with
     /// the tab's `ServoWebView`, which answers them.
     page_requests: Rc<RefCell<PendingEngineRequests<ServoPageRequest>>>,
-    document_start: RefCell<DocumentStartTracker>,
+    /// Shared with the tab's `ServoWebView`, which arms it when it navigates.
+    document_start: Rc<RefCell<DocumentStartTracker>>,
     /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
     _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }

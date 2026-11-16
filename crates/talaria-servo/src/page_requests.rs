@@ -107,31 +107,37 @@ impl<R: EngineRequest> Drop for ClosesOnDrop<R> {
 
 /// Tells when a new document starts loading. Servo's own `Started` is not enough:
 /// `WebView::reload` sets the status to `Started` without notifying
-/// (`servo-0.8.0/webview.rs:552`), and the new document's `Started` is then dropped as unchanged
-/// (`webview.rs:334-336`). A `HeadParsed` or `Complete` without a `Started` since the last
-/// finished load therefore also starts a document.
+/// (`servo-0.8.0/webview.rs:552`), and a new document's `Started` is dropped as unchanged
+/// whenever the status is still `Started` (`webview.rs:334-336`), as after a reload or when a page
+/// never got past `Started`. So after Mercury itself loads, reloads or traverses the web view, the
+/// first `HeadParsed` or `Complete` also counts as a document start. Without such a navigation
+/// they never do: Servo also sends `HeadParsed` whenever a page inserts a `<body>` into its
+/// top-level document (`servo-script-0.8.0/dom/html/document_structure/htmlbodyelement.rs`),
+/// which must not let a page reset its own dialog blocking.
 #[derive(Debug, Default)]
 pub(crate) struct DocumentStartTracker {
-    started: bool,
+    armed: bool,
 }
 
 impl DocumentStartTracker {
+    /// Mercury asked the web view to navigate.
+    pub(crate) fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    /// The navigation will not happen (the user chose to stay on the page).
+    pub(crate) fn disarm(&mut self) {
+        self.armed = false;
+    }
+
     pub(crate) fn document_started(&mut self, status: LoadStatus) -> bool {
         match status {
             LoadStatus::Started => {
-                self.started = true;
+                self.armed = false;
                 true
             }
-            LoadStatus::HeadParsed => !std::mem::replace(&mut self.started, true),
-            LoadStatus::Complete => {
-                let unreported = !self.started;
-                self.started = false;
-                unreported
-            }
-            LoadStatus::Stopped => {
-                self.started = false;
-                false
-            }
+            LoadStatus::HeadParsed | LoadStatus::Complete => std::mem::take(&mut self.armed),
+            LoadStatus::Stopped => false,
         }
     }
 }
@@ -361,29 +367,50 @@ mod tests {
 
     use servo::LoadStatus;
 
-    /// Feeds statuses to a tracker; returns those at which a new document was reported.
-    fn documents_started(statuses: &[LoadStatus]) -> Vec<usize> {
+    /// A step of a web view's life as the tracker sees it.
+    #[derive(Clone, Copy)]
+    enum Step {
+        /// Mercury asks the web view to load, reload or traverse.
+        Navigate,
+        /// The user stays on a page whose leave prompt asked.
+        Stay,
+        Status(LoadStatus),
+    }
+
+    use LoadStatus::{Complete, HeadParsed, Started, Stopped};
+    use Step::{Navigate, Status, Stay};
+
+    /// Feeds the steps to a tracker; returns the indexes at which a new document was reported.
+    fn documents_started(steps: &[Step]) -> Vec<usize> {
         let mut tracker = DocumentStartTracker::default();
-        statuses
-            .iter()
-            .enumerate()
-            .filter(|(_, status)| tracker.document_started(**status))
-            .map(|(index, _)| index)
-            .collect()
+        let mut started = Vec::new();
+        for (index, step) in steps.iter().enumerate() {
+            match *step {
+                Navigate => tracker.arm(),
+                Stay => tracker.disarm(),
+                Status(status) => {
+                    if tracker.document_started(status) {
+                        started.push(index);
+                    }
+                }
+            }
+        }
+        started
     }
 
     #[test]
     fn a_load_that_reports_started_starts_one_document() {
         assert_eq!(
             documents_started(&[
-                LoadStatus::Started,
-                LoadStatus::HeadParsed,
-                LoadStatus::Complete,
-                LoadStatus::Started,
-                LoadStatus::HeadParsed,
-                LoadStatus::Complete,
+                Status(Started),
+                Status(HeadParsed),
+                Status(Complete),
+                Navigate,
+                Status(Started),
+                Status(HeadParsed),
+                Status(Complete),
             ]),
-            vec![0, 3]
+            vec![0, 4]
         );
     }
 
@@ -393,30 +420,76 @@ mod tests {
         // own Started equals it and is not reported either.
         assert_eq!(
             documents_started(&[
-                LoadStatus::Started,
-                LoadStatus::HeadParsed,
-                LoadStatus::Complete,
-                LoadStatus::HeadParsed,
-                LoadStatus::Complete,
+                Status(Started),
+                Status(HeadParsed),
+                Status(Complete),
+                Navigate,
+                Status(HeadParsed),
+                Status(Complete),
             ]),
-            vec![0, 3]
+            vec![0, 4]
         );
         assert_eq!(
-            documents_started(&[LoadStatus::Complete, LoadStatus::Complete]),
-            vec![0, 1]
+            documents_started(&[Status(Complete), Navigate, Status(Complete)]),
+            vec![2]
         );
     }
 
     #[test]
-    fn a_stopped_load_ends_the_document_start() {
+    fn a_navigation_while_a_load_is_stuck_in_started_starts_a_document() {
+        // The page never got past Started (an alert loop in <head>); the next site's Started is
+        // dropped as unchanged.
         assert_eq!(
             documents_started(&[
-                LoadStatus::Started,
-                LoadStatus::Stopped,
-                LoadStatus::HeadParsed,
-                LoadStatus::Complete,
+                Status(Started),
+                Navigate,
+                Status(HeadParsed),
+                Status(Complete)
             ]),
             vec![0, 2]
+        );
+    }
+
+    #[test]
+    fn a_body_the_page_inserts_after_loading_starts_no_document() {
+        // Servo reports HeadParsed whenever a <body> is inserted into the top-level document.
+        assert_eq!(
+            documents_started(&[
+                Status(Started),
+                Status(HeadParsed),
+                Status(Complete),
+                Status(HeadParsed),
+                Status(Complete),
+                Status(HeadParsed),
+            ]),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn a_stopped_load_and_an_inserted_body_are_one_document() {
+        assert_eq!(
+            documents_started(&[
+                Status(Started),
+                Status(Stopped),
+                Status(HeadParsed),
+                Status(Complete),
+            ]),
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn staying_on_a_page_disarms_the_tracker() {
+        assert_eq!(
+            documents_started(&[
+                Status(Started),
+                Status(Complete),
+                Navigate,
+                Stay,
+                Status(HeadParsed),
+            ]),
+            vec![0]
         );
     }
 

@@ -116,6 +116,8 @@ export component RequestField inherits Rectangle {
     in-out property <string> text;
     in property <string> placeholder;
     in property <bool> password;
+    // Select the whole text whenever the field gains focus (Slint does not on Tab on macOS).
+    in property <bool> select-on-focus;
     out property <bool> has-focus: input.has-focus;
     callback accepted;
 
@@ -152,6 +154,11 @@ export component RequestField inherits Rectangle {
         input-type: root.password ? InputType.password : InputType.text;
         accepted => {
             root.accepted();
+        }
+        changed has-focus => {
+            if self.has-focus && root.select-on-focus {
+                self.select-all();
+            }
         }
     }
 }

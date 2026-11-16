@@ -744,8 +744,8 @@ export component MainWindow inherits Window {
             if root.page-request.style == PageRequestStyle.permission: PermissionPrompt {
                 request: root.page-request;
                 anchor-x: address-input.absolute-position.x - 14px - web-view-area.absolute-position.x;
-                answered(id, accepted, checked) => {
-                    root.page-request-answered(id, accepted, "", "", checked);
+                answered(id, accepted) => {
+                    root.page-request-answered(id, accepted, "", "", false);
                 }
             }
         }

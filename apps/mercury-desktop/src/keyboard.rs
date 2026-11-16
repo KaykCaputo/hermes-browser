@@ -38,16 +38,6 @@ pub(crate) fn connect_native_keyboard_input(
                     modifiers = changed.state();
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
-                    // dialogs: Escape blocks a permission prompt, which never takes focus.
-                    let escape = event.state == ElementState::Pressed
-                        && matches!(
-                            event.logical_key,
-                            Key::Named(winit::keyboard::NamedKey::Escape)
-                        );
-                    if crate::page_requests::handle_permission_escape(&window, &controller, escape)
-                    {
-                        return EventResult::PreventDefault;
-                    }
                     if handle_browser_shortcut(
                         &window,
                         &controller,

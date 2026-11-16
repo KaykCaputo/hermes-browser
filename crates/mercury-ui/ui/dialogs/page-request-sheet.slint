@@ -37,15 +37,11 @@ export component PageRequestSheet inherits Rectangle {
         }
     }
 
-    // A prompt's field takes the keyboard with its default value selected. A sign-in sheet
-    // focuses its card only: keys meant for the page must not end up in the user-name field, so
-    // the user clicks a field or presses Tab to start typing.
+    // The card takes the keyboard, never a field: keys the user meant for the page (the end of
+    // a password, say) must not end up in a prompt's or sign-in's field. Tab or a click enters
+    // the field.
     function take-focus() {
-        if root.request.style == PageRequestStyle.prompt {
-            first-field.focus-and-select();
-        } else {
-            keys.focus();
-        }
+        keys.focus();
     }
 
     function answer(accepted: bool) {
@@ -99,7 +95,8 @@ export component PageRequestSheet inherits Rectangle {
                     return accept;
                 }
                 if event.text == Key.Return {
-                    // On a sign-in, Return only signs in from a field the user chose.
+                    // On a sign-in, Return only signs in from a field the user chose. On a prompt
+                    // it is OK with the page's own default value.
                     if root.request.style != PageRequestStyle.sign-in {
                         root.answer(true);
                     }
@@ -180,6 +177,8 @@ export component PageRequestSheet inherits Rectangle {
                         width: parent.width;
                         text <=> root.entered-text;
                         placeholder: root.request.style == PageRequestStyle.sign-in ? "User name" : "";
+                        // A prompt's default value is selected when the user enters the field.
+                        select-on-focus: root.request.style == PageRequestStyle.prompt;
                         accepted => {
                             if root.request.style == PageRequestStyle.sign-in {
                                 password-field.focus-and-select();

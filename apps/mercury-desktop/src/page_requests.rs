@@ -142,50 +142,6 @@ pub(crate) fn sheet_shown(controller: &BrowserController) -> bool {
         .is_some_and(|pending| !matches!(pending.kind(), PageRequestKind::Permission(_)))
 }
 
-/// Escape blocks the active tab's permission prompt, which never takes keyboard focus itself.
-/// Not while the user types in one of the browser's own fields, where Escape is theirs. Returns
-/// true when the key was used.
-pub(crate) fn handle_permission_escape(
-    window: &MainWindow,
-    controller: &RefCell<BrowserController>,
-    escape_pressed: bool,
-) -> bool {
-    let tab_id = controller.borrow().active_tab_id();
-    let pending = controller.borrow().pending_page_request(tab_id);
-    let now = page_request_clock();
-    let Some(id) = permission_escape_target(
-        pending.as_ref(),
-        escape_pressed,
-        window.get_text_input_focused(),
-    ) else {
-        return false;
-    };
-    if PROTECTOR.with(|protector| protector.borrow().accepts(id, now)) {
-        controller.borrow_mut().answer_page_request(
-            tab_id,
-            id,
-            PageRequestReply::new(PageRequestAnswer::Decline),
-            now,
-        );
-        sync_ui(window, &controller.borrow());
-        window.window().request_redraw();
-    }
-    true
-}
-
-/// The permission request an Escape press blocks, if any.
-pub(crate) fn permission_escape_target(
-    pending: Option<&PendingPageRequest>,
-    escape_pressed: bool,
-    browser_field_focused: bool,
-) -> Option<PageRequestId> {
-    let pending = pending?;
-    (escape_pressed
-        && !browser_field_focused
-        && matches!(pending.kind(), PageRequestKind::Permission(_)))
-    .then_some(pending.id())
-}
-
 /// The user's answer to a request of this kind. `accepted` is OK, Leave, Sign in or Allow;
 /// `checked` is the sheet's checkbox.
 pub(crate) fn reply_for(
@@ -719,34 +675,5 @@ mod tests {
         assert!(!protector.accepts(first, at(9_000)));
         protector.show(None, at(3_000));
         assert!(!protector.accepts(second, at(9_000)));
-    }
-
-    #[test]
-    fn escape_blocks_a_permission_prompt_unless_a_browser_field_has_focus() {
-        let permission = pending(
-            "https://example.com/",
-            PageRequestKind::Permission(PagePermission::PersistentStorage),
-        );
-        let alert = pending(
-            "https://example.com/",
-            PageRequestKind::Alert {
-                message: String::new(),
-            },
-        );
-
-        assert_eq!(
-            permission_escape_target(Some(&permission), true, false),
-            Some(PageRequestId::new(42))
-        );
-        assert_eq!(
-            permission_escape_target(Some(&permission), true, true),
-            None
-        );
-        assert_eq!(
-            permission_escape_target(Some(&permission), false, false),
-            None
-        );
-        assert_eq!(permission_escape_target(Some(&alert), true, false), None);
-        assert_eq!(permission_escape_target(None, true, false), None);
     }
 }

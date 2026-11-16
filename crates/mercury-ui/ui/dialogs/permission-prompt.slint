@@ -1,44 +1,23 @@
 // A permission prompt hanging from the address bar: "<site> wants to …" with Block and Allow.
 // The page stays visible and usable beneath it.
 
-import {
-    PageRequestView,
-    RequestButton,
-    RequestCheckBox,
-} from "page-request-parts.slint";
+import { PageRequestView, RequestButton } from "page-request-parts.slint";
 
 export component PermissionPrompt inherits Rectangle {
     in property <PageRequestView> request;
     // Where the address bar starts, relative to this element's parent.
     in property <length> anchor-x: 0px;
-    // accepted: Allow; checked: the choice under the question, if any.
-    callback answered(/* id */ int, /* accepted */ bool, /* checked */ bool);
-
-    property <int> shown-id: -1;
-    property <bool> checked;
-
-    function show-request() {
-        if root.shown-id == root.request.id {
-            return;
-        }
-        root.shown-id = root.request.id;
-        root.checked = false;
-    }
+    // accepted: Allow.
+    callback answered(/* id */ int, /* accepted */ bool);
 
     function answer(accepted: bool) {
-        root.answered(root.request.id, accepted, root.checked);
+        root.answered(root.request.id, accepted);
     }
 
-    init => {
-        root.show-request();
-    }
-
-    changed request => {
-        root.show-request();
-    }
-
-    // Fills the content area without taking input; only the bubble does. The bubble never takes
-    // keyboard focus: Escape (Block) is handled by the browser window instead.
+    // Fills the content area without taking input; only the bubble does. The bubble is not
+    // modal and never takes keyboard focus, so it is answered with the mouse only (as Chrome
+    // does for a bubble without focus): no key the user meant for the page or for the browser,
+    // Escape included, is taken from them.
     bubble := Rectangle {
         x: Math.max(8px, Math.min(root.anchor-x, root.width - self.width - 8px));
         // The arrow overlaps the toolbar's bottom edge, which a page cannot draw over.
@@ -81,11 +60,6 @@ export component PermissionPrompt inherits Rectangle {
                     font-size: 14px;
                     font-weight: 600;
                     wrap: word-wrap;
-                }
-
-                if root.request.choice-label != "": RequestCheckBox {
-                    label: root.request.choice-label;
-                    checked <=> root.checked;
                 }
 
                 HorizontalLayout {

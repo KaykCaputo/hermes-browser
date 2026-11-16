@@ -73,8 +73,8 @@ slint::slint! {
             if root.request.style == PageRequestStyle.permission: PermissionPrompt {
                 request: root.request;
                 anchor-x: 146px;
-                answered(id, accepted, checked) => {
-                    root.answered(id, accepted, "", "", checked);
+                answered(id, accepted) => {
+                    root.answered(id, accepted, "", "", false);
                 }
             }
         }
@@ -290,20 +290,35 @@ fn page_request_components_render_and_answer() {
         vec![(3, true, String::new(), String::new(), false)]
     );
 
-    // A prompt starts with its default value selected, so typing replaces it.
+    // A prompt's card has the keyboard, not its field: characters typed for the page (the end of
+    // a password) do not reach the field, and Return is OK with the page's own default.
     fixture.show(PageRequestView {
         value: "Ada Lovelace".into(),
         ..dialog(4, PageRequestStyle::Prompt, "What is your name?")
     });
     fixture.save("03-prompt");
+    fixture.type_text("ssword1");
+    fixture.key(Key::Return);
+    assert_eq!(
+        fixture.take_answers(),
+        vec![(4, true, "Ada Lovelace".to_owned(), String::new(), false)]
+    );
+
+    // Tab enters the field with the default selected, so typing replaces it.
+    fixture.show(PageRequestView {
+        value: "Ada Lovelace".into(),
+        ..dialog(15, PageRequestStyle::Prompt, "What is your name?")
+    });
+    fixture.key(Key::Tab);
+    fixture.save("03b-prompt-field-entered");
     fixture.type_text("Grace");
     fixture.key(Key::Return);
     assert_eq!(
         fixture.take_answers(),
-        vec![(4, true, "Grace".to_owned(), String::new(), false)]
+        vec![(15, true, "Grace".to_owned(), String::new(), false)]
     );
 
-    // Escape in the prompt's field is Cancel.
+    // Escape on a prompt is Cancel, from the card or from the field.
     fixture.show(PageRequestView {
         value: "x".into(),
         ..dialog(5, PageRequestStyle::Prompt, "Again?")

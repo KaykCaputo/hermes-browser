@@ -526,6 +526,8 @@ impl PageRequests {
         match &answered.kind {
             PageRequestKind::LeavePage => {
                 self.last_leave_prompt_closed_at = Some(now);
+                // Answered: a later leave prompt comes from another navigation.
+                self.reload_requested = false;
                 if reply.block_further_dialogs {
                     self.leave_prompts_blocked = true;
                     discarded = self.take_where(|kind| *kind == PageRequestKind::LeavePage);
@@ -584,9 +586,16 @@ impl PageRequests {
         discarded
     }
 
-    /// The user navigates the page; `reload` when they reload it.
+    /// The user navigates the page; `reload` when they reload it. Blocking ends here, not when the
+    /// next document is reported: the engine may report none (a page stuck before its head was
+    /// parsed), and the next site's dialogs must not inherit it. What the leaving page's own leave
+    /// prompt needs (whether the user interacted with it) stays until the new document starts.
     pub(crate) fn note_user_navigation(&mut self, reload: bool) -> Vec<PageRequestId> {
         self.reload_requested = reload;
+        self.dialogs_blocked = false;
+        self.leave_prompts_blocked = false;
+        self.last_dialog_closed_at = None;
+        self.last_leave_prompt_closed_at = None;
         self.discard_all()
     }
 
@@ -687,13 +696,14 @@ pub fn sanitize_page_text(text: &str, multiline: bool, max_chars: usize) -> Stri
     sanitized
 }
 
-/// Characters that draw nothing but can hide or pad text: zero-width space, non-joiner and joiner,
-/// word joiner and the invisible operators, the byte-order mark, the soft hyphen, the Hangul
+/// Characters that draw nothing but can hide or pad text: zero-width space, word joiner and the
+/// invisible operators, the byte-order mark, the soft hyphen, the Hangul
 /// fillers and the tag characters.
 const fn is_invisible(character: char) -> bool {
     matches!(
         character,
-        '\u{200B}'..='\u{200D}'
+        // Not U+200C/U+200D (non-joiner, joiner): emoji sequences, Persian and Indic text need them.
+        '\u{200B}'
             | '\u{2060}'..='\u{2064}'
             | '\u{FEFF}'
             | '\u{00AD}'
@@ -813,8 +823,15 @@ mod tests {
 
     #[test]
     fn invisible_characters_are_removed() {
-        let text = "a\u{200B}b\u{200D}c\u{2060}d\u{2064}e\u{FEFF}f\u{00AD}g\u{115F}\u{1160}\u{3164}\u{FFA0}h\u{E0041}\u{E007F}i";
+        let text = "a\u{200B}bc\u{2060}d\u{2064}e\u{FEFF}f\u{00AD}g\u{115F}\u{1160}\u{3164}\u{FFA0}h\u{E0041}\u{E007F}i";
         assert_eq!(sanitize_page_text(text, true, 100), "abcdefghi");
+    }
+
+    #[test]
+    fn joiners_are_kept_for_emoji_sequences_and_scripts_that_need_them() {
+        // Family emoji (ZWJ sequence) and Persian "می‌خواهم" (ZWNJ).
+        let text = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} \u{0645}\u{06CC}\u{200C}\u{062E}";
+        assert_eq!(sanitize_page_text(text, true, 100), text);
     }
 
     #[test]
