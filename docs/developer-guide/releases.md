@@ -30,9 +30,10 @@ make package-linux PROJECT_VERSION=0.3.0
 
 ## Package for macOS
 
-Run these on an Apple Silicon Mac with the Xcode command-line tools installed (`xcode-select --install`); full Xcode is not needed.
+Run these on an Apple Silicon Mac with the Xcode command-line tools installed (`xcode-select --install`); full Xcode is not needed. The bundle carries its GStreamer libraries, so the unpacked GStreamer must be present first ([Development setup](setup.md#macos-media-set-up-gstreamer)):
 
 ```bash
+make gstreamer-macos # once: download and unpack GStreamer (no sudo)
 make app-macos       # release build, then dist/Mercury Browser.app
 make package-macos   # the same, plus the disk image and its checksum
 ```
@@ -40,9 +41,11 @@ make package-macos   # the same, plus the disk image and its checksum
 Both targets run `scripts/macos/bundle.sh`, which can also be called directly on an existing build:
 
 ```bash
-scripts/macos/bundle.sh [--binary target/release/mercury-browser] [--out dist] \
-    [--identity -] [--gstreamer-prefix <dir>] [--dmg]
+scripts/macos/bundle.sh --gstreamer-prefix <dir> [--binary target/release/mercury-browser] \
+    [--out dist] [--identity -] [--dmg]
 ```
+
+`--gstreamer-prefix` (or `MERCURY_GSTREAMER_PREFIX`, which `scripts/macos/gstreamer.sh env` exports and the Makefile targets pass on) is required: the executable cannot start without its media libraries, so the script refuses to build a bundle without them.
 
 The script writes only inside the output directory and can be re-run; it rebuilds the bundle from scratch each time and removes it again if any step fails. It produces:
 
@@ -51,10 +54,12 @@ dist/Mercury Browser.app/Contents/
   Info.plist            from apps/mercury-desktop/resources/macos/Info.plist.in
   PkgInfo
   MacOS/mercury-browser the release executable (arm64 only)
-  MacOS/lib/            media libraries, when they are bundled (see below)
+  MacOS/lib/            the GStreamer libraries and plugins (see below); nothing else
   Resources/AppIcon.icns
   Resources/LICENSE
   Resources/THIRD-PARTY-NOTICES.md
+  Resources/LICENSES/   the licence texts the notices refer to (LGPL-2.1, GPL-3.0, …)
+  Resources/gstreamer-licenses/  each bundled library project's licence files, from the GStreamer packages
   _CodeSignature/
 dist/mercury-browser-0.2.0-macos-arm64.dmg         with --dmg
 dist/mercury-browser-0.2.0-macos-arm64.dmg.sha256
@@ -114,9 +119,9 @@ spctl --assess --type execute -vv "dist/Mercury Browser.app" # "rejected" for ad
 
 ### Media libraries
 
-Servo loads its GStreamer libraries from `Contents/MacOS/lib`, found through the executable's `@executable_path/lib/` rpath (the script adds it when the build did not). When `scripts/macos/collect-gstreamer.sh` exists and a GStreamer prefix is given with `--gstreamer-prefix` or `MERCURY_GSTREAMER_PREFIX`, the script runs `collect-gstreamer.sh <prefix> "Contents/MacOS/lib"` before signing. Otherwise it prints that media libraries were not bundled.
+Servo loads its GStreamer libraries from `Contents/MacOS/lib`, found through the executable's `@executable_path/lib/` rpath (the script adds it when the build did not). Before signing, the script runs `scripts/macos/collect-gstreamer.sh <prefix> "Contents/MacOS/lib" <executable>`, which copies the libraries the executable links, the plugins `scripts/macos/gstreamer-plugins.sh` names (Servo's list minus the excluded plugins; Ogg is excluded for now) and their dependencies, thinned to arm64. Inside a bundle the collector writes no marker file: a signed bundle may hold only code in `Contents/MacOS`. The script then checks that every plugin from `gstreamer-plugins.sh` is present and no excluded one is, and copies `LICENSES/` and the bundled projects' licence files into `Contents/Resources`.
 
-Only libraries and loadable plugins belong in `Contents/MacOS/lib`. They are signed without entitlements, so an executable placed there (a plugin scanner, for example) would run with library validation on and, in an ad-hoc build, fail to load the libraries next to it; the script stops if it finds one. The collected libraries are signed with the same identity as the app. Ad-hoc builds can load them because of the ad-hoc entitlement set described under [Entitlements](#entitlements).
+Only libraries and loadable plugins belong in `Contents/MacOS/lib`. They are signed without entitlements, so an executable placed there (a plugin scanner, for example) would run with library validation on and, in an ad-hoc build, fail to load the libraries next to it; the script stops if it finds one, and it stops too on any file there that is not code, which `codesign` would refuse. The collected libraries are signed with the same identity as the app. Ad-hoc builds can load them because of the ad-hoc entitlement set described under [Entitlements](#entitlements).
 
 ### Developer ID and notarisation
 

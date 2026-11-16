@@ -1,0 +1,14 @@
+# Adapted from Zervo, https://github.com/Goddv/Zervo, commit 86cb7126,
+# rust-toolchain.toml, MPL-2.0.
+#
+# The toolchain Mercury Browser is built, linted and tested with, locally and in
+# CI. The workflows install exactly this (`rustup toolchain install` reads this
+# file), so a new stable release cannot change clippy's verdict or the engine
+# build without a commit here. See docs/developer-guide/continuous-integration.md
+# for how to move it.
+[toolchain]
+channel = "1.100.0"
+# Minimal plus what is used: the default profile also downloads the standard
+# library documentation, several hundred megabytes nothing here reads.
+profile = "minimal"
+components = ["clippy", "rustfmt"]

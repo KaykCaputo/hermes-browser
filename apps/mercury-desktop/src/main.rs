@@ -22,6 +22,10 @@ mod crash_handler;
 mod engine;
 mod keyboard;
 mod keyutils;
+#[cfg(target_os = "macos")]
+mod media_buffers;
+#[cfg(target_os = "macos")]
+mod media_isolation;
 mod menus;
 mod panic_hook;
 #[cfg(target_os = "macos")]
@@ -35,15 +39,28 @@ mod shutdown;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {
-    // Before the content-process branch, so that content processes report their crashes too.
+    // (1) Before the content-process branch, so that content processes report their crashes
+    // too. These only install handlers; no thread starts.
     crash_handler::install();
     std::panic::set_hook(Box::new(panic_hook::panic_hook));
+
+    // (2) Media: keep the bundled GStreamer away from the user's own plugins and registry.
+    // Before any thread starts; content processes are this executable and inherit it.
+    #[cfg(target_os = "macos")]
+    media_isolation::isolate_gstreamer_from_user_environment();
 
     if run_content_process_if_requested()? {
         return Ok(ExitCode::SUCCESS);
     }
     // With the early environment changes: before any thread exists, and only in the browser.
     record_browser_process_id();
+
+    // (5) Media: GLib's user directories, where GStreamer writes its download buffers (copies of
+    // the media being played), point into a private directory of this run under Mercury's cache;
+    // content processes inherit them. Removed when this run ends (dropped at the end of `main`),
+    // and leftovers of killed runs at the next start. Before any thread starts.
+    #[cfg(target_os = "macos")]
+    let _media_buffers = media_buffers::keep_media_buffers_private();
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let parsed = reject_non_utf8_paths(&arguments).unwrap_or_else(|| {
