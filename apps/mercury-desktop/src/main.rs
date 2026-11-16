@@ -106,6 +106,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&web_view_focused),
     );
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
+    quit::quit_when_the_window_is_closed(&window);
 
     let screenshot_result = Rc::new(Cell::new(ScreenshotResult::Pending));
     let screenshot_timer = options.screenshot.map(|screenshot| {
@@ -120,7 +121,10 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         .exit_request
         .map(|request| quit::start_exit_request(&window, request));
 
-    let run_result = window.run();
+    // Not `window.run()`, which hides the window as soon as the loop ends: on Wayland hiding
+    // destroys the window and tears rendering down while the engine still runs.
+    // `shut_down_engine` hides the window once it has taken the engine's state.
+    let run_result = window.show().and_then(|()| slint::run_event_loop());
 
     let exit_code = match (&run_result, screenshot_timer.is_some()) {
         (Err(_), _) => 1,

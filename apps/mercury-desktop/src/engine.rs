@@ -130,9 +130,9 @@ pub(crate) fn shut_down_engine(exit_code_if_stuck: u8) {
     };
     let window = engine.window.upgrade();
     if let Some(window) = &window {
-        // Quitting looks instant while the engine winds down. `run()` has usually hidden the
-        // window already. The state is taken first because hiding can tear rendering down
-        // (Wayland destroys the window), and that teardown must not touch the engine now.
+        // Quitting looks instant while the engine winds down. The state is taken first because
+        // hiding can tear rendering down (Wayland destroys the window), and that teardown must
+        // not touch the engine now.
         if let Err(error) = window.hide() {
             log::warn!("could not hide the window before shutting down: {error}");
         }
@@ -253,7 +253,7 @@ impl Engine {
                 state.present(&window);
             }
             RenderingState::RenderingTeardown => {
-                state.tear_down_rendering(&window);
+                state.tear_down_rendering();
                 drop(state_slot);
                 // A later setup needs bootstrapping again if the window is covered by then.
                 let engine = ENGINE.with(|current| current.borrow().clone());
@@ -270,6 +270,8 @@ impl EngineState {
             return;
         }
 
+        // A texture left from before a `RenderingTeardown` belongs to the device Slint gave up.
+        window.set_web_view_texture(Image::default());
         window.set_web_view_visible(false);
 
         let GraphicsAPI::WGPU29 { device, queue, .. } = graphics_api else {
@@ -501,8 +503,15 @@ impl EngineState {
     /// Slint is giving up its device (the window is suspended or its renderer destroyed). The
     /// runtime stays, so this never starts Servo's shutdown from inside the renderer; the web
     /// views close while the context and the device they paint through are still alive.
-    fn tear_down_rendering(&mut self, window: &MainWindow) {
-        window.set_web_view_texture(Image::default());
+    ///
+    /// Nothing here may call into the window. Slint runs this notifier from
+    /// `WinitWindowAdapter::suspend`, which holds the adapter's window cell mutably borrowed;
+    /// setting a property marks the window dirty, and its redraw request borrows that cell
+    /// again and panics unless a redraw is already pending
+    /// (i-slint-backend-winit-1.17.1/winitwindowadapter.rs:628-632, 1282-1288). The texture
+    /// imported from the old device is released by the next `set_up_rendering`, before
+    /// anything renders with the new device, or by `shut_down`.
+    fn tear_down_rendering(&mut self) {
         release_in_order(
             EngineParts {
                 web_views: (

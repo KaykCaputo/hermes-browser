@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mercury_ui::MainWindow;
 use slint::platform::WindowEvent;
-use slint::{ComponentHandle, Timer, TimerMode};
+use slint::{CloseRequestResponse, ComponentHandle, Timer, TimerMode};
 
 use crate::cli::{ExitBy, ExitRequest};
 
@@ -11,6 +11,18 @@ pub(crate) fn request_quit() {
     if let Err(error) = slint::quit_event_loop() {
         log::warn!("could not quit: {error}");
     }
+}
+
+/// Closing the window (its close button, or the close request `--exit-by close-request` sends)
+/// quits like the quit shortcut. The window stays shown until the event loop has ended and the
+/// engine's state has been taken: a window Slint hides by itself is suspended while the loop
+/// exits (`suspend_all_hidden_windows`, i-slint-backend-winit-1.17.1/event_loop.rs:120-132,
+/// 547-554), which tears rendering down before the engine has shut down.
+pub(crate) fn quit_when_the_window_is_closed(window: &MainWindow) {
+    window.window().on_close_requested(|| {
+        request_quit();
+        CloseRequestResponse::KeepWindowShown
+    });
 }
 
 /// Starts the diagnostic `--exit-after` timer. The returned timer must be kept alive while the
