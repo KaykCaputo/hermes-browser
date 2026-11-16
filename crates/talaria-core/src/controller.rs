@@ -36,6 +36,8 @@ impl BrowserController {
     pub fn queue_navigation(&mut self, input: &str) -> Result<(), AddressResolutionError> {
         let url = resolve_address(input)?.to_string();
         let tab_id = self.active_tab_id;
+        self.visits
+            .set_origin(tab_id, NavigationOrigin::Typed, Some(&url));
         let tab = self
             .tab_mut(tab_id)
             .expect("the controller always owns an active tab");
@@ -51,7 +53,6 @@ impl BrowserController {
                 queued.tab_id() != tab_id || !queued.command().targets_the_current_page()
             });
         }
-        self.visits.set_origin(tab_id, NavigationOrigin::Typed);
         Ok(())
     }
 
@@ -251,7 +252,9 @@ impl BrowserController {
             return true;
         }
         if let Some(origin) = command.navigation_origin() {
-            self.visits.set_origin(tab_id, origin);
+            // A reload goes to the page shown; back and forward go wherever they lead.
+            let target = (origin == NavigationOrigin::Reload).then(|| tab.state().url());
+            self.visits.set_origin(tab_id, origin, target);
         }
 
         if let Some(last_command) = self.command_queue.back_mut() {
@@ -356,14 +359,15 @@ impl BrowserController {
         true
     }
 
-    /// Names how the tab's next committed navigation was reached, overriding what the command
-    /// that started it implied (for example `Bookmark` after `queue_navigation`). Returns false
-    /// if the tab does not exist.
+    /// Names how the navigation just started in the tab was reached, overriding what the
+    /// command that started it implied: call it right after `queue_navigation` or
+    /// `open_tab_with` (for example `Bookmark`, or `Restored` for a restored tab, whose page is
+    /// then not recorded). Returns false if the tab does not exist.
     pub fn set_navigation_origin(&mut self, tab_id: TabId, origin: NavigationOrigin) -> bool {
-        if !self.tabs.iter().any(|tab| tab.id() == tab_id) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id() == tab_id) else {
             return false;
-        }
-        self.visits.set_origin(tab_id, origin);
+        };
+        self.visits.rename_origin(tab_id, origin, tab.state().url());
         true
     }
 

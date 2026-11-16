@@ -132,6 +132,22 @@ pub enum BrowserEvent {
     FullscreenChanged {
         fullscreen: bool,
     },
+    // history
+    /// The tab's session history changed (a new document, a fragment change, `pushState` or
+    /// `replaceState`, a reload, back or forward, or a subframe navigating): `url` is the
+    /// top-level URL now shown, at `history_index` of `history_length` entries. Sent after the
+    /// matching `AddressChanged`; only history recording reads it.
+    PageCommitted {
+        url: String,
+        history_length: usize,
+        history_index: usize,
+    },
+    /// The page's title, with the URL the web view showed when the title was reported. Sent
+    /// after the matching `PageTitleChanged`; only history recording reads it.
+    PageTitleAt {
+        url: String,
+        title: Option<String>,
+    },
 }
 
 impl BrowserEvent {
@@ -257,6 +273,8 @@ impl BrowserState {
             BrowserEvent::FullscreenChanged { fullscreen } => {
                 self.fullscreen = fullscreen;
             }
+            // history: read by the controller's visit tracker, not shown.
+            BrowserEvent::PageCommitted { .. } | BrowserEvent::PageTitleAt { .. } => {}
         }
     }
 }

@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use talaria_core::{
     BrowserCommand, BrowserController, BrowserEvent, LoadState, NavigationOrigin, TabActivation,
     TabId, VisitUpdate,
@@ -15,19 +17,51 @@ fn controller_with_ready_tab() -> (BrowserController, TabId) {
     (controller, tab_id)
 }
 
+/// Every `commit` gets a session-history position no other commit has, so that none of them
+/// looks like a `replaceState`.
+static POSITION: AtomicUsize = AtomicUsize::new(1);
+
+/// The engine's report of a session-history change, as `talaria-servo` sends it.
 fn commit(controller: &mut BrowserController, tab_id: TabId, url: &str) {
+    let position = POSITION.fetch_add(1, Ordering::Relaxed);
+    commit_at(controller, tab_id, url, position + 1, position);
+}
+
+fn commit_at(
+    controller: &mut BrowserController,
+    tab_id: TabId,
+    url: &str,
+    history_length: usize,
+    history_index: usize,
+) {
     controller.handle_event(
         tab_id,
         BrowserEvent::AddressChanged {
             url: url.to_owned(),
         },
     );
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::PageCommitted {
+            url: url.to_owned(),
+            history_length,
+            history_index,
+        },
+    );
 }
 
-fn title(controller: &mut BrowserController, tab_id: TabId, title: Option<&str>) {
+/// A title as `talaria-servo` reports it: with the web view's URL at that moment.
+fn title_at(controller: &mut BrowserController, tab_id: TabId, url: &str, title: Option<&str>) {
     controller.handle_event(
         tab_id,
         BrowserEvent::PageTitleChanged {
+            title: title.map(str::to_owned),
+        },
+    );
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::PageTitleAt {
+            url: url.to_owned(),
             title: title.map(str::to_owned),
         },
     );
@@ -46,6 +80,13 @@ fn visits(updates: &[VisitUpdate]) -> Vec<(&str, NavigationOrigin)> {
             _ => None,
         })
         .collect()
+}
+
+fn title_update(url: &str, title: &str) -> VisitUpdate {
+    VisitUpdate::Title {
+        url: url.to_owned(),
+        title: title.to_owned(),
+    }
 }
 
 #[test]
@@ -93,6 +134,20 @@ fn a_navigation_the_page_started_is_a_link_visit() {
 }
 
 #[test]
+fn only_the_engines_commit_report_counts() {
+    let (mut controller, tab_id) = controller_with_ready_tab();
+
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::AddressChanged {
+            url: "https://a.test/".to_owned(),
+        },
+    );
+
+    assert!(controller.take_visit_updates().is_empty());
+}
+
+#[test]
 fn an_origin_applies_to_the_next_commit_only() {
     let (mut controller, tab_id) = controller_with_ready_tab();
     controller.queue_navigation("https://a.test/").unwrap();
@@ -112,6 +167,8 @@ fn an_origin_applies_to_the_next_commit_only() {
 #[test]
 fn a_redirected_typed_address_records_the_page_it_ended_on_as_typed() {
     let (mut controller, tab_id) = controller_with_ready_tab();
+    commit(&mut controller, tab_id, "https://start.test/");
+    controller.take_visit_updates();
     controller.queue_navigation("http://a.test/").unwrap();
 
     commit(&mut controller, tab_id, "https://www.a.test/");
@@ -119,6 +176,53 @@ fn a_redirected_typed_address_records_the_page_it_ended_on_as_typed() {
     assert_eq!(
         visits(&controller.take_visit_updates()),
         vec![("https://www.a.test/", NavigationOrigin::Typed)]
+    );
+}
+
+#[test]
+fn a_subframe_commit_during_a_typed_navigation_does_not_take_its_origin() {
+    // A subframe navigating reports the top-level URL again.
+    let (mut controller, tab_id) = controller_with_ready_tab();
+    commit(&mut controller, tab_id, "https://a.test/");
+    controller.take_visit_updates();
+    controller.queue_navigation("https://b.test/").unwrap();
+
+    commit(&mut controller, tab_id, "https://a.test/");
+    commit(&mut controller, tab_id, "https://b.test/");
+
+    assert_eq!(
+        visits(&controller.take_visit_updates()),
+        vec![("https://b.test/", NavigationOrigin::Typed)]
+    );
+}
+
+#[test]
+fn a_blank_page_committing_first_does_not_take_a_typed_origin() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+    controller.queue_navigation("https://a.test/").unwrap();
+    // The new tab's web view reports its initial blank page (shown as "") late.
+    commit(&mut controller, tab_id, "");
+    commit(&mut controller, tab_id, "about:blank");
+    commit(&mut controller, tab_id, "https://a.test/");
+
+    assert_eq!(
+        visits(&controller.take_visit_updates()),
+        vec![("https://a.test/", NavigationOrigin::Typed)]
+    );
+}
+
+#[test]
+fn typing_an_address_that_is_not_recorded_leaves_no_origin_behind() {
+    let (mut controller, tab_id) = controller_with_ready_tab();
+    controller.queue_navigation("about:blank").unwrap();
+
+    commit(&mut controller, tab_id, "");
+    commit(&mut controller, tab_id, "https://a.test/");
+
+    assert_eq!(
+        visits(&controller.take_visit_updates()),
+        vec![("https://a.test/", NavigationOrigin::Link)]
     );
 }
 
@@ -134,6 +238,26 @@ fn a_reload_is_recorded_as_a_reload_visit() {
     assert_eq!(
         visits(&controller.take_visit_updates()),
         vec![("https://a.test/", NavigationOrigin::Reload)]
+    );
+}
+
+#[test]
+fn a_reload_that_never_commits_is_forgotten_at_the_next_page() {
+    let (mut controller, tab_id) = controller_with_ready_tab();
+    commit(&mut controller, tab_id, "https://a.test/");
+    controller.take_visit_updates();
+
+    controller.queue_command(BrowserCommand::Reload);
+    commit(&mut controller, tab_id, "https://b.test/");
+    commit(&mut controller, tab_id, "https://b.test/");
+    commit(&mut controller, tab_id, "https://c.test/");
+
+    assert_eq!(
+        visits(&controller.take_visit_updates()),
+        vec![
+            ("https://b.test/", NavigationOrigin::Reload),
+            ("https://c.test/", NavigationOrigin::Link),
+        ]
     );
 }
 
@@ -154,7 +278,6 @@ fn typing_the_current_address_again_records_a_typed_visit() {
 
 #[test]
 fn the_same_address_reported_again_without_a_user_command_is_not_a_visit() {
-    // Subframe navigations and `replaceState` to the same URL report the top-level URL again.
     let (mut controller, tab_id) = controller_with_ready_tab();
     commit(&mut controller, tab_id, "https://a.test/");
     controller.take_visit_updates();
@@ -187,7 +310,6 @@ fn back_and_forward_are_history_visits() {
 
 #[test]
 fn going_back_to_the_same_address_is_not_a_visit() {
-    // Back across a subframe navigation keeps the top-level URL.
     let (mut controller, tab_id) = controller_with_ready_tab();
     commit(&mut controller, tab_id, "https://a.test/");
     controller.take_visit_updates();
@@ -199,7 +321,7 @@ fn going_back_to_the_same_address_is_not_a_visit() {
 }
 
 #[test]
-fn same_document_navigations_are_link_visits() {
+fn same_document_navigations_that_add_an_entry_are_link_visits() {
     let (mut controller, tab_id) = controller_with_ready_tab();
 
     commit(&mut controller, tab_id, "https://a.test/");
@@ -213,6 +335,59 @@ fn same_document_navigations_are_link_visits() {
             ("https://a.test/#part", NavigationOrigin::Link),
             ("https://a.test/pushed", NavigationOrigin::Link),
         ]
+    );
+}
+
+#[test]
+fn a_replaced_entry_moves_the_current_visit_to_the_new_address() {
+    let (mut controller, tab_id) = controller_with_ready_tab();
+    controller.queue_navigation("https://app.test/").unwrap();
+    commit_at(&mut controller, tab_id, "https://app.test/", 2, 1);
+    title_at(&mut controller, tab_id, "https://app.test/", Some("App"));
+    let first = controller.take_visit_updates();
+    let VisitUpdate::Visit { key: old, .. } = first[0] else {
+        panic!("the commit is recorded first: {first:?}");
+    };
+
+    commit_at(&mut controller, tab_id, "https://app.test/?q=1", 2, 1);
+    let updates = controller.take_visit_updates();
+
+    let VisitUpdate::Visit { key: new, .. } = updates[1] else {
+        panic!("the new address is recorded after the old one is forgotten: {updates:?}");
+    };
+    assert_ne!(old, new);
+    assert_eq!(
+        updates,
+        vec![
+            VisitUpdate::Forget { key: old },
+            VisitUpdate::Visit {
+                key: new,
+                url: "https://app.test/?q=1".to_owned(),
+                origin: NavigationOrigin::Typed,
+            },
+            title_update("https://app.test/?q=1", "App"),
+        ]
+    );
+}
+
+#[test]
+fn a_user_navigation_that_replaces_the_entry_is_a_new_visit() {
+    let (mut controller, tab_id) = controller_with_ready_tab();
+    commit_at(&mut controller, tab_id, "https://a.test/", 2, 1);
+    controller.take_visit_updates();
+    controller.queue_navigation("https://b.test/").unwrap();
+
+    commit_at(&mut controller, tab_id, "https://b.test/", 2, 1);
+
+    let updates = controller.take_visit_updates();
+    assert!(
+        !updates
+            .iter()
+            .any(|u| matches!(u, VisitUpdate::Forget { .. }))
+    );
+    assert_eq!(
+        visits(&updates),
+        vec![("https://b.test/", NavigationOrigin::Typed)]
     );
 }
 
@@ -245,32 +420,20 @@ fn only_web_and_file_pages_are_recorded() {
 }
 
 #[test]
-fn a_page_that_is_not_recorded_still_takes_the_origin() {
-    let (mut controller, tab_id) = controller_with_ready_tab();
-    controller.queue_navigation("about:blank").unwrap();
-
-    commit(&mut controller, tab_id, "about:blank");
-    commit(&mut controller, tab_id, "https://a.test/");
-
-    assert_eq!(
-        visits(&controller.take_visit_updates()),
-        vec![("https://a.test/", NavigationOrigin::Link)]
-    );
-}
-
-#[test]
 fn credentials_in_an_address_are_not_recorded() {
     let (mut controller, tab_id) = controller_with_ready_tab();
 
     commit(&mut controller, tab_id, "https://user:secret@a.test/p");
-    title(&mut controller, tab_id, Some("Private"));
+    title_at(
+        &mut controller,
+        tab_id,
+        "https://user:secret@a.test/p",
+        Some("Private"),
+    );
 
     assert_eq!(
         controller.take_visit_updates()[1..],
-        [VisitUpdate::Title {
-            url: "https://a.test/p".to_owned(),
-            title: "Private".to_owned(),
-        }]
+        [title_update("https://a.test/p", "Private")]
     );
     commit(&mut controller, tab_id, "https://user@a.test/q");
     assert_eq!(
@@ -280,57 +443,80 @@ fn credentials_in_an_address_are_not_recorded() {
 }
 
 #[test]
-fn titles_follow_the_current_visit() {
+fn a_typed_address_with_credentials_keeps_its_origin() {
     let (mut controller, tab_id) = controller_with_ready_tab();
+    commit(&mut controller, tab_id, "https://a.test/");
+    controller.take_visit_updates();
+    controller
+        .queue_navigation("https://user:pw@b.test/")
+        .unwrap();
 
     commit(&mut controller, tab_id, "https://a.test/");
-    title(&mut controller, tab_id, Some(""));
-    title(&mut controller, tab_id, None);
-    title(&mut controller, tab_id, Some("   "));
-    title(&mut controller, tab_id, Some("Page A"));
-    title(&mut controller, tab_id, Some("Page A"));
-    title(&mut controller, tab_id, Some("Page A, updated"));
-    let updates = controller.take_visit_updates();
+    commit(&mut controller, tab_id, "https://user:pw@b.test/");
 
-    let VisitUpdate::Visit { key, .. } = updates[0] else {
-        panic!("the commit is recorded first: {updates:?}");
-    };
     assert_eq!(
-        updates,
-        vec![
-            VisitUpdate::Visit {
-                key,
-                url: "https://a.test/".to_owned(),
-                origin: NavigationOrigin::Link,
-            },
-            VisitUpdate::Title {
-                url: "https://a.test/".to_owned(),
-                title: "Page A".to_owned(),
-            },
-            VisitUpdate::Title {
-                url: "https://a.test/".to_owned(),
-                title: "Page A, updated".to_owned(),
-            },
+        visits(&controller.take_visit_updates()),
+        vec![("https://b.test/", NavigationOrigin::Typed)]
+    );
+}
+
+#[test]
+fn titles_follow_the_current_visit() {
+    let (mut controller, tab_id) = controller_with_ready_tab();
+    let url = "https://a.test/";
+
+    commit(&mut controller, tab_id, url);
+    title_at(&mut controller, tab_id, url, Some(""));
+    title_at(&mut controller, tab_id, url, None);
+    title_at(&mut controller, tab_id, url, Some("   "));
+    title_at(&mut controller, tab_id, url, Some("Page A"));
+    title_at(&mut controller, tab_id, url, Some("Page A"));
+    title_at(&mut controller, tab_id, url, Some("Page A, updated"));
+
+    assert_eq!(
+        controller.take_visit_updates()[1..],
+        [
+            title_update(url, "Page A"),
+            title_update(url, "Page A, updated"),
         ]
     );
+}
+
+#[test]
+fn a_title_reported_for_another_address_is_dropped() {
+    let (mut controller, tab_id) = controller_with_ready_tab();
+    commit(&mut controller, tab_id, "https://a.test/");
+    controller.take_visit_updates();
+
+    title_at(&mut controller, tab_id, "https://b.test/", Some("B"));
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::PageTitleChanged {
+            title: Some("Without an address".to_owned()),
+        },
+    );
+
+    assert!(controller.take_visit_updates().is_empty());
 }
 
 #[test]
 fn a_title_set_after_a_same_document_navigation_belongs_to_the_new_address() {
     let (mut controller, tab_id) = controller_with_ready_tab();
     commit(&mut controller, tab_id, "https://app.test/");
-    title(&mut controller, tab_id, Some("Inbox"));
+    title_at(&mut controller, tab_id, "https://app.test/", Some("Inbox"));
     controller.take_visit_updates();
 
     commit(&mut controller, tab_id, "https://app.test/settings");
-    title(&mut controller, tab_id, Some("Settings"));
+    title_at(
+        &mut controller,
+        tab_id,
+        "https://app.test/settings",
+        Some("Settings"),
+    );
 
     assert_eq!(
         controller.take_visit_updates()[1..],
-        [VisitUpdate::Title {
-            url: "https://app.test/settings".to_owned(),
-            title: "Settings".to_owned(),
-        }]
+        [title_update("https://app.test/settings", "Settings")]
     );
 }
 
@@ -338,9 +524,14 @@ fn a_title_set_after_a_same_document_navigation_belongs_to_the_new_address() {
 fn titles_of_pages_that_are_not_recorded_are_ignored() {
     let (mut controller, tab_id) = controller_with_ready_tab();
 
-    title(&mut controller, tab_id, Some("New Tab"));
+    title_at(&mut controller, tab_id, "", Some("New Tab"));
     commit(&mut controller, tab_id, "about:memory");
-    title(&mut controller, tab_id, Some("about:memory"));
+    title_at(
+        &mut controller,
+        tab_id,
+        "about:memory",
+        Some("about:memory"),
+    );
 
     assert!(controller.take_visit_updates().is_empty());
 }
@@ -348,33 +539,30 @@ fn titles_of_pages_that_are_not_recorded_are_ignored() {
 #[test]
 fn a_reload_offers_the_title_again() {
     let (mut controller, tab_id) = controller_with_ready_tab();
-    commit(&mut controller, tab_id, "https://a.test/");
-    title(&mut controller, tab_id, Some("A"));
+    let url = "https://a.test/";
+    commit(&mut controller, tab_id, url);
+    title_at(&mut controller, tab_id, url, Some("A"));
     controller.take_visit_updates();
 
     controller.queue_command(BrowserCommand::Reload);
-    commit(&mut controller, tab_id, "https://a.test/");
-    title(&mut controller, tab_id, Some("A"));
+    commit(&mut controller, tab_id, url);
+    title_at(&mut controller, tab_id, url, Some("A"));
 
     assert_eq!(
         controller.take_visit_updates()[1..],
-        [VisitUpdate::Title {
-            url: "https://a.test/".to_owned(),
-            title: "A".to_owned(),
-        }]
+        [title_update(url, "A")]
     );
 }
 
 #[test]
 fn an_engine_error_page_takes_its_visit_back() {
     let (mut controller, tab_id) = controller_with_ready_tab();
-    controller.queue_navigation("https://down.test/").unwrap();
+    let url = "https://down.test/";
+    controller.queue_navigation(url).unwrap();
 
-    commit(&mut controller, tab_id, "https://down.test/");
-    title(&mut controller, tab_id, Some(""));
-    title(&mut controller, tab_id, Some(ERROR_TITLE));
-    load(&mut controller, tab_id, LoadState::Loading);
-    load(&mut controller, tab_id, LoadState::Loaded);
+    commit(&mut controller, tab_id, url);
+    title_at(&mut controller, tab_id, url, Some(""));
+    title_at(&mut controller, tab_id, url, Some(ERROR_TITLE));
     let updates = controller.take_visit_updates();
 
     let VisitUpdate::Visit { key, .. } = updates[0] else {
@@ -384,36 +572,51 @@ fn an_engine_error_page_takes_its_visit_back() {
 }
 
 #[test]
+fn an_error_title_for_another_address_never_takes_a_visit_back() {
+    let (mut controller, tab_id) = controller_with_ready_tab();
+    commit(&mut controller, tab_id, "https://a.test/");
+    controller.take_visit_updates();
+
+    title_at(
+        &mut controller,
+        tab_id,
+        "https://down.test/",
+        Some(ERROR_TITLE),
+    );
+
+    assert!(controller.take_visit_updates().is_empty());
+}
+
+#[test]
 fn loading_the_same_address_after_an_error_page_is_a_visit() {
     // For example the certificate error page's "proceed" link.
     let (mut controller, tab_id) = controller_with_ready_tab();
-    commit(&mut controller, tab_id, "https://down.test/");
-    title(&mut controller, tab_id, Some(ERROR_TITLE));
+    let url = "https://down.test/";
+    commit(&mut controller, tab_id, url);
+    title_at(&mut controller, tab_id, url, Some(ERROR_TITLE));
     controller.take_visit_updates();
 
-    commit(&mut controller, tab_id, "https://down.test/");
+    commit(&mut controller, tab_id, url);
 
     assert_eq!(
         visits(&controller.take_visit_updates()),
-        vec![("https://down.test/", NavigationOrigin::Link)]
+        vec![(url, NavigationOrigin::Link)]
     );
 }
 
 #[test]
 fn the_error_title_on_a_page_that_already_had_a_title_is_just_a_title() {
     let (mut controller, tab_id) = controller_with_ready_tab();
-    commit(&mut controller, tab_id, "https://a.test/");
-    title(&mut controller, tab_id, Some("A"));
+    let url = "https://a.test/";
+    commit(&mut controller, tab_id, url);
+    title_at(&mut controller, tab_id, url, Some("A"));
     controller.take_visit_updates();
 
-    title(&mut controller, tab_id, Some(ERROR_TITLE));
+    title_at(&mut controller, tab_id, url, Some(ERROR_TITLE));
 
     assert_eq!(
         controller.take_visit_updates(),
-        vec![VisitUpdate::Title {
-            url: "https://a.test/".to_owned(),
-            title: ERROR_TITLE.to_owned(),
-        }]
+        vec![title_update(url, ERROR_TITLE)]
     );
 }
 
@@ -421,9 +624,10 @@ fn the_error_title_on_a_page_that_already_had_a_title_is_just_a_title() {
 fn without_error_page_titles_no_title_takes_a_visit_back() {
     let mut controller = BrowserController::default();
     let tab_id = controller.active_tab_id();
+    let url = "https://down.test/";
 
-    commit(&mut controller, tab_id, "https://down.test/");
-    title(&mut controller, tab_id, Some(ERROR_TITLE));
+    commit(&mut controller, tab_id, url);
+    title_at(&mut controller, tab_id, url, Some(ERROR_TITLE));
 
     assert!(matches!(
         controller.take_visit_updates()[..],
@@ -432,56 +636,13 @@ fn without_error_page_titles_no_title_takes_a_visit_back() {
 }
 
 #[test]
-fn a_load_that_fails_before_it_finishes_takes_its_visit_back() {
+fn a_slow_page_that_fails_is_still_a_visit() {
+    // Every `Failed` is synthetic (an address that does not resolve, a web view that could not
+    // be created, a crash); network failures arrive as error pages.
     let (mut controller, tab_id) = controller_with_ready_tab();
 
-    commit(&mut controller, tab_id, "https://crash.test/");
+    commit(&mut controller, tab_id, "https://slow.test/");
     load(&mut controller, tab_id, LoadState::Loading);
-    load(
-        &mut controller,
-        tab_id,
-        LoadState::Failed {
-            message: "the content process crashed".to_owned(),
-        },
-    );
-    let updates = controller.take_visit_updates();
-
-    let VisitUpdate::Visit { key, .. } = updates[0] else {
-        panic!("the commit is recorded first: {updates:?}");
-    };
-    assert_eq!(updates[1..], [VisitUpdate::Forget { key }]);
-}
-
-#[test]
-fn a_failure_after_the_page_loaded_keeps_its_visit() {
-    let (mut controller, tab_id) = controller_with_ready_tab();
-    commit(&mut controller, tab_id, "https://a.test/");
-    load(&mut controller, tab_id, LoadState::Loading);
-    load(&mut controller, tab_id, LoadState::Loaded);
-    controller.take_visit_updates();
-
-    load(
-        &mut controller,
-        tab_id,
-        LoadState::Failed {
-            message: "the content process crashed".to_owned(),
-        },
-    );
-
-    assert!(controller.take_visit_updates().is_empty());
-}
-
-#[test]
-fn a_failure_without_a_load_since_the_commit_keeps_its_visit() {
-    // A same-document navigation starts no load; an invalid address typed afterwards reports
-    // a failure on the tab, which says nothing about the page shown.
-    let (mut controller, tab_id) = controller_with_ready_tab();
-    commit(&mut controller, tab_id, "https://app.test/");
-    load(&mut controller, tab_id, LoadState::Loading);
-    load(&mut controller, tab_id, LoadState::Loaded);
-    commit(&mut controller, tab_id, "https://app.test/settings");
-    controller.take_visit_updates();
-
     load(
         &mut controller,
         tab_id,
@@ -490,7 +651,9 @@ fn a_failure_without_a_load_since_the_commit_keeps_its_visit() {
         },
     );
 
-    assert!(controller.take_visit_updates().is_empty());
+    let updates = controller.take_visit_updates();
+    assert_eq!(updates.len(), 1);
+    assert!(matches!(updates[0], VisitUpdate::Visit { .. }));
 }
 
 #[test]
@@ -530,9 +693,12 @@ fn a_tab_opened_at_an_address_records_a_link_visit() {
 #[test]
 fn a_caller_can_name_the_origin_of_a_navigation() {
     let (mut controller, tab_id) = controller_with_ready_tab();
+    commit(&mut controller, tab_id, "https://start.test/");
+    controller.take_visit_updates();
     controller.queue_navigation("https://a.test/").unwrap();
 
     assert!(controller.set_navigation_origin(tab_id, NavigationOrigin::Bookmark));
+    commit(&mut controller, tab_id, "https://start.test/");
     commit(&mut controller, tab_id, "https://a.test/");
 
     assert_eq!(
@@ -540,6 +706,58 @@ fn a_caller_can_name_the_origin_of_a_navigation() {
         vec![("https://a.test/", NavigationOrigin::Bookmark)]
     );
     assert!(!controller.set_navigation_origin(TabId::new(99), NavigationOrigin::Bookmark));
+}
+
+#[test]
+fn a_new_tab_opened_from_a_bookmark_is_a_bookmark_visit() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller
+        .open_tab_with(Some("https://a.test/"), TabActivation::Foreground)
+        .unwrap();
+    assert!(controller.set_navigation_origin(tab_id, NavigationOrigin::Bookmark));
+    controller.take_initial_url(tab_id);
+
+    commit(&mut controller, tab_id, "https://a.test/");
+
+    assert_eq!(
+        visits(&controller.take_visit_updates()),
+        vec![("https://a.test/", NavigationOrigin::Bookmark)]
+    );
+}
+
+#[test]
+fn a_restored_tab_records_nothing_for_its_restored_page() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller
+        .open_tab_with(Some("https://a.test/"), TabActivation::Background)
+        .unwrap();
+    assert!(controller.set_navigation_origin(tab_id, NavigationOrigin::Restored));
+    controller.take_initial_url(tab_id);
+
+    commit(&mut controller, tab_id, "https://a.test/");
+    title_at(&mut controller, tab_id, "https://a.test/", Some("A"));
+    commit(&mut controller, tab_id, "https://a.test/");
+    assert!(controller.take_visit_updates().is_empty());
+
+    commit(&mut controller, tab_id, "https://b.test/");
+    assert_eq!(
+        visits(&controller.take_visit_updates()),
+        vec![("https://b.test/", NavigationOrigin::Link)]
+    );
+}
+
+#[test]
+fn a_restored_page_that_redirects_is_not_recorded_either() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller
+        .open_tab_with(Some("http://a.test/"), TabActivation::Background)
+        .unwrap();
+    controller.set_navigation_origin(tab_id, NavigationOrigin::Restored);
+    controller.take_initial_url(tab_id);
+
+    commit(&mut controller, tab_id, "https://a.test/");
+
+    assert!(controller.take_visit_updates().is_empty());
 }
 
 #[test]
@@ -555,9 +773,8 @@ fn origins_and_addresses_are_kept_per_tab() {
     commit(&mut controller, second, "https://a.test/");
     commit(&mut controller, first, "https://a.test/");
 
-    let updates = controller.take_visit_updates();
     assert_eq!(
-        visits(&updates),
+        visits(&controller.take_visit_updates()),
         vec![("https://a.test/", NavigationOrigin::Reload)]
     );
 }
@@ -571,7 +788,7 @@ fn a_closed_tab_records_nothing_more() {
 
     assert!(controller.close_tab(second));
     commit(&mut controller, second, "https://b.test/");
-    title(&mut controller, second, Some("B"));
+    title_at(&mut controller, second, "https://b.test/", Some("B"));
 
     assert!(controller.take_visit_updates().is_empty());
     commit(&mut controller, first, "https://c.test/");
@@ -595,6 +812,7 @@ fn every_visit_has_its_own_key() {
             _ => None,
         })
         .collect::<Vec<_>>();
+    keys.sort();
     keys.dedup();
     assert_eq!(keys.len(), 3);
 }
@@ -606,4 +824,64 @@ fn taking_the_updates_empties_the_queue() {
 
     assert_eq!(controller.take_visit_updates().len(), 1);
     assert!(controller.take_visit_updates().is_empty());
+}
+
+#[test]
+fn a_title_reported_before_the_first_commit_belongs_to_the_first_page() {
+    // Servo reports a new web view's first titles before its first commit, while the web view
+    // shows no page (an empty URL); the blank page has no title of its own.
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    title_at(&mut controller, tab_id, "", Some(""));
+    title_at(&mut controller, tab_id, "", Some("Single page"));
+    commit(&mut controller, tab_id, "https://a.test/");
+    let updates = controller.take_visit_updates();
+
+    assert_eq!(updates.len(), 2, "{updates:?}");
+    assert!(matches!(updates[0], VisitUpdate::Visit { .. }));
+    assert_eq!(updates[1], title_update("https://a.test/", "Single page"));
+}
+
+#[test]
+fn an_error_title_reported_before_the_commit_records_nothing() {
+    let mut controller = BrowserController::default();
+    controller.set_error_page_titles([ERROR_TITLE.to_owned()]);
+    let tab_id = controller.active_tab_id();
+
+    title_at(&mut controller, tab_id, "", Some(ERROR_TITLE));
+    commit(&mut controller, tab_id, "https://down.test/");
+
+    assert!(controller.take_visit_updates().is_empty());
+    commit(&mut controller, tab_id, "https://down.test/");
+    assert_eq!(
+        visits(&controller.take_visit_updates()),
+        vec![("https://down.test/", NavigationOrigin::Link)]
+    );
+}
+
+#[test]
+fn an_early_title_is_dropped_if_the_next_page_is_not_recorded() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+
+    title_at(&mut controller, tab_id, "", Some("Memory"));
+    commit(&mut controller, tab_id, "about:memory");
+    commit(&mut controller, tab_id, "https://a.test/");
+
+    let updates = controller.take_visit_updates();
+    assert_eq!(updates.len(), 1, "{updates:?}");
+}
+
+#[test]
+fn an_early_title_is_not_kept_past_a_titled_blank_page() {
+    let (mut controller, tab_id) = controller_with_ready_tab();
+    title_at(&mut controller, tab_id, "", Some("Early"));
+    title_at(&mut controller, tab_id, "", Some("Later"));
+    commit(&mut controller, tab_id, "https://a.test/");
+
+    assert_eq!(
+        controller.take_visit_updates()[1..],
+        [title_update("https://a.test/", "Later")]
+    );
 }

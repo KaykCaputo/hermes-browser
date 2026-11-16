@@ -364,8 +364,13 @@ impl servo::WebViewDelegate for BrowserDelegate {
         });
     }
 
-    fn notify_page_title_changed(&self, _web_view: servo::WebView, title: Option<String>) {
-        self.send_browser_event(BrowserEvent::PageTitleChanged { title });
+    fn notify_page_title_changed(&self, web_view: servo::WebView, title: Option<String>) {
+        self.send_browser_event(BrowserEvent::PageTitleChanged {
+            title: title.clone(),
+        });
+        // history
+        let url = web_view.url();
+        self.send_browser_event(crate::history_events::page_title_at(url.as_ref(), title));
     }
 
     fn notify_favicon_changed(&self, web_view: servo::WebView) {
@@ -399,6 +404,10 @@ impl servo::WebViewDelegate for BrowserDelegate {
 
     fn notify_history_changed(&self, _web_view: servo::WebView, entries: Vec<Url>, current: usize) {
         self.send_browser_event(history_changed_event(entries.len(), current));
+        // history
+        if let Some(event) = crate::history_events::page_committed(&entries, current) {
+            self.send_browser_event(event);
+        }
     }
 
     fn notify_cursor_changed(&self, _web_view: servo::WebView, cursor: Cursor) {
@@ -501,7 +510,7 @@ fn pointer_cursor_from_servo(cursor: Cursor) -> PointerCursor {
     }
 }
 
-fn display_url(url: &Url) -> String {
+pub(crate) fn display_url(url: &Url) -> String {
     if url.as_str() == NEW_TAB_URL {
         String::new()
     } else {

@@ -3,6 +3,7 @@ mod content_process;
 mod error;
 mod error_pages;
 mod frame_ready;
+mod history_events;
 mod load_metrics;
 mod opengl_context;
 mod page_defaults;
