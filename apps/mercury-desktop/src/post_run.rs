@@ -41,6 +41,7 @@ pub(crate) struct RunEnd {
 }
 
 /// Whether the post-run sequence has started.
+#[cfg(any(target_os = "macos", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PostRun {
     NotStarted,
@@ -73,6 +74,7 @@ pub(crate) fn finish(event_loop_failed: bool) -> Option<u8> {
 }
 
 /// Whether the post-run sequence has started, is running or is done.
+#[cfg(target_os = "macos")]
 pub(crate) fn state() -> PostRun {
     RUN_END.with(RunEndSlot::state)
 }
@@ -302,6 +304,7 @@ impl<T> RunEndSlot<T> {
         Some(exit_code)
     }
 
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn state(&self) -> PostRun {
         match *self.0.borrow() {
             SlotState::Empty | SlotState::Ready(_) => PostRun::NotStarted,

@@ -146,6 +146,11 @@ pub(crate) fn exit_because_stuck(what: &str, exit_code: u8) -> ! {
     note("exiting without waiting");
     crate::profile::remove_temporary_profile();
     note("temporary profile removed");
+    #[cfg(target_os = "macos")]
+    {
+        crate::media_buffers::remove_media_buffers();
+        note("media buffers removed");
+    }
     log::error!("{what} in time; exiting with status {code} without waiting");
     log::logger().flush();
     note("log flushed");

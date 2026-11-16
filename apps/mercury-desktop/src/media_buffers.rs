@@ -33,6 +33,7 @@ pub(crate) fn keep_media_buffers_private() -> Option<MediaBuffers> {
     let (buffers, root) = match MediaBuffers::create(&area) {
         Ok(buffers) => {
             let root = buffers.root().to_path_buf();
+            RUN_MEDIA_BUFFERS.record(&root);
             (Some(buffers), root)
         }
         Err(error) => {
@@ -47,6 +48,48 @@ pub(crate) fn keep_media_buffers_private() -> Option<MediaBuffers> {
     // SAFETY: called from `main` before any thread exists (see the call site).
     unsafe { apply(glib_user_directories(&root)) };
     buffers
+}
+
+/// This run's media directory while it exists, so that exit paths that skip destructors (the
+/// quit watchdogs) can still remove it.
+static RUN_MEDIA_BUFFERS: RunDirectory = RunDirectory::new();
+
+/// Deletes this run's media directory, if it has one. Safe to call more than once; for exits
+/// that skip destructors.
+pub(crate) fn remove_media_buffers() {
+    if let Some(root) = RUN_MEDIA_BUFFERS.take() {
+        remove_run_directory(&root);
+    }
+}
+
+/// A directory path that can be taken out once, by whichever exit path comes first.
+pub(crate) struct RunDirectory(std::sync::Mutex<Option<PathBuf>>);
+
+impl RunDirectory {
+    pub(crate) const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    pub(crate) fn record(&self, root: &Path) {
+        if let Ok(mut current) = self.0.lock() {
+            *current = Some(root.to_path_buf());
+        }
+    }
+
+    /// Takes the recorded path if it is `root`; true if it was.
+    pub(crate) fn take_if(&self, root: &Path) -> bool {
+        self.0.lock().is_ok_and(|mut current| {
+            let matches = current.as_deref() == Some(root);
+            if matches {
+                *current = None;
+            }
+            matches
+        })
+    }
+
+    pub(crate) fn take(&self) -> Option<PathBuf> {
+        self.0.lock().ok().and_then(|mut current| current.take())
+    }
 }
 
 /// The directory of one run, locked for as long as the run lasts and removed when dropped.
@@ -94,14 +137,19 @@ impl MediaBuffers {
 impl Drop for MediaBuffers {
     fn drop(&mut self) {
         // The lock is released after this, when the fields drop.
-        match std::fs::remove_dir_all(&self.root) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => eprintln!(
-                "mercury-browser: could not remove the media directory {}: {error}",
-                self.root.display()
-            ),
-        }
+        let _ = RUN_MEDIA_BUFFERS.take_if(&self.root);
+        remove_run_directory(&self.root);
+    }
+}
+
+fn remove_run_directory(root: &Path) {
+    match std::fs::remove_dir_all(root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!(
+            "mercury-browser: could not remove the media directory {}: {error}",
+            root.display()
+        ),
     }
 }
 
@@ -200,6 +248,25 @@ fn is_unlocked(root: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_run_directory_is_given_once() {
+        let directory = super::RunDirectory::new();
+        directory.record(std::path::Path::new("/a/run"));
+
+        assert_eq!(directory.take(), Some(std::path::PathBuf::from("/a/run")));
+        assert_eq!(directory.take(), None);
+    }
+
+    #[test]
+    fn a_run_directory_is_taken_only_by_its_own_owner() {
+        let directory = super::RunDirectory::new();
+        directory.record(std::path::Path::new("/a/run"));
+
+        assert!(!directory.take_if(std::path::Path::new("/another/run")));
+        assert!(directory.take_if(std::path::Path::new("/a/run")));
+        assert_eq!(directory.take(), None);
+    }
+
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 

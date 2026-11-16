@@ -35,20 +35,21 @@ pub fn run_content_process_if_requested() -> Result<bool, ContentProcessArgument
         return Ok(false);
     };
 
-    ignore_terminal_signals();
+    ignore_group_quit_signals();
     exit_when_the_browser_process_is_gone();
     servo::run_content_process(token);
     Ok(true)
 }
 
 /// A terminal's Ctrl-C (`SIGINT`) and hang-up (`SIGHUP`) go to the whole process group, content
-/// processes included. Ended by them, a content process would die while the browser is shutting
-/// Servo down in order, which then waits for it until the shutdown watchdog fires. The browser
-/// handles these signals and ends its content processes itself (closing their IPC); if it dies
-/// instead, `exit_when_the_browser_process_is_gone` ends them within a second.
+/// processes included, and so does a group-wide `SIGTERM` (`kill -TERM -<pgid>`, systemd's
+/// `KillMode=control-group`). Ended by them, a content process would die while the browser is
+/// shutting Servo down in order, which then waits for it until the shutdown watchdog fires. The
+/// browser handles these signals and ends its content processes itself (closing their IPC); if
+/// it dies instead, `exit_when_the_browser_process_is_gone` ends them within a second.
 #[cfg(unix)]
-fn ignore_terminal_signals() {
-    for signal in [libc::SIGINT, libc::SIGHUP] {
+fn ignore_group_quit_signals() {
+    for signal in [libc::SIGINT, libc::SIGHUP, libc::SIGTERM] {
         // SAFETY: setting a signal's disposition to "ignore" affects only this process, before
         // any thread has started; it is inherited by what this process executes, which is
         // what is wanted for these two signals.
@@ -59,7 +60,7 @@ fn ignore_terminal_signals() {
 }
 
 #[cfg(not(unix))]
-fn ignore_terminal_signals() {}
+fn ignore_group_quit_signals() {}
 
 /// Ends this content process once the browser process that started it has gone.
 ///

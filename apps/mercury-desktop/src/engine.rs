@@ -159,6 +159,7 @@ pub(crate) fn shut_down_engine(exit_code_if_stuck: u8) {
 }
 
 /// Whether the engine's state is borrowed right now (a pump or a render is running).
+#[cfg(target_os = "macos")]
 pub(crate) fn engine_busy() -> bool {
     ENGINE.with(|current| {
         current

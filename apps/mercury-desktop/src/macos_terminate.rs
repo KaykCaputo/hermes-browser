@@ -196,6 +196,10 @@ fn end_the_run_for_the_system() -> NSApplicationTerminateReply {
     if let Some(signal) = crate::signals::received() {
         crate::signals::end_by(signal);
     }
+    if panicked {
+        // The exit status of a Rust panic.
+        std::process::exit(101);
+    }
     if let Ok(Some(code)) = outcome
         && code != 0
     {
