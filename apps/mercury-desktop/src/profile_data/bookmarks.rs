@@ -1,37 +1,15 @@
-//! Bookmark requests: reading and editing the tree. New nodes get a fresh GUID ([`new_guid`]).
+//! Bookmark requests: reading and editing the tree. New nodes get a fresh GUID
+//! ([`new_guid`](super::new_guid)). Writes notify [`Area::Bookmarks`].
 //! Each reply runs on the UI thread with `Result<T, ProfileDataError>`.
 
 #![cfg_attr(
     not(test),
-    allow(dead_code, reason = "called by the bookmarks and import work")
+    expect(dead_code, reason = "called by the bookmarks and import work")
 )]
 
 use mercury_store::{BookmarkId, BookmarkNode, BookmarkRoot};
 
-use super::{ProfileData, ProfileDataError};
-
-/// A new globally unique identifier for a bookmark or download: 12 URL-safe Base64 characters
-/// from 9 random bytes, the form Firefox uses. `None` if the system's random source failed.
-pub(crate) fn new_guid() -> Option<String> {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut bytes = [0_u8; 9];
-    getrandom::fill(&mut bytes).ok()?;
-    let mut guid = String::with_capacity(12);
-    for chunk in bytes.chunks(3) {
-        let bits = u32::from(chunk[0]) << 16 | u32::from(chunk[1]) << 8 | u32::from(chunk[2]);
-        for shift in [18, 12, 6, 0] {
-            guid.push(char::from(ALPHABET[(bits >> shift & 63) as usize]));
-        }
-    }
-    Some(guid)
-}
-
-/// `new_guid`, or the store's "invalid argument" error that a reply can carry.
-pub(super) fn guid_or_error() -> mercury_store::Result<String> {
-    new_guid().ok_or(mercury_store::StoreError::InvalidArgument(
-        "the system's random source is unavailable",
-    ))
-}
+use super::{Area, ProfileData, ProfileDataError, guid_or_error};
 
 impl ProfileData {
     /// The id of a root folder.
@@ -40,7 +18,7 @@ impl ProfileData {
         root: BookmarkRoot,
         reply: impl FnOnce(Result<BookmarkId, ProfileDataError>) + 'static,
     ) {
-        self.request(move |db, _| db.store().bookmark_root(root), reply);
+        self.request(None, move |db, _| db.store().bookmark_root(root), reply);
     }
 
     /// The children of a folder, by position.
@@ -49,7 +27,11 @@ impl ProfileData {
         folder: BookmarkId,
         reply: impl FnOnce(Result<Vec<BookmarkNode>, ProfileDataError>) + 'static,
     ) {
-        self.request(move |db, _| db.store().bookmark_children(folder), reply);
+        self.request(
+            None,
+            move |db, _| db.store().bookmark_children(folder),
+            reply,
+        );
     }
 
     /// One node.
@@ -58,7 +40,7 @@ impl ProfileData {
         id: BookmarkId,
         reply: impl FnOnce(Result<BookmarkNode, ProfileDataError>) + 'static,
     ) {
-        self.request(move |db, _| db.store().bookmark(id), reply);
+        self.request(None, move |db, _| db.store().bookmark(id), reply);
     }
 
     /// The first bookmark of exactly this URL, if any (the star button).
@@ -67,7 +49,7 @@ impl ProfileData {
         url: String,
         reply: impl FnOnce(Result<Option<BookmarkId>, ProfileDataError>) + 'static,
     ) {
-        self.request(move |db, _| db.store().bookmark_for_url(&url), reply);
+        self.request(None, move |db, _| db.store().bookmark_for_url(&url), reply);
     }
 
     /// Adds a bookmark in `parent` at `position` (`None` appends).
@@ -80,6 +62,7 @@ impl ProfileData {
         reply: impl FnOnce(Result<BookmarkId, ProfileDataError>) + 'static,
     ) {
         self.request(
+            Some(Area::Bookmarks),
             move |db, now| {
                 let guid = guid_or_error()?;
                 db.store()
@@ -98,6 +81,7 @@ impl ProfileData {
         reply: impl FnOnce(Result<BookmarkId, ProfileDataError>) + 'static,
     ) {
         self.request(
+            Some(Area::Bookmarks),
             move |db, now| {
                 let guid = guid_or_error()?;
                 db.store()
@@ -115,6 +99,7 @@ impl ProfileData {
         reply: impl FnOnce(Result<BookmarkId, ProfileDataError>) + 'static,
     ) {
         self.request(
+            Some(Area::Bookmarks),
             move |db, now| {
                 let guid = guid_or_error()?;
                 db.store()
@@ -132,6 +117,7 @@ impl ProfileData {
         reply: impl FnOnce(Result<(), ProfileDataError>) + 'static,
     ) {
         self.request(
+            Some(Area::Bookmarks),
             move |db, now| db.store().rename_bookmark(id, &title, now),
             reply,
         );
@@ -145,6 +131,7 @@ impl ProfileData {
         reply: impl FnOnce(Result<(), ProfileDataError>) + 'static,
     ) {
         self.request(
+            Some(Area::Bookmarks),
             move |db, now| db.store().set_bookmark_url(id, &url, now),
             reply,
         );
@@ -159,6 +146,7 @@ impl ProfileData {
         reply: impl FnOnce(Result<(), ProfileDataError>) + 'static,
     ) {
         self.request(
+            Some(Area::Bookmarks),
             move |db, now| db.store().move_bookmark(id, parent, position, now),
             reply,
         );
@@ -170,6 +158,10 @@ impl ProfileData {
         id: BookmarkId,
         reply: impl FnOnce(Result<(), ProfileDataError>) + 'static,
     ) {
-        self.request(move |db, now| db.store().remove_bookmark(id, now), reply);
+        self.request(
+            Some(Area::Bookmarks),
+            move |db, now| db.store().remove_bookmark(id, now),
+            reply,
+        );
     }
 }

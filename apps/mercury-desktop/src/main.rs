@@ -151,7 +151,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     // Nothing may capture, pump or render while the engine shuts down, and the engine must be
     // gone before the window (and the renderer whose device Servo uses) is destroyed.
     drop(screenshot_timer);
-    profile_data::shut_down(); // history lane
+    profile_data::shut_down(std::time::Instant::now() + profile_data::SHUTDOWN_TIMEOUT); // history lane
     shut_down_engine(exit_code);
     drop(window);
 

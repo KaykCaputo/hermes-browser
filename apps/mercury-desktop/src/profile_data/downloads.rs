@@ -1,17 +1,22 @@
 //! Download record requests. The transfer itself is `mercury-downloads`' work; these only keep
 //! its state. See `mercury_store::DownloadState` for the transitions the store allows.
+//!
+//! Records are addressed by their GUID, which the caller makes with
+//! [`new_guid`](super::new_guid) before `insert_download`: every later request can be sent at
+//! once, without waiting for the insert's reply (requests run in order). Records of earlier
+//! runs are addressed by the `guid` of their `DownloadRecord`. Writes notify
+//! [`Area::Downloads`].
 
-#![cfg_attr(not(test), allow(dead_code, reason = "called by the downloads work"))]
+#![cfg_attr(not(test), expect(dead_code, reason = "called by the downloads work"))]
 
-use mercury_store::{DownloadRecord, DownloadRecordId, DownloadState, NewDownload};
+use mercury_store::{DownloadRecord, DownloadRecordId, DownloadState, NewDownload, StoreError};
 
-use super::bookmarks::guid_or_error;
-use super::{ProfileData, ProfileDataError};
+use super::{Area, Database, ProfileData, ProfileDataError};
 
-/// The fields known when a download starts (an owned `mercury_store::NewDownload`; the GUID is
-/// made by the service).
+/// The fields known when a download starts (an owned `mercury_store::NewDownload`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DownloadStart {
+    pub(crate) guid: String,
     pub(crate) url: String,
     pub(crate) referrer: Option<String>,
     pub(crate) target_path: String,
@@ -21,18 +26,34 @@ pub(crate) struct DownloadStart {
     pub(crate) started_at_ms: i64,
 }
 
+impl Database {
+    /// The record with this GUID: one inserted or listed in this run, or found by listing.
+    fn download_id(&mut self, guid: &str) -> mercury_store::Result<DownloadRecordId> {
+        if let Some(id) = self.download_ids.get(guid) {
+            return Ok(*id);
+        }
+        for record in self.store.downloads(u32::MAX)? {
+            self.download_ids.insert(record.guid, record.id);
+        }
+        self.download_ids
+            .get(guid)
+            .copied()
+            .ok_or(StoreError::NotFound)
+    }
+}
+
 impl ProfileData {
-    /// Records a new download in progress.
+    /// Records a new download in progress under `start.guid`.
     pub(crate) fn insert_download(
         &self,
         start: DownloadStart,
-        reply: impl FnOnce(Result<DownloadRecordId, ProfileDataError>) + 'static,
+        reply: impl FnOnce(Result<(), ProfileDataError>) + 'static,
     ) {
         self.request(
+            Some(Area::Downloads),
             move |db, _| {
-                let guid = guid_or_error()?;
-                db.store().insert_download(&NewDownload {
-                    guid: &guid,
+                let id = db.store().insert_download(&NewDownload {
+                    guid: &start.guid,
                     url: &start.url,
                     referrer: start.referrer.as_deref(),
                     target_path: &start.target_path,
@@ -40,7 +61,9 @@ impl ProfileData {
                     mime_type: start.mime_type.as_deref(),
                     total_bytes: start.total_bytes,
                     started_at_ms: start.started_at_ms,
-                })
+                })?;
+                db.download_ids.insert(start.guid, id);
+                Ok(())
             },
             reply,
         );
@@ -50,27 +73,34 @@ impl ProfileData {
     /// progress is frequent, and a late report for a finished download is refused and logged.
     pub(crate) fn update_download_progress(
         &self,
-        id: DownloadRecordId,
+        guid: String,
         received_bytes: i64,
         total_bytes: Option<i64>,
     ) {
-        self.submit("recording download progress", move |db, _| {
-            db.store()
-                .update_download_progress(id, received_bytes, total_bytes)
-        });
+        self.submit(
+            Area::Downloads,
+            "recording download progress",
+            move |db, _| {
+                let id = db.download_id(&guid)?;
+                db.store()
+                    .update_download_progress(id, received_bytes, total_bytes)
+            },
+        );
     }
 
     /// Stores the final URL and the validators needed to resume.
     pub(crate) fn set_download_validators(
         &self,
-        id: DownloadRecordId,
+        guid: String,
         final_url: Option<String>,
         etag: Option<String>,
         last_modified: Option<String>,
         reply: impl FnOnce(Result<(), ProfileDataError>) + 'static,
     ) {
         self.request(
+            Some(Area::Downloads),
             move |db, _| {
+                let id = db.download_id(&guid)?;
                 db.store().set_download_validators(
                     id,
                     final_url.as_deref(),
@@ -85,13 +115,17 @@ impl ProfileData {
     /// Marks a download complete, cancelled or interrupted, at the service's current time.
     pub(crate) fn finish_download(
         &self,
-        id: DownloadRecordId,
+        guid: String,
         state: DownloadState,
         error: Option<String>,
         reply: impl FnOnce(Result<(), ProfileDataError>) + 'static,
     ) {
         self.request(
-            move |db, now| db.store().finish_download(id, state, error.as_deref(), now),
+            Some(Area::Downloads),
+            move |db, now| {
+                let id = db.download_id(&guid)?;
+                db.store().finish_download(id, state, error.as_deref(), now)
+            },
             reply,
         );
     }
@@ -99,10 +133,17 @@ impl ProfileData {
     /// Puts an interrupted download back in progress.
     pub(crate) fn resume_download(
         &self,
-        id: DownloadRecordId,
+        guid: String,
         reply: impl FnOnce(Result<(), ProfileDataError>) + 'static,
     ) {
-        self.request(move |db, _| db.store().resume_download(id), reply);
+        self.request(
+            Some(Area::Downloads),
+            move |db, _| {
+                let id = db.download_id(&guid)?;
+                db.store().resume_download(id)
+            },
+            reply,
+        );
     }
 
     /// Download records, newest first.
@@ -111,16 +152,38 @@ impl ProfileData {
         limit: u32,
         reply: impl FnOnce(Result<Vec<DownloadRecord>, ProfileDataError>) + 'static,
     ) {
-        self.request(move |db, _| db.store().downloads(limit), reply);
+        self.request(
+            None,
+            move |db, _| {
+                let records = db.store().downloads(limit)?;
+                for record in &records {
+                    db.download_ids.insert(record.guid.clone(), record.id);
+                }
+                Ok(records)
+            },
+            reply,
+        );
     }
 
     /// Removes one record; `false` if it did not exist.
     pub(crate) fn remove_download(
         &self,
-        id: DownloadRecordId,
+        guid: String,
         reply: impl FnOnce(Result<bool, ProfileDataError>) + 'static,
     ) {
-        self.request(move |db, _| db.store().remove_download(id), reply);
+        self.request(
+            Some(Area::Downloads),
+            move |db, _| {
+                let id = match db.download_id(&guid) {
+                    Ok(id) => id,
+                    Err(StoreError::NotFound) => return Ok(false),
+                    Err(error) => return Err(error),
+                };
+                db.download_ids.remove(&guid);
+                db.store().remove_download(id)
+            },
+            reply,
+        );
     }
 
     /// Removes every record that is not in progress; replies with how many.
@@ -128,6 +191,14 @@ impl ProfileData {
         &self,
         reply: impl FnOnce(Result<u64, ProfileDataError>) + 'static,
     ) {
-        self.request(move |db, _| db.store().clear_finished_downloads(), reply);
+        self.request(
+            Some(Area::Downloads),
+            move |db, _| {
+                let removed = db.store().clear_finished_downloads()?;
+                db.download_ids.clear();
+                Ok(removed)
+            },
+            reply,
+        );
     }
 }

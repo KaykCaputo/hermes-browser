@@ -22,6 +22,7 @@ libc.workspace = true
 log.workspace = true
 mercury-store = { path = "../../crates/mercury-store" }
 mercury-ui = { path = "../../crates/mercury-ui" }
+rusqlite.workspace = true
 servo.workspace = true
 slint.workspace = true
 surfman.workspace = true
@@ -30,7 +31,6 @@ talaria-servo = { path = "../../crates/talaria-servo" }
 thiserror.workspace = true
 
 [dev-dependencies]
-rusqlite.workspace = true
 tempfile.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
