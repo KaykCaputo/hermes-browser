@@ -1,14 +1,15 @@
 //! The list shown for a `<select>` element and its keyboard and pointer behaviour.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use talaria_core::{ControlAnswer, SelectEntry, SelectOption};
 
 use super::Outcome;
 
-/// Row heights in logical pixels; `ui/controls/select-popup.slint` uses the same values.
-pub(crate) const HEADING_HEIGHT: f32 = 22.0;
-pub(crate) const OPTION_HEIGHT: f32 = 24.0;
+/// Every row, heading or option, is this tall (logical pixels), so a row's position is a
+/// multiplication; `ui/controls/select-popup.slint` uses the same value.
+pub(crate) const ROW_HEIGHT: f32 = 24.0;
 
 /// Typed characters within this time of each other form one search string.
 const TYPEAHEAD_TIMEOUT: Duration = Duration::from_millis(1000);
@@ -41,7 +42,7 @@ pub(crate) enum SelectKey {
 pub(crate) struct SelectModel {
     rows: Vec<SelectRow>,
     /// Ids of the selected options.
-    selected: Vec<usize>,
+    selected: BTreeSet<usize>,
     multiple: bool,
     highlighted: Option<usize>,
     typed: String,
@@ -62,17 +63,21 @@ impl SelectModel {
         }
         let mut model = Self {
             rows,
-            selected: selected.to_vec(),
+            selected: selected.iter().copied().collect(),
             multiple,
             highlighted: None,
             typed: String::new(),
             typed_at: None,
         };
-        model.highlighted = model
+        let model_selected = &model.selected;
+        let highlighted = model
             .rows
             .iter()
-            .position(|row| matches!(row, SelectRow::Option { id, .. } if selected.contains(id)))
+            .position(
+                |row| matches!(row, SelectRow::Option { id, .. } if model_selected.contains(id)),
+            )
             .or_else(|| model.first_enabled());
+        model.highlighted = highlighted;
         model
     }
 
@@ -136,22 +141,22 @@ impl SelectModel {
 
     /// Closes a multi-select with the options toggled so far.
     pub(crate) fn done(&self) -> Outcome {
-        let mut selected = self.selected.clone();
-        selected.sort_unstable();
-        Outcome::Close(ControlAnswer::Select(selected))
+        Outcome::Close(ControlAnswer::Select(
+            self.selected.iter().copied().collect(),
+        ))
     }
 
     /// The row's distance from the top of the list.
     pub(crate) fn row_top(&self, row: usize) -> f32 {
-        self.rows.iter().take(row).map(row_height).sum()
+        row as f32 * ROW_HEIGHT
     }
 
-    pub(crate) fn row_height(&self, row: usize) -> f32 {
-        self.rows.get(row).map_or(0.0, row_height)
+    pub(crate) fn row_height(&self, _row: usize) -> f32 {
+        ROW_HEIGHT
     }
 
     pub(crate) fn content_height(&self) -> f32 {
-        self.rows.iter().map(row_height).sum()
+        self.rows.len() as f32 * ROW_HEIGHT
     }
 
     fn choose(&mut self, row: usize) -> Outcome {
@@ -168,11 +173,8 @@ impl SelectModel {
         if !self.multiple {
             return Outcome::Close(ControlAnswer::Select(vec![id]));
         }
-        match self.selected.iter().position(|selected| *selected == id) {
-            Some(index) => {
-                self.selected.remove(index);
-            }
-            None => self.selected.push(id),
+        if !self.selected.remove(&id) {
+            self.selected.insert(id);
         }
         Outcome::Stay
     }
@@ -248,13 +250,6 @@ fn option_row(option: &SelectOption, in_group: bool) -> SelectRow {
         label: option.label.clone(),
         disabled: option.disabled,
         in_group,
-    }
-}
-
-fn row_height(row: &SelectRow) -> f32 {
-    match row {
-        SelectRow::Heading(_) => HEADING_HEIGHT,
-        SelectRow::Option { .. } => OPTION_HEIGHT,
     }
 }
 
@@ -501,15 +496,52 @@ mod tests {
     }
 
     #[test]
-    fn row_positions_add_up_heading_and_option_heights() {
+    fn rows_have_one_height() {
         let model = single(&[]);
 
         assert_eq!(model.row_top(0), 0.0);
-        assert_eq!(model.row_top(2), OPTION_HEIGHT + HEADING_HEIGHT);
-        assert_eq!(
-            model.content_height(),
-            7.0 * OPTION_HEIGHT + 2.0 * HEADING_HEIGHT
-        );
+        assert_eq!(model.row_top(2), 2.0 * ROW_HEIGHT);
+        assert_eq!(model.row_height(1), ROW_HEIGHT);
+        assert_eq!(model.content_height(), 9.0 * ROW_HEIGHT);
+    }
+
+    /// A scripted list of 100,000 options with the selection near the end. Prints the time per
+    /// key; the bound only catches a return to work proportional to the list per row.
+    #[test]
+    fn a_list_of_100000_options_stays_fast() {
+        let entries = (0..100_000)
+            .map(|id| SelectEntry::Option(option(id, &format!("Option {id}"), id % 7 == 3)))
+            .collect::<Vec<_>>();
+        let built_at = Instant::now();
+        let mut model = SelectModel::new(&entries, &[99_990], true);
+        let build_time = built_at.elapsed();
+        let keys = [
+            SelectKey::Down,
+            SelectKey::Up,
+            SelectKey::Space,
+            SelectKey::Home,
+            SelectKey::End,
+            SelectKey::Down,
+        ];
+
+        let started_at = Instant::now();
+        let mut now = started_at;
+        for round in 0..100 {
+            for key in keys {
+                model.key(key, now);
+                let row = model.highlighted().expect("an option is highlighted");
+                let _ = (model.row_top(row), model.is_selected(row));
+            }
+            now += Duration::from_secs(2);
+            model.key(
+                SelectKey::Character(if round % 2 == 0 { 'o' } else { 'x' }),
+                now,
+            );
+        }
+        let per_key = started_at.elapsed() / 700;
+
+        println!("100,000 options: built in {build_time:?}, {per_key:?} per key");
+        assert!(per_key < Duration::from_millis(20), "{per_key:?} per key");
     }
 
     #[test]

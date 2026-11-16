@@ -47,11 +47,15 @@ pub(crate) enum MenuOutcome {
     Close(Option<MenuCommand>),
 }
 
+/// `page_url` is the address of the page the menu belongs to.
 pub(crate) fn build_menu(
     entries: &[ContextMenuEntry],
     link_url: Option<&str>,
     image_url: Option<&str>,
+    page_url: &str,
 ) -> Vec<MenuRow> {
+    let link_url = link_url.map(|url| (url, url_use(url, page_url)));
+    let image_url = image_url.map(|url| (url, url_use(url, page_url)));
     let mut rows = Vec::new();
     for entry in entries {
         let row = match entry {
@@ -77,21 +81,60 @@ pub(crate) fn build_menu(
     rows
 }
 
+/// What the browser may do with a link or image address from a page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UrlUse {
+    open: bool,
+    copy: bool,
+}
+
+/// `javascript:` runs in whatever page it is used in and `blob:` means nothing outside its page,
+/// so neither is opened or copied; `data:` may be copied but not opened. Other addresses open in
+/// a new tab if they are `http(s)` or have the page's own scheme (a web page cannot open `file:`).
+fn url_use(url: &str, page_url: &str) -> UrlUse {
+    let scheme = |url: &str| {
+        url.split_once(':')
+            .map(|(scheme, _)| scheme.to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    let link_scheme = scheme(url.trim_start());
+    match link_scheme.as_str() {
+        "javascript" | "blob" => UrlUse {
+            open: false,
+            copy: false,
+        },
+        "data" => UrlUse {
+            open: false,
+            copy: true,
+        },
+        "http" | "https" => UrlUse {
+            open: true,
+            copy: true,
+        },
+        other => UrlUse {
+            open: !other.is_empty() && other == scheme(page_url),
+            copy: true,
+        },
+    }
+}
+
 /// The browser's wording (sentence case) and handling for one of Servo's items; Servo's own
 /// labels are in title case.
 fn browser_item(
     action: ContextMenuAction,
     enabled: bool,
-    link_url: Option<&str>,
-    image_url: Option<&str>,
+    link_url: Option<(&str, UrlUse)>,
+    image_url: Option<(&str, UrlUse)>,
 ) -> Option<MenuRow> {
-    let open_in_new_tab = |label: &str, url: Option<&str>| {
-        url.map(|url| MenuRow::Item {
-            label: label.to_owned(),
-            enabled,
-            command: MenuCommand::OpenInNewTab(url.to_owned()),
-        })
+    let open_in_new_tab = |label: &str, url: Option<(&str, UrlUse)>| {
+        url.filter(|(_, url_use)| url_use.open)
+            .map(|(url, _)| MenuRow::Item {
+                label: label.to_owned(),
+                enabled,
+                command: MenuCommand::OpenInNewTab(url.to_owned()),
+            })
     };
+    let can_copy = |url: Option<(&str, UrlUse)>| url.is_none_or(|(_, url_use)| url_use.copy);
     let label = match action {
         ContextMenuAction::OpenLinkInNewView => {
             return open_in_new_tab("Open link in new tab", link_url);
@@ -99,6 +142,8 @@ fn browser_item(
         ContextMenuAction::OpenImageInNewView => {
             return open_in_new_tab("Open image in new tab", image_url);
         }
+        ContextMenuAction::CopyLink if !can_copy(link_url) => return None,
+        ContextMenuAction::CopyImageLink if !can_copy(image_url) => return None,
         ContextMenuAction::CopyLink => "Copy link address",
         ContextMenuAction::CopyImageLink => "Copy image address",
         ContextMenuAction::Cut => "Cut",
@@ -215,6 +260,8 @@ impl MenuModel {
 mod tests {
     use super::*;
 
+    const PAGE: &str = "https://a.test/here";
+
     fn item(label: &str, action: ContextMenuAction, enabled: bool) -> ContextMenuEntry {
         ContextMenuEntry::Item {
             label: label.to_owned(),
@@ -281,7 +328,7 @@ mod tests {
             item("Reload", ContextMenuAction::Reload, true),
         ];
 
-        let rows = build_menu(&entries, Some("https://a.test/next"), None);
+        let rows = build_menu(&entries, Some("https://a.test/next"), None, PAGE);
 
         assert_eq!(
             rows,
@@ -304,6 +351,7 @@ mod tests {
             &servo_items_for_linked_image(),
             Some("https://a.test/page"),
             Some("https://a.test/i.png"),
+            PAGE,
         );
 
         assert_eq!(
@@ -358,7 +406,7 @@ mod tests {
         ];
 
         assert_eq!(
-            labels(&build_menu(&entries, None, None)),
+            labels(&build_menu(&entries, None, None, PAGE)),
             vec!["Copy link address", "—", "Reload"]
         );
     }
@@ -378,7 +426,83 @@ mod tests {
             ContextMenuEntry::Separator,
         ];
 
-        assert_eq!(labels(&build_menu(&entries, None, None)), vec!["Reload"]);
+        assert_eq!(
+            labels(&build_menu(&entries, None, None, PAGE)),
+            vec!["Reload"]
+        );
+    }
+
+    fn link_and_image_items() -> Vec<ContextMenuEntry> {
+        servo_items_for_linked_image()[..6].to_vec()
+    }
+
+    #[test]
+    fn script_links_get_no_open_or_copy_items() {
+        let rows = build_menu(
+            &link_and_image_items(),
+            Some("javascript:alert(1)"),
+            Some("https://a.test/i.png"),
+            PAGE,
+        );
+
+        assert_eq!(
+            labels(&rows),
+            vec!["Open image in new tab", "Copy image address"]
+        );
+    }
+
+    #[test]
+    fn data_images_can_be_copied_but_not_opened_and_blob_images_neither() {
+        let data = build_menu(
+            &link_and_image_items(),
+            None,
+            Some("data:image/png;base64,AAAA"),
+            PAGE,
+        );
+        let blob = build_menu(
+            &link_and_image_items(),
+            None,
+            Some("blob:https://a.test/0b1c"),
+            PAGE,
+        );
+
+        assert_eq!(
+            labels(&data),
+            vec!["Copy link address", "—", "Copy image address"]
+        );
+        assert_eq!(labels(&blob), vec!["Copy link address"]);
+    }
+
+    #[test]
+    fn file_links_open_only_from_file_pages() {
+        let from_web = build_menu(
+            &link_and_image_items()[..2],
+            Some("file:///etc/hosts"),
+            None,
+            PAGE,
+        );
+        let from_file = build_menu(
+            &link_and_image_items()[..2],
+            Some("file:///etc/hosts"),
+            None,
+            "file:///Users/me/index.html",
+        );
+        let web_from_file = build_menu(
+            &link_and_image_items()[..2],
+            Some("http://a.test/"),
+            None,
+            "file:///Users/me/index.html",
+        );
+
+        assert_eq!(labels(&from_web), vec!["Copy link address"]);
+        assert_eq!(
+            labels(&from_file),
+            vec!["Open link in new tab", "Copy link address"]
+        );
+        assert_eq!(
+            labels(&web_from_file),
+            vec!["Open link in new tab", "Copy link address"]
+        );
     }
 
     fn menu() -> MenuModel {
@@ -386,6 +510,7 @@ mod tests {
             &servo_items_for_linked_image(),
             Some("https://a.test/page"),
             Some("https://a.test/i.png"),
+            PAGE,
         ))
     }
 

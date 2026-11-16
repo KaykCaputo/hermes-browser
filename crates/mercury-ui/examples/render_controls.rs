@@ -23,6 +23,8 @@ slint::slint! {
         background: root.dark ? #202124 : #f1f3f4;
         in property <[SelectPopupRow]> rows;
         in property <bool> multiple;
+        in property <int> highlighted: 5;
+        in-out property <length> scroll-y;
         width: 300px;
         height: 340px;
 
@@ -49,10 +51,10 @@ slint::slint! {
             width: 220px;
             height: root.multiple ? 290px : 250px;
             rows: root.rows;
-            highlighted: 5;
+            highlighted: root.highlighted;
+            scroll-y <=> root.scroll-y;
             multiple: root.multiple;
-            origin: "https://shop.example";
-            content-height: 9 * 24px + 2 * 22px;
+            origin: "A page on https://shop.example";
             dark: root.dark;
         }
     }
@@ -66,7 +68,9 @@ slint::slint! {
         ColorPicker {
             x: 20px;
             y: 24px;
-            origin: "https://paint.example";
+            width: 232px;
+            height: 282px;
+            origin: "A page on https://paint.example";
             swatches: [
                 #000000, #555555, #aaaaaa, #ffffff, #e53935, #fb8c00, #fdd835, #43a047,
                 #00897b, #00acc1, #1e88e5, #3949ab, #8e24aa, #d81b60, #6d4c41, #546e7a,
@@ -149,6 +153,33 @@ fn main() -> Result<(), Box<dyn Error>> {
             &output.join(format!("select-multiple-{theme}.png")),
         )?;
         drop(select);
+
+        // 100,000 options, scrolled to the highlighted one near the middle.
+        let long = SelectPreview::new()?;
+        long.set_dark(dark);
+        long.set_rows(ModelRc::new(VecModel::from(
+            (0..100_000)
+                .map(|index| SelectPopupRow {
+                    label: format!("Option {index}").into(),
+                    heading: false,
+                    disabled: index % 7 == 3,
+                    selected: index == 50_000,
+                    in_group: false,
+                })
+                .collect::<Vec<_>>(),
+        )));
+        long.set_highlighted(50_002);
+        long.set_scroll_y(-(50_000.0 * 24.0));
+        let started_at = std::time::Instant::now();
+        render(
+            &window,
+            &long,
+            300,
+            340,
+            &output.join(format!("select-long-{theme}.png")),
+        )?;
+        println!("rendered 100,000 options in {:?}", started_at.elapsed());
+        drop(long);
 
         let colour = ColorPreview::new()?;
         colour.set_dark(dark);

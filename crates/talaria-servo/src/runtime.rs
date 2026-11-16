@@ -271,6 +271,10 @@ fn mercury_preferences(runtime_options: &RuntimeOptions) -> Preferences {
     // the embedder for permission (`mediadevices.rs`), so WebRTC must stay disabled until
     // Mercury can gate device access itself.
     preferences.dom_webrtc_enabled = false;
+    // controls: always off. With it on, a page can call `selectFiles()` on a file input and have
+    // Servo accept the paths it names without any file panel (`htmlinputelement.rs`); it exists
+    // for Servo's own tests.
+    preferences.dom_testing_html_input_element_select_files_enabled = false;
     preferences.user_agent = firefox_compatible_user_agent(&preferences.user_agent);
     preferences
 }
@@ -752,6 +756,16 @@ mod tests {
                 preferences.get_value(name),
                 defaults.get_value(name),
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn pages_cannot_choose_their_own_upload_files() {
+        for enabled in [true, false] {
+            assert!(
+                !preferences_with_experimental_web_features(enabled)
+                    .dom_testing_html_input_element_select_files_enabled
             );
         }
     }

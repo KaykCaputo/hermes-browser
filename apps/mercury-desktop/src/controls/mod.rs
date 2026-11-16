@@ -26,7 +26,7 @@ use mercury_ui::{ContextMenuRow, MainWindow, SelectPopupRow};
 use slint::winit_030::WinitWindowAccessor;
 use slint::winit_030::winit::dpi::{LogicalPosition, LogicalSize};
 use slint::winit_030::winit::event::{ElementState, KeyEvent};
-use slint::winit_030::winit::keyboard::{Key, ModifiersState, NamedKey};
+use slint::winit_030::winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use talaria_core::{
     BrowserController, ControlAnswer, ControlId, ControlRect, ControlRequest, PointerButton,
@@ -37,6 +37,7 @@ use self::color::{ColorKey, ColorModel, SWATCHES, from_hue_lightness, hue_lightn
 use self::context_menu::{MenuCommand, MenuKey, MenuModel, MenuOutcome, MenuRow, build_menu};
 use self::geometry::{Rect, element_in_window, place_at_point, place_beside};
 use self::select::{SelectKey, SelectModel, SelectRow};
+use crate::activation::consume_user_activation;
 use crate::ui_sync::sync_ui;
 
 /// What a key or click in a popup did.
@@ -108,6 +109,11 @@ pub(crate) fn connect_controls(window: &MainWindow, controller: Rc<RefCell<Brows
         with_controls(|controls| controls.colour_picked(from_hue_lightness(hue, 1.0 - lightness)));
     });
     window.on_controls_color_done(|| with_controls(Controls::colour_done));
+    // The page area moved or changed size: popups and the input-method area follow. Deferred,
+    // because Slint reports the change while it lays out, possibly inside a state update.
+    window.on_controls_page_changed(|| {
+        slint::Timer::single_shot(Duration::ZERO, || with_controls(Controls::relayout));
+    });
 }
 
 /// Shows what the active tab is waiting for and places the input-method window. Called from
@@ -116,14 +122,24 @@ pub(crate) fn sync(window: &MainWindow, controller: &BrowserController) {
     with_controls(|controls| controls.sync(window, controller));
 }
 
-/// Takes the key while a popup is open; returns true if it was taken.
+/// Takes a key press while a popup is open, and the release of every press it took; returns
+/// true if the event was taken. Releases of keys pressed before the popup opened go on to
+/// whoever had the press.
 pub(crate) fn handle_key(window: &MainWindow, event: &KeyEvent, modifiers: ModifiersState) -> bool {
+    let Some(controls) = CONTROLS.with(|current| current.borrow().clone()) else {
+        return false;
+    };
+    if event.state == ElementState::Released {
+        return controls
+            .state
+            .borrow_mut()
+            .taken_keys
+            .release(event.physical_key);
+    }
     if window.get_text_input_focused() || modifiers.super_key() || modifiers.control_key() {
         return false;
     }
-    CONTROLS
-        .with(|current| current.borrow().clone())
-        .is_some_and(|controls| controls.key(event))
+    controls.key(event)
 }
 
 /// The physical Control key went up or down (`ModifiersChanged`).
@@ -166,6 +182,7 @@ struct State {
     popup: Popup,
     /// The input-method area last given to the window.
     input_method_area: Option<Option<Rect>>,
+    taken_keys: TakenKeys,
 }
 
 #[derive(Default)]
@@ -185,8 +202,22 @@ enum Popup {
         model: MenuModel,
         anchor: ControlRect,
     },
-    /// The native file panel is open.
-    File,
+    /// The native file panel is open, or about to be; the sheet is filled in once it is.
+    File {
+        sheet: Rc<RefCell<Option<file_panel::FileSheet>>>,
+    },
+}
+
+impl Popup {
+    /// Takes the popup down when its request goes away (answered elsewhere, hidden by the
+    /// engine, navigation, tab switch or close, crash): only the file sheet needs closing.
+    fn close_native(&self) {
+        if let Popup::File { sheet } = self
+            && let Some(sheet) = sheet.borrow_mut().take()
+        {
+            sheet.end();
+        }
+    }
 }
 
 impl Controls {
@@ -208,11 +239,32 @@ impl Controls {
                     id.value()
                 );
             }
+            current.popup.close_native();
             current.popup = match pending {
                 None => Popup::None,
+                Some((id, request))
+                    if !admit(
+                        request,
+                        tab_id,
+                        Instant::now(),
+                        file_panel::sheet_attached(),
+                    ) =>
+                {
+                    log::debug!(
+                        "tab {}: dropping control {}: no recent user gesture, or a file sheet is up",
+                        tab_id.value(),
+                        id.value()
+                    );
+                    // Answered outside this state update.
+                    slint::Timer::single_shot(Duration::ZERO, move || {
+                        with_controls(|controls| controls.reject(tab_id, id));
+                    });
+                    Popup::None
+                }
                 Some((id, request)) => {
-                    window.set_controls_origin(page_origin(state.url()).into());
-                    open_popup(window, request, tab_id, id, &page_origin(state.url()))
+                    let origin = page_origin(state.url());
+                    window.set_controls_origin(caption(&origin).into());
+                    open_popup(window, request, tab_id, id, state.url(), &origin)
                 }
             };
             show_popup(window, &current.popup, page, zoom, true);
@@ -225,9 +277,10 @@ impl Controls {
         if window.get_text_input_focused() {
             current.input_method_area = None;
         } else {
-            let area = state
-                .input_method()
-                .map(|rect| element_in_window(rect, page, zoom));
+            let area = state.input_method().map(|rect| {
+                log::debug!("input-method element (from Servo): {rect:?}");
+                element_in_window(rect, page, zoom)
+            });
             if current.input_method_area != Some(area) {
                 current.input_method_area = Some(area);
                 log::debug!("input-method area: {area:?}");
@@ -241,20 +294,19 @@ impl Controls {
             return false;
         };
         let mut state = self.state.borrow_mut();
-        if matches!(state.popup, Popup::None | Popup::File) {
+        if matches!(state.popup, Popup::None | Popup::File { .. }) {
             return false;
         }
-        if event.state == ElementState::Released {
-            return true;
-        }
+        state.taken_keys.take(event.physical_key);
         let mut closing = None;
         match &mut state.popup {
             Popup::Select { model, rows, .. } => {
                 if let Some(key) = select_key(&event.logical_key) {
+                    let toggled = model.highlighted().filter(|_| key == SelectKey::Space);
                     match model.key(key, Instant::now()) {
                         Outcome::Close(answer) => closing = Some((answer, None)),
                         Outcome::Stay => {
-                            refresh_select(&window, model, rows);
+                            refresh_select(&window, model, rows, toggled);
                             reveal_highlighted(&window, model);
                         }
                     }
@@ -262,7 +314,7 @@ impl Controls {
             }
             Popup::Color { model, .. } => {
                 if let Some(key) = color_key(&event.logical_key) {
-                    match model.key(key) {
+                    match model.key(key, Instant::now()) {
                         Outcome::Close(answer) => closing = Some((answer, None)),
                         Outcome::Stay => refresh_color(&window, model),
                     }
@@ -278,7 +330,7 @@ impl Controls {
                     }
                 }
             }
-            Popup::None | Popup::File => {}
+            Popup::None | Popup::File { .. } => {}
         }
         drop(state);
         if let Some((answer, new_tab)) = closing {
@@ -296,7 +348,7 @@ impl Controls {
             Popup::Select { model, rows, .. } => match model.click(row) {
                 Outcome::Close(answer) => Some((answer, None)),
                 Outcome::Stay => {
-                    refresh_select(&window, model, rows);
+                    refresh_select(&window, model, rows, Some(row));
                     None
                 }
             },
@@ -349,15 +401,16 @@ impl Controls {
         let Some(window) = self.window.upgrade() else {
             return;
         };
-        if let Popup::Color { model, .. } = &mut self.state.borrow_mut().popup {
-            model.pick(colour);
+        if let Popup::Color { model, .. } = &mut self.state.borrow_mut().popup
+            && model.pick(colour, Instant::now())
+        {
             refresh_color(&window, model);
         }
     }
 
     fn colour_done(&self) {
         let answer = match &self.state.borrow().popup {
-            Popup::Color { model, .. } => match model.done() {
+            Popup::Color { model, .. } => match model.done(Instant::now()) {
                 Outcome::Close(answer) => answer,
                 Outcome::Stay => return,
             },
@@ -369,10 +422,70 @@ impl Controls {
     fn files_chosen(&self, tab_id: TabId, id: ControlId, paths: Vec<PathBuf>) {
         let still_shown = {
             let state = self.state.borrow();
-            state.shown == Some((tab_id, id)) && matches!(state.popup, Popup::File)
+            state.shown == Some((tab_id, id)) && matches!(state.popup, Popup::File { .. })
         };
         if still_shown {
             self.finish(ControlAnswer::Files(paths), None);
+        }
+    }
+
+    /// Opens the file sheet for a request that is still the one shown.
+    fn start_file_panel(
+        &self,
+        tab_id: TabId,
+        id: ControlId,
+        multiple: bool,
+        extensions: &[String],
+    ) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let sheet_slot = match &self.state.borrow().popup {
+            Popup::File { sheet } if self.state.borrow().shown == Some((tab_id, id)) => {
+                Rc::clone(sheet)
+            }
+            _ => return,
+        };
+        if file_panel::sheet_attached() {
+            log::debug!(
+                "a file sheet is already up; dropping control {}",
+                id.value()
+            );
+            self.reject(tab_id, id);
+            return;
+        }
+        let origin = page_origin(self.controller.borrow().active_state().url());
+        let sheet = file_panel::choose_files(
+            &window,
+            multiple,
+            extensions,
+            &origin,
+            Box::new(move |paths| {
+                slint::Timer::single_shot(Duration::ZERO, move || {
+                    with_controls(|controls| controls.files_chosen(tab_id, id, paths));
+                });
+            }),
+        );
+        *sheet_slot.borrow_mut() = sheet;
+    }
+
+    /// Drops a request that may not be shown (no recent gesture, or a sheet already up).
+    fn reject(&self, tab_id: TabId, id: ControlId) {
+        let still_shown = self.state.borrow().shown == Some((tab_id, id));
+        if still_shown {
+            self.finish(ControlAnswer::Dismiss, None);
+        }
+    }
+
+    /// Places popups and the input-method area again after the page area changed.
+    fn relayout(&self) {
+        let (Some(window), Ok(controller)) = (self.window.upgrade(), self.controller.try_borrow())
+        else {
+            return;
+        };
+        let idle = self.state.try_borrow_mut().is_ok();
+        if idle {
+            self.sync(&window, &controller);
         }
     }
 
@@ -388,7 +501,8 @@ impl Controls {
         let Some((_, id)) = self.state.borrow().shown else {
             return;
         };
-        self.state.borrow_mut().popup = Popup::None;
+        let popup = std::mem::take(&mut self.state.borrow_mut().popup);
+        popup.close_native();
         let Some(window) = self.window.upgrade() else {
             return;
         };
@@ -416,7 +530,8 @@ fn open_popup(
     request: &ControlRequest,
     tab_id: TabId,
     id: ControlId,
-    origin: &str,
+    page_url: &str,
+    _origin: &str,
 ) -> Popup {
     match request {
         ControlRequest::Select {
@@ -433,7 +548,6 @@ fn open_popup(
             ));
             window.set_controls_select_rows(ModelRc::from(rows.clone()));
             window.set_controls_select_multiple(*multiple);
-            window.set_controls_select_content_height(model.content_height());
             window.set_controls_highlighted(highlighted(model.highlighted()));
             window.set_controls_select_scroll_y(0.0);
             Popup::Select {
@@ -443,7 +557,7 @@ fn open_popup(
             }
         }
         ControlRequest::Color { rect, current } => {
-            let model = ColorModel::new(*current);
+            let model = ColorModel::new(*current, Instant::now());
             refresh_color(window, &model);
             Popup::Color {
                 model,
@@ -460,6 +574,7 @@ fn open_popup(
                 entries,
                 link_url.as_deref(),
                 image_url.as_deref(),
+                page_url,
             ));
             window.set_controls_menu_rows(ModelRc::new(VecModel::from(
                 model
@@ -491,27 +606,16 @@ fn open_popup(
         } => {
             let multiple = *multiple;
             let extensions = extensions.clone();
-            let origin = origin.to_owned();
-            let window = window.as_weak();
-            // Started outside the current state update: the panel calls back later, on the main
+            // Started outside the current state update; AppKit calls back later, on the main
             // thread, once the user has chosen or cancelled.
             slint::Timer::single_shot(Duration::ZERO, move || {
-                let Some(window) = window.upgrade() else {
-                    return;
-                };
-                file_panel::choose_files(
-                    &window,
-                    multiple,
-                    &extensions,
-                    &origin,
-                    Box::new(move |paths| {
-                        slint::Timer::single_shot(Duration::ZERO, move || {
-                            with_controls(|controls| controls.files_chosen(tab_id, id, paths));
-                        });
-                    }),
-                );
+                with_controls(|controls| {
+                    controls.start_file_panel(tab_id, id, multiple, &extensions);
+                });
             });
-            Popup::File
+            Popup::File {
+                sheet: Rc::default(),
+            }
         }
     }
 }
@@ -519,7 +623,7 @@ fn open_popup(
 /// Places the open popup over the page; `opened` also scrolls a select list to its highlight.
 fn show_popup(window: &MainWindow, popup: &Popup, page: Rect, zoom: u16, opened: bool) {
     let (kind, placed) = match popup {
-        Popup::None | Popup::File => (POPUP_NONE, None),
+        Popup::None | Popup::File { .. } => (POPUP_NONE, None),
         Popup::Select { model, anchor, .. } => {
             let element = element_in_window(*anchor, page, zoom);
             let footer = if model.multiple() {
@@ -599,13 +703,16 @@ fn select_popup_row(model: &SelectModel, row: usize) -> SelectPopupRow {
     }
 }
 
-/// Updates only what changed, so the list's rows are not rebuilt under the pointer.
-fn refresh_select(window: &MainWindow, model: &SelectModel, rows: &VecModel<SelectPopupRow>) {
-    for row in 0..rows.row_count() {
-        let wanted = select_popup_row(model, row);
-        if rows.row_data(row).as_ref() != Some(&wanted) {
-            rows.set_row_data(row, wanted);
-        }
+/// Updates the one row whose selection may have changed and the highlight; the list itself is
+/// never rebuilt, so this costs the same for any number of options.
+fn refresh_select(
+    window: &MainWindow,
+    model: &SelectModel,
+    rows: &VecModel<SelectPopupRow>,
+    changed_row: Option<usize>,
+) {
+    if let Some(row) = changed_row.filter(|row| *row < rows.row_count()) {
+        rows.set_row_data(row, select_popup_row(model, row));
     }
     window.set_controls_highlighted(highlighted(model.highlighted()));
 }
@@ -676,6 +783,49 @@ fn highlighted(row: Option<usize>) -> i32 {
 
 fn slint_color(colour: Rgb) -> slint::Color {
     slint::Color::from_rgb_u8(colour.red, colour.green, colour.blue)
+}
+
+/// The caption of a select list or colour picker. Servo does not say which frame asked, so it
+/// names the tab's page without claiming that page asked.
+fn caption(origin: &str) -> String {
+    format!("A page on {origin}")
+}
+
+/// Whether a request may be shown now. A file panel or colour picker needs a gesture in the
+/// tab within the last second (consumed here: one gesture, one picker), because Servo 0.8.0 opens
+/// both from a script's `click()` without one (`show_the_picker_if_applicable` skips the
+/// activation check); and no second file sheet while one is attached to the window. A select
+/// list and the context menu only come from the user's own input (Servo checks `isTrusted` for
+/// `<select>`; the context menu follows a real secondary press).
+fn admit(request: &ControlRequest, tab_id: TabId, now: Instant, sheet_attached: bool) -> bool {
+    match request {
+        ControlRequest::File { .. } if sheet_attached => false,
+        ControlRequest::File { .. } | ControlRequest::Color { .. } => {
+            consume_user_activation(tab_id, now)
+        }
+        ControlRequest::Select { .. } | ControlRequest::ContextMenu { .. } => true,
+    }
+}
+
+/// The keys whose press a popup took, so their releases are taken too and no other release is.
+#[derive(Debug, Default)]
+struct TakenKeys(Vec<PhysicalKey>);
+
+impl TakenKeys {
+    fn take(&mut self, key: PhysicalKey) {
+        if !self.0.contains(&key) {
+            self.0.push(key);
+        }
+    }
+
+    /// True if the press of `key` was taken; that release is taken then too.
+    fn release(&mut self, key: PhysicalKey) -> bool {
+        let Some(index) = self.0.iter().position(|taken| *taken == key) else {
+            return false;
+        };
+        self.0.remove(index);
+        true
+    }
 }
 
 /// `scheme://host[:port]` of the page's address, without any user name or password.
@@ -774,6 +924,143 @@ impl ControlClick {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::time::Duration;
+
+    use slint::winit_030::winit::keyboard::KeyCode;
+
+    use crate::activation::note_user_activation;
+
+    fn file_request() -> ControlRequest {
+        ControlRequest::File {
+            multiple: false,
+            extensions: Vec::new(),
+        }
+    }
+
+    fn colour_request() -> ControlRequest {
+        ControlRequest::Color {
+            rect: ControlRect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            current: None,
+        }
+    }
+
+    #[test]
+    fn a_picker_without_a_gesture_is_dropped() {
+        let tab = TabId::new(41);
+        let now = Instant::now();
+
+        assert!(!admit(&file_request(), tab, now, false));
+        assert!(!admit(&colour_request(), tab, now, false));
+    }
+
+    #[test]
+    fn one_gesture_opens_one_picker() {
+        let tab = TabId::new(42);
+        let now = Instant::now();
+        note_user_activation(tab, now);
+
+        assert!(admit(
+            &file_request(),
+            tab,
+            now + Duration::from_millis(200),
+            false
+        ));
+        assert!(!admit(
+            &file_request(),
+            tab,
+            now + Duration::from_millis(300),
+            false
+        ));
+        note_user_activation(tab, now);
+        assert!(admit(
+            &colour_request(),
+            tab,
+            now + Duration::from_millis(200),
+            false
+        ));
+        assert!(!admit(
+            &colour_request(),
+            tab,
+            now + Duration::from_millis(300),
+            false
+        ));
+    }
+
+    #[test]
+    fn a_stale_gesture_opens_nothing() {
+        let tab = TabId::new(43);
+        let now = Instant::now();
+        note_user_activation(tab, now);
+
+        assert!(!admit(
+            &file_request(),
+            tab,
+            now + Duration::from_millis(1500),
+            false
+        ));
+    }
+
+    #[test]
+    fn a_gesture_in_another_tab_does_not_count() {
+        let now = Instant::now();
+        note_user_activation(TabId::new(44), now);
+
+        assert!(!admit(&file_request(), TabId::new(45), now, false));
+    }
+
+    #[test]
+    fn no_second_file_sheet_while_one_is_attached() {
+        let tab = TabId::new(46);
+        let now = Instant::now();
+        note_user_activation(tab, now);
+
+        assert!(!admit(&file_request(), tab, now, true));
+    }
+
+    #[test]
+    fn select_lists_and_menus_need_no_gesture() {
+        let tab = TabId::new(47);
+        let select = ControlRequest::Select {
+            rect: ControlRect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            entries: Vec::new(),
+            selected: Vec::new(),
+            multiple: false,
+        };
+
+        assert!(admit(&select, tab, Instant::now(), true));
+    }
+
+    #[test]
+    fn only_releases_of_taken_presses_are_taken() {
+        let mut taken = TakenKeys::default();
+        let enter = PhysicalKey::Code(KeyCode::Enter);
+        let shift = PhysicalKey::Code(KeyCode::ShiftLeft);
+
+        assert!(!taken.release(shift), "pressed before the popup opened");
+        taken.take(enter);
+        taken.take(enter);
+        assert!(taken.release(enter));
+        assert!(!taken.release(enter));
+    }
+
+    #[test]
+    fn captions_name_the_page_without_claiming_it_asked() {
+        assert_eq!(
+            caption("https://shop.example"),
+            "A page on https://shop.example"
+        );
+    }
 
     #[test]
     fn a_control_click_is_a_secondary_click_on_macos() {

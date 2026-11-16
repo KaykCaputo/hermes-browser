@@ -245,10 +245,36 @@ fn element_urls(info: &ContextMenuElementInformation) -> (Option<String>, Option
     )
 }
 
+/// A label the page wrote, for showing in browser UI: control characters become spaces and
+/// bidirectional formatting characters are removed, so a label cannot reorder or break the text
+/// around it.
+fn page_label(label: &str) -> String {
+    label
+        .chars()
+        .filter(|character| !is_bidi_control(*character))
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect()
+}
+
+/// Unicode's explicit directional formatting characters (marks, embeddings, overrides,
+/// isolates).
+fn is_bidi_control(character: char) -> bool {
+    matches!(
+        character,
+        '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 fn select_option(option: &SelectElementOption) -> SelectOption {
     SelectOption {
         id: option.id,
-        label: option.label.clone(),
+        label: page_label(&option.label),
         disabled: option.is_disabled,
     }
 }
@@ -261,7 +287,7 @@ fn select_entries(options: &[SelectElementOptionOrOptgroup]) -> Vec<SelectEntry>
                 SelectEntry::Option(select_option(option))
             }
             SelectElementOptionOrOptgroup::Optgroup { label, options } => SelectEntry::Group {
-                label: label.clone(),
+                label: page_label(label),
                 options: options.iter().map(select_option).collect(),
             },
         })
@@ -318,8 +344,9 @@ fn servo_context_menu_action(action: ContextMenuAction) -> ServoContextMenuActio
     }
 }
 
-/// Servo passes the `accept` attribute's extensions (without the dot); MIME types such as
-/// `image/*` are not passed at all. Duplicates and empty entries are removed.
+/// Servo turns the `accept` attribute into extensions without the dot: `.png` stays `png`, and a
+/// MIME type such as `image/png` becomes its extensions through `mime_guess`
+/// (`file_input_type.rs`, `filter_from_accept`). Duplicates and empty entries are removed here.
 fn file_extensions(patterns: &[FilterPattern]) -> Vec<String> {
     let mut extensions = Vec::<String>::new();
     for pattern in patterns {
@@ -403,6 +430,37 @@ mod tests {
 
         assert_eq!(store.take_all().len(), 2);
         assert!(store.take_all().is_empty());
+    }
+
+    #[test]
+    fn page_labels_lose_control_and_bidi_characters() {
+        assert_eq!(page_label("Apple"), "Apple");
+        assert_eq!(page_label("a\tb\nc\u{7}"), "a b c ");
+        assert_eq!(
+            page_label("pay\u{202e}gpj.exe\u{202c} \u{2066}x\u{2069}\u{200f}\u{61c}"),
+            "paygpj.exe x"
+        );
+        assert_eq!(page_label("Ünïcödé ✓"), "Ünïcödé ✓");
+    }
+
+    #[test]
+    fn select_labels_from_the_page_are_cleaned() {
+        let entries = select_entries(&[SelectElementOptionOrOptgroup::Optgroup {
+            label: "\u{202e}Fruit".to_owned(),
+            options: vec![option(1, "Ap\u{0}ple", false)],
+        }]);
+
+        assert_eq!(
+            entries,
+            vec![SelectEntry::Group {
+                label: "Fruit".to_owned(),
+                options: vec![SelectOption {
+                    id: 1,
+                    label: "Ap ple".to_owned(),
+                    disabled: false,
+                }],
+            }]
+        );
     }
 
     #[test]

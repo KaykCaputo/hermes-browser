@@ -15,6 +15,8 @@ use talaria_core::{BrowserController, TabActivation};
 use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
+// activation (tabs lane)
+mod activation;
 mod callbacks;
 mod cli;
 // controls

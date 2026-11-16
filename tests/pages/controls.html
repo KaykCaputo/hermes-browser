@@ -26,8 +26,10 @@
   - Type in the text field with an input method (for example Japanese): the candidate window
     sits at the field.
   Automatic: the text field takes focus on load, which sends the input-method request.
-  `#open-select`, `#open-color` and `#open-long` call `showPicker()` on load; Servo 0.8.0 refuses
-  without a user gesture (the title then says so), so those need a click.
+  `#timer-click` calls `click()` on the file and colour inputs from a timer, with no gesture:
+  Servo 0.8.0 opens both pickers for such a click, and Mercury must drop both requests (no panel,
+  no picker; the log says "no recent user gesture"). Servo 0.8.0 has no `showPicker()`, so
+  `#open-select`, `#open-color` and `#open-long` only record the TypeError in the title.
 -->
 <section>
   <label for="fruit">Single, with groups</label>
@@ -89,11 +91,19 @@
   }
   window.addEventListener("load", () => {
     const target = { "#open-select": "fruit", "#open-color": "colour", "#open-long": "many" }[location.hash];
+    if (location.hash === "#timer-click") {
+      setTimeout(() => document.getElementById("one-file").click(), 200);
+      setTimeout(() => {
+        document.getElementById("colour").click();
+        document.title = "Clicked from a timer";
+      }, 800);
+      return;
+    }
     if (target) {
       try {
         document.getElementById(target).showPicker();
       } catch (error) {
-        // Servo, like the specification, requires a user gesture.
+        // Servo 0.8.0 has no showPicker(): this is a TypeError.
         document.title = "showPicker failed: " + error.name;
       }
     } else {

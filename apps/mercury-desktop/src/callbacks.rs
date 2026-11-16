@@ -130,6 +130,8 @@ pub(crate) fn connect_ui_callbacks(
         } else {
             PointerButtonAction::Up
         };
+        let tab_id = pointer_button_controller.borrow().active_tab_id();
+        crate::activation::note_user_activation(tab_id, std::time::Instant::now()); // activation (tabs lane)
         pointer_button_controller
             .borrow_mut()
             .queue_command(BrowserCommand::PointerButton {

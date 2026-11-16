@@ -13,6 +13,12 @@ export struct PopupColors {
     separator: color,
     button: color,
     button-text: color,
+    shadow: color,
+    // The border of a hex field holding an incomplete value.
+    invalid: color,
+    // The colour-area marker over light and over dark colours.
+    marker-on-light: color,
+    marker-on-dark: color,
 }
 
 export global PopupStyle {
@@ -29,6 +35,10 @@ export global PopupStyle {
                 separator: #45454a,
                 button: #3d3d42,
                 button-text: #ececee,
+                shadow: #00000080,
+                invalid: #f28b82,
+                marker-on-light: #000000,
+                marker-on-dark: #ffffff,
             };
         }
         return {
@@ -42,6 +52,10 @@ export global PopupStyle {
             separator: #e2e2e6,
             button: #ececf0,
             button-text: #1d1d1f,
+            shadow: #00000055,
+            invalid: #d93025,
+            marker-on-light: #000000,
+            marker-on-dark: #ffffff,
         };
     }
 }

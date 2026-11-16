@@ -1,5 +1,7 @@
 //! The colour picker for `<input type=color>`: swatches, a hue/lightness area and a hex field.
 
+use std::time::{Duration, Instant};
+
 use talaria_core::{ControlAnswer, Rgb};
 
 use super::Outcome;
@@ -28,6 +30,10 @@ pub(crate) const SWATCHES: [Rgb; 16] = [
     rgb(0x54, 0x6e, 0x7a),
 ];
 
+/// Input other than Escape is ignored this long after the picker opens, so a click or key
+/// meant for something else cannot choose a colour (Chrome's `InputEventActivationProtector`).
+const INPUT_PROTECTION: Duration = Duration::from_millis(500);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ColorKey {
     Return,
@@ -40,14 +46,16 @@ pub(crate) enum ColorKey {
 pub(crate) struct ColorModel {
     colour: Rgb,
     hex: String,
+    opened_at: Instant,
 }
 
 impl ColorModel {
-    pub(crate) fn new(current: Option<Rgb>) -> Self {
+    pub(crate) fn new(current: Option<Rgb>, opened_at: Instant) -> Self {
         let colour = current.unwrap_or(rgb(0, 0, 0));
         Self {
             colour,
             hex: format_hex(colour),
+            opened_at,
         }
     }
 
@@ -65,16 +73,24 @@ impl ColorModel {
     }
 
     /// A swatch or a point in the hue/lightness area was chosen.
-    pub(crate) fn pick(&mut self, colour: Rgb) {
+    /// Returns false if the pick was ignored.
+    pub(crate) fn pick(&mut self, colour: Rgb, now: Instant) -> bool {
+        if self.protected(now) {
+            return false;
+        }
         self.colour = colour;
         self.hex = format_hex(colour);
+        true
     }
 
     /// Hex digits are typed into the field (at most six); the colour follows whenever the
     /// field holds a complete value.
-    pub(crate) fn key(&mut self, key: ColorKey) -> Outcome {
+    pub(crate) fn key(&mut self, key: ColorKey, now: Instant) -> Outcome {
+        if key != ColorKey::Escape && self.protected(now) {
+            return Outcome::Stay;
+        }
         match key {
-            ColorKey::Return => return self.done(),
+            ColorKey::Return => return self.done(now),
             ColorKey::Escape => return Outcome::Close(ControlAnswer::Dismiss),
             ColorKey::Backspace => {
                 if self.hex.len() > 1 {
@@ -95,8 +111,17 @@ impl ColorModel {
         Outcome::Stay
     }
 
-    pub(crate) fn done(&self) -> Outcome {
+    pub(crate) fn done(&self, now: Instant) -> Outcome {
+        if self.protected(now) {
+            return Outcome::Stay;
+        }
         Outcome::Close(ControlAnswer::Color(self.colour))
+    }
+}
+
+impl ColorModel {
+    fn protected(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.opened_at) < INPUT_PROTECTION
     }
 }
 
@@ -169,7 +194,41 @@ pub(crate) fn hue_lightness(colour: Rgb) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+
+    thread_local! {
+        static OPENED_AT: Instant = Instant::now();
+    }
+
+    fn later() -> Instant {
+        OPENED_AT.with(|at| *at) + Duration::from_secs(1)
+    }
+
+    #[test]
+    fn the_picker_ignores_input_in_its_first_half_second_except_escape() {
+        let opened_at = Instant::now();
+        let soon = opened_at + Duration::from_millis(300);
+        let mut model = ColorModel::new(Some(rgb(1, 2, 3)), opened_at);
+
+        assert_eq!(model.key(ColorKey::Return, soon), Outcome::Stay);
+        assert_eq!(model.key(ColorKey::Backspace, soon), Outcome::Stay);
+        assert_eq!(model.hex(), "#010203");
+        assert!(!model.pick(SWATCHES[4], soon));
+        assert_eq!(model.done(soon), Outcome::Stay);
+        assert_eq!(
+            model.key(ColorKey::Escape, soon),
+            Outcome::Close(ControlAnswer::Dismiss)
+        );
+
+        let settled = opened_at + Duration::from_millis(500);
+        assert!(model.pick(SWATCHES[4], settled));
+        assert_eq!(
+            model.done(settled),
+            Outcome::Close(ControlAnswer::Color(SWATCHES[4]))
+        );
+    }
 
     #[test]
     fn hex_text_parses_in_long_and_short_forms() {
@@ -211,68 +270,74 @@ mod tests {
 
     #[test]
     fn the_picker_starts_from_the_inputs_colour_or_black() {
-        let model = ColorModel::new(Some(rgb(0x43, 0xa0, 0x47)));
+        let model = ColorModel::new(Some(rgb(0x43, 0xa0, 0x47)), OPENED_AT.with(|at| *at));
         assert_eq!(model.hex(), "#43a047");
         assert!(model.hex_is_valid());
-        assert_eq!(ColorModel::new(None).colour(), rgb(0, 0, 0));
+        assert_eq!(
+            ColorModel::new(None, OPENED_AT.with(|at| *at)).colour(),
+            rgb(0, 0, 0)
+        );
     }
 
     #[test]
     fn typing_a_hex_value_changes_the_colour_once_it_is_complete() {
-        let mut model = ColorModel::new(Some(rgb(0, 0, 0)));
+        let mut model = ColorModel::new(Some(rgb(0, 0, 0)), OPENED_AT.with(|at| *at));
         for _ in 0..7 {
-            model.key(ColorKey::Backspace);
+            model.key(ColorKey::Backspace, later());
         }
         assert_eq!(model.hex(), "#");
         for character in "1e88e".chars() {
-            assert_eq!(model.key(ColorKey::Character(character)), Outcome::Stay);
+            assert_eq!(
+                model.key(ColorKey::Character(character), later()),
+                Outcome::Stay
+            );
         }
         assert!(!model.hex_is_valid());
         assert_eq!(model.colour(), rgb(0, 0, 0));
-        model.key(ColorKey::Character('5'));
+        model.key(ColorKey::Character('5'), later());
         assert_eq!(model.colour(), rgb(0x1e, 0x88, 0xe5));
-        model.key(ColorKey::Character('7'));
+        model.key(ColorKey::Character('7'), later());
         assert_eq!(model.hex(), "#1e88e5", "the field holds at most six digits");
     }
 
     #[test]
     fn only_hex_digits_are_typed() {
-        let mut model = ColorModel::new(Some(rgb(0, 0, 0)));
-        model.key(ColorKey::Backspace);
-        model.key(ColorKey::Character('x'));
-        model.key(ColorKey::Character('#'));
-        model.key(ColorKey::Character('A'));
+        let mut model = ColorModel::new(Some(rgb(0, 0, 0)), OPENED_AT.with(|at| *at));
+        model.key(ColorKey::Backspace, later());
+        model.key(ColorKey::Character('x'), later());
+        model.key(ColorKey::Character('#'), later());
+        model.key(ColorKey::Character('A'), later());
 
         assert_eq!(model.hex(), "#00000a");
     }
 
     #[test]
     fn return_sets_the_colour_and_escape_cancels() {
-        let mut model = ColorModel::new(Some(rgb(1, 2, 3)));
-        model.pick(SWATCHES[4]);
+        let mut model = ColorModel::new(Some(rgb(1, 2, 3)), OPENED_AT.with(|at| *at));
+        model.pick(SWATCHES[4], later());
 
         assert_eq!(model.hex(), "#e53935");
         assert_eq!(
-            model.key(ColorKey::Return),
+            model.key(ColorKey::Return, later()),
             Outcome::Close(ControlAnswer::Color(SWATCHES[4]))
         );
         assert_eq!(
-            model.key(ColorKey::Escape),
+            model.key(ColorKey::Escape, later()),
             Outcome::Close(ControlAnswer::Dismiss)
         );
         assert_eq!(
-            model.done(),
+            model.done(later()),
             Outcome::Close(ControlAnswer::Color(SWATCHES[4]))
         );
     }
 
     #[test]
     fn return_with_an_incomplete_hex_value_keeps_the_last_valid_colour() {
-        let mut model = ColorModel::new(Some(rgb(1, 2, 3)));
-        model.key(ColorKey::Backspace);
+        let mut model = ColorModel::new(Some(rgb(1, 2, 3)), OPENED_AT.with(|at| *at));
+        model.key(ColorKey::Backspace, later());
 
         assert_eq!(
-            model.key(ColorKey::Return),
+            model.key(ColorKey::Return, later()),
             Outcome::Close(ControlAnswer::Color(rgb(1, 2, 3)))
         );
     }

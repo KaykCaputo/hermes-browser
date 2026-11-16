@@ -1,9 +1,10 @@
 import { Palette } from "std-widgets.slint";
 import { PopupColors, PopupStyle, PopupButton } from "page-popup.slint";
 
-// The picker for `<input type=color>`: 232 × 282 px, mirrored in
-// `apps/mercury-desktop/src/controls/mod.rs`. The hex field is typed into through the
-// browser's key handling, so the page keeps keyboard focus while the picker is open.
+// The picker for `<input type=color>`: 232 × 282 px when there is room, mirrored in
+// `apps/mercury-desktop/src/controls/mod.rs`; a smaller page area clips it. The hex field is
+// typed into through the browser's key handling, so the page keeps keyboard focus while the
+// picker is open.
 export component ColorPicker inherits Rectangle {
     in property <string> origin;
     in property <[color]> swatches;
@@ -22,17 +23,22 @@ export component ColorPicker inherits Rectangle {
 
     property <PopupColors> colors: PopupStyle.colors(root.dark);
 
-    width: 232px;
-    height: 282px;
+    preferred-width: 232px;
+    preferred-height: 282px;
+    clip: true;
     background: root.colors.background;
     border-radius: 8px;
     border-width: 1px;
     border-color: root.colors.border;
     drop-shadow-blur: 14px;
     drop-shadow-offset-y: 4px;
-    drop-shadow-color: #00000055;
+    drop-shadow-color: root.colors.shadow;
 
     VerticalLayout {
+        x: 0px;
+        y: 0px;
+        width: 232px;
+        height: 282px;
         padding: 10px;
         padding-top: 4px;
         spacing: 8px;
@@ -92,7 +98,7 @@ export component ColorPicker inherits Rectangle {
                 height: 12px;
                 border-radius: 6px;
                 border-width: 2px;
-                border-color: root.lightness > 0.6 ? #000000 : #ffffff;
+                border-color: root.lightness > 0.6 ? root.colors.marker-on-light : root.colors.marker-on-dark;
                 background: transparent;
             }
 
@@ -133,7 +139,7 @@ export component ColorPicker inherits Rectangle {
             Rectangle {
                 border-radius: 6px;
                 border-width: 1px;
-                border-color: root.hex-valid ? root.colors.highlight : #d93025;
+                border-color: root.hex-valid ? root.colors.highlight : root.colors.invalid;
                 background: root.colors.background;
 
                 hex-text := Text {

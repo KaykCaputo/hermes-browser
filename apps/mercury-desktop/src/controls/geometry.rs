@@ -155,23 +155,68 @@ mod tests {
         );
     }
 
-    /// The same page on a 1× and a 2× display: Servo's CSS-pixel rectangle and the logical
-    /// page area are the same numbers on both, so the popup lands at the same logical place.
-    /// (Servo's numbers would differ only if they were device pixels, which 0.8.0 does not
-    /// send; a page at 200 % zoom on a 2× display is the case where they would differ by 4.)
+    /// The pointer path in reverse: `talaria-servo` sends a pointer at logical position `p` in
+    /// the page area as the device point `p × scale` (`web_view.rs`, `device_point`), and Servo
+    /// turns device points into CSS pixels by dividing by `scale × zoom` (its
+    /// `device_pixels_per_css_pixel`). A control rectangle at that CSS position must come back
+    /// to `p` at every scale factor and zoom.
+    fn css_point_under_pointer(
+        logical_x: f32,
+        logical_y: f32,
+        scale: f32,
+        zoom_percent: u16,
+    ) -> (i32, i32) {
+        let zoom = f32::from(zoom_percent) / 100.0;
+        let device = ((logical_x - PAGE.x) * scale, (logical_y - PAGE.y) * scale);
+        (
+            (device.0 / (scale * zoom)).round() as i32,
+            (device.1 / (scale * zoom)).round() as i32,
+        )
+    }
+
     #[test]
-    fn the_display_scale_factor_does_not_move_the_element() {
-        for _scale_factor in [1.0_f32, 2.0] {
-            assert_eq!(
-                element_in_window(ELEMENT, PAGE, 200),
-                Rect {
-                    x: 80.0,
-                    y: 168.0,
-                    width: 300.0,
-                    height: 40.0,
-                }
-            );
+    fn a_control_lands_where_the_pointer_that_hit_it_was_at_every_scale_and_zoom() {
+        for scale in [1.0_f32, 2.0] {
+            for zoom in [50_u16, 100, 200] {
+                let (x, y) = css_point_under_pointer(300.0, 408.0, scale, zoom);
+                let rect = ControlRect {
+                    x,
+                    y,
+                    width: 0,
+                    height: 0,
+                };
+
+                let placed = element_in_window(rect, PAGE, zoom);
+
+                assert_eq!(
+                    (placed.x, placed.y),
+                    (300.0, 408.0),
+                    "scale {scale}, zoom {zoom}"
+                );
+            }
         }
+    }
+
+    /// Measured on a 2× display at 100 %: the text field of `tests/pages/controls.html`, which
+    /// the screenshot shows at logical (218, 396)–(355, 413) under a 108 px toolbar.
+    #[test]
+    fn servos_rectangle_for_a_real_text_field_matches_the_screenshot() {
+        let measured = ControlRect {
+            x: 218,
+            y: 288,
+            width: 137,
+            height: 17,
+        };
+
+        assert_eq!(
+            element_in_window(measured, PAGE, 100),
+            Rect {
+                x: 218.0,
+                y: 396.0,
+                width: 137.0,
+                height: 17.0,
+            }
+        );
     }
 
     #[test]

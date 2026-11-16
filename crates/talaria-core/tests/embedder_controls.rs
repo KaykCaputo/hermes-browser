@@ -314,3 +314,36 @@ fn a_replaced_web_view_leaves_nothing_pending() {
     assert_eq!(controller.active_state().pending_control(), None);
     assert_eq!(controller.active_state().input_method(), None);
 }
+
+#[test]
+fn a_request_while_a_file_chooser_is_up_is_dropped_instead_of_the_chooser() {
+    let (mut controller, tab_id) = ready_controller();
+    let file_request = ControlRequest::File {
+        multiple: false,
+        extensions: Vec::new(),
+    };
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::ControlShown {
+            id: ControlId::new(1),
+            request: file_request.clone(),
+        },
+    );
+
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::ControlShown {
+            id: ControlId::new(2),
+            request: file_request.clone(),
+        },
+    );
+
+    assert_eq!(
+        controller.active_state().pending_control(),
+        Some((ControlId::new(1), &file_request))
+    );
+    assert_eq!(
+        queued(&mut controller),
+        vec![answer(tab_id, 2, ControlAnswer::Dismiss)]
+    );
+}

@@ -4,8 +4,8 @@ use crate::address::{AddressResolutionError, resolve_address};
 use crate::browser::LoadState;
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
 use crate::{
-    ColorScheme, ControlAnswer, ControlId, DEFAULT_ZOOM_PERCENT, Tab, TabActivation, TabCommand,
-    TabId,
+    ColorScheme, ControlAnswer, ControlId, ControlRequest, DEFAULT_ZOOM_PERCENT, Tab,
+    TabActivation, TabCommand, TabId,
 };
 
 #[derive(Debug)]
@@ -393,8 +393,8 @@ impl BrowserController {
         );
     }
 
-    /// A control for a background tab is dropped at once; one that replaces a pending control
-    /// drops the older one. Returns the event to apply, or None if it was consumed.
+    /// A control for a background tab, or one asked for while the tab's file chooser is up, is
+    /// dropped at once; otherwise one that replaces a pending control drops the older one. Returns the event to apply, or None if it was consumed.
     fn route_control_request(
         &mut self,
         tab_id: TabId,
@@ -407,7 +407,16 @@ impl BrowserController {
         if !self.tabs.iter().any(|tab| tab.id() == tab_id) {
             return Some(event);
         }
-        if tab_id != self.active_tab_id {
+        // The file chooser is a sheet on the whole window: while it is up, newer requests of
+        // the tab are dropped rather than the chooser.
+        let file_chooser_up = self.tabs.iter().any(|tab| {
+            tab.id() == tab_id
+                && matches!(
+                    tab.state().pending_control(),
+                    Some((_, ControlRequest::File { .. }))
+                )
+        });
+        if tab_id != self.active_tab_id || file_chooser_up {
             self.queue_command_for(
                 tab_id,
                 BrowserCommand::AnswerControl {

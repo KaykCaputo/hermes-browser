@@ -230,7 +230,6 @@ export component MainWindow inherits Window {
     in property <int> controls-highlighted: -1;
     in property <[SelectPopupRow]> controls-select-rows;
     in property <bool> controls-select-multiple;
-    in property <length> controls-select-content-height;
     in-out property <length> controls-select-scroll-y;
     in property <[ContextMenuRow]> controls-menu-rows;
     in property <[color]> controls-color-swatches;
@@ -246,6 +245,20 @@ export component MainWindow inherits Window {
     callback controls-color-swatch-picked(int);
     callback controls-color-area-picked(float, float);
     callback controls-color-done();
+    // The page area moved or was resized.
+    callback controls-page-changed();
+    changed controls-page-x => {
+        root.controls-page-changed();
+    }
+    changed controls-page-y => {
+        root.controls-page-changed();
+    }
+    changed web-view-width => {
+        root.controls-page-changed();
+    }
+    changed web-view-height => {
+        root.controls-page-changed();
+    }
     // --- end controls ---
 
     pure function mouse-cursor-for(cursor: WebViewCursor) -> MouseCursor {
@@ -774,7 +787,6 @@ export component MainWindow inherits Window {
         highlighted: root.controls-highlighted;
         multiple: root.controls-select-multiple;
         origin: root.controls-origin;
-        content-height: root.controls-select-content-height;
         scroll-y <=> root.controls-select-scroll-y;
         row-clicked(index) => {
             root.controls-row-clicked(index);
@@ -791,6 +803,8 @@ export component MainWindow inherits Window {
     if root.controls-popup == 2: ColorPicker {
         x: root.controls-popup-x;
         y: root.controls-popup-y;
+        width: root.controls-popup-width;
+        height: root.controls-popup-height;
         origin: root.controls-origin;
         swatches: root.controls-color-swatches;
         current: root.controls-color;
