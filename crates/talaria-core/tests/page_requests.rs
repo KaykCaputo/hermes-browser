@@ -1300,3 +1300,69 @@ fn another_site_does_not_end_a_block_the_user_did_not_navigate_away_from() {
     );
     assert_eq!(pending_id(&controller, tab_id), None);
 }
+
+// Review round 4
+
+#[test]
+fn a_cross_origin_sign_in_does_not_end_a_marked_block() {
+    // Sign-ins carry the URL that answered 401, which may be a frame's on another site.
+    let (mut controller, tab_id) = blocked_page();
+    controller.queue_command(BrowserCommand::GoBack);
+    drain(&mut controller);
+    receive(
+        &mut controller,
+        tab_id,
+        sign_in(3, "https://frame.other.test/private", 1_000),
+    );
+    assert_eq!(pending_id(&controller, tab_id), Some(3));
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(3),
+        reply(PageRequestAnswer::Decline),
+        Duration::from_millis(1_100),
+    );
+    drain(&mut controller);
+
+    receive(&mut controller, tab_id, alert(4, 2_000));
+    assert_eq!(pending_id(&controller, tab_id), None);
+}
+
+/// The order measured with `tests/pages/navigate-then-head-alert.html` (five runs, Servo 0.8):
+/// the new address arrives before the new document's first dialog, and that dialog names the new
+/// address. When the old page was stuck in `Started` (as after an alert loop in its head), the
+/// document start is only inferred at `HeadParsed`, which comes after the alert is answered.
+#[test]
+fn a_new_sites_head_alert_after_a_stuck_page_is_shown_in_the_measured_order() {
+    for document_start_reported_first in [false, true] {
+        let (mut controller, tab_id) = blocked_page();
+        controller
+            .queue_navigation("https://other.test/")
+            .expect("the address resolves");
+        drain(&mut controller);
+        // The leaving page's leave prompt is allowed without asking (it is blocked).
+        receive(
+            &mut controller,
+            tab_id,
+            request(3, PageRequestKind::LeavePage, 40),
+        );
+        drain(&mut controller);
+
+        commit_page(&mut controller, tab_id, "https://other.test/");
+        if document_start_reported_first {
+            controller.handle_event(tab_id, BrowserEvent::PageLoadStarted);
+        }
+        receive(
+            &mut controller,
+            tab_id,
+            PageRequest {
+                url: "https://other.test/".to_owned(),
+                ..alert(4, 1_000)
+            },
+        );
+        assert_eq!(
+            pending_id(&controller, tab_id),
+            Some(4),
+            "document start reported first: {document_start_reported_first}"
+        );
+    }
+}

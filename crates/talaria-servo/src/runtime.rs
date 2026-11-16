@@ -380,6 +380,12 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn notify_url_changed(&self, _web_view: servo::WebView, url: Url) {
+        // dialogs: user info is left out; after a sign-in it holds the password.
+        log::debug!(
+            "tab {}: address changed to {}",
+            self.tab_id.value(),
+            talaria_core::strip_user_info(url.as_str()),
+        );
         self.send_browser_event(BrowserEvent::AddressChanged {
             url: display_url(&url),
         });
@@ -506,6 +512,15 @@ impl BrowserDelegate {
         let Some(id) = self.page_requests.borrow_mut().insert(request) else {
             return;
         };
+        log::debug!(
+            "tab {}: page request {} ({kind:?}) for {}",
+            self.tab_id.value(),
+            id.value(),
+            url.as_ref().map_or_else(
+                || "no address".to_owned(),
+                |url| talaria_core::strip_user_info(url.as_str())
+            ),
+        );
         self.send_browser_event(BrowserEvent::PageRequested(PageRequest {
             id,
             url: url.map(String::from).unwrap_or_default(),

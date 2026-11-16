@@ -458,7 +458,12 @@ impl PageRequests {
     ) -> Option<PageRequestAnswer> {
         let origin = PageOrigin::from_url(&request.url);
         let kind = request.kind.sanitized();
-        if self.blocks_end_with_navigation && origin.key() != self.blocked_origin.as_deref() {
+        // Only dialogs and leave prompts name the tab's page; a sign-in names the URL that
+        // answered 401, which may be a frame's on another site, and must not lift the block.
+        if self.blocks_end_with_navigation
+            && kind.is_blockable_dialog()
+            && origin.key() != self.blocked_origin.as_deref()
+        {
             self.end_blocks();
         }
 
