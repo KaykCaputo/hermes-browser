@@ -69,6 +69,16 @@ impl Outcome {
     }
 }
 
+/// What a running transfer has been asked to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stop {
+    Run,
+    /// Stop and remove the partial file.
+    Cancel,
+    /// Stop like a dropped connection: keep the partial file if it can be resumed.
+    Interrupt,
+}
+
 /// Part files held by running transfers, shared by all transfers of one manager.
 pub(crate) type PartsInUse = Arc<Mutex<HashSet<PathBuf>>>;
 
@@ -143,7 +153,7 @@ impl Transfer {
     /// Runs the transfer to its outcome. A panic anywhere in it (including in `on_event` while
     /// `Started` or `Progress` is delivered) becomes an internal failure, after the partial file
     /// is removed.
-    pub(crate) async fn run(self, mut cancelled: watch::Receiver<bool>) -> Outcome {
+    pub(crate) async fn run(self, mut cancelled: watch::Receiver<Stop>) -> Outcome {
         let mut on_disk = OnDisk::default();
         let fetched = AssertUnwindSafe(self.fetch(&mut on_disk, &mut cancelled))
             .catch_unwind()
@@ -216,7 +226,7 @@ impl Transfer {
     async fn fetch(
         &self,
         on_disk: &mut OnDisk,
-        cancelled: &mut watch::Receiver<bool>,
+        cancelled: &mut watch::Receiver<Stop>,
     ) -> Result<Complete, TransferError> {
         let request = &self.request;
         // Before any I/O.
@@ -422,7 +432,7 @@ impl Transfer {
         file: tokio::fs::File,
         offset: u64,
         total: Option<u64>,
-        cancelled: &mut watch::Receiver<bool>,
+        cancelled: &mut watch::Receiver<Stop>,
     ) -> Result<u64, TransferError> {
         let mut writer = BufWriter::with_capacity(WRITE_BUFFER_BYTES, file);
         let mut received = offset;
@@ -472,26 +482,29 @@ impl Transfer {
     }
 }
 
-/// Resolves when cancel is requested or the manager is gone.
-async fn wait_for_cancel(cancelled: &mut watch::Receiver<bool>) {
+/// Resolves when a stop is requested, with the error it ends the transfer with; the manager
+/// being gone counts as a cancel.
+async fn wait_for_stop(stop: &mut watch::Receiver<Stop>) -> TransferError {
     loop {
-        if *cancelled.borrow_and_update() {
-            return;
+        match *stop.borrow_and_update() {
+            Stop::Run => {}
+            Stop::Cancel => return TransferError::Cancelled,
+            Stop::Interrupt => return TransferError::Interrupted,
         }
-        if cancelled.changed().await.is_err() {
-            return;
+        if stop.changed().await.is_err() {
+            return TransferError::Cancelled;
         }
     }
 }
 
-/// Runs `work` unless cancel is requested first.
+/// Runs `work` unless a stop is requested first.
 async fn until_cancelled<T>(
-    cancelled: &mut watch::Receiver<bool>,
+    cancelled: &mut watch::Receiver<Stop>,
     work: impl Future<Output = T>,
 ) -> Result<T, TransferError> {
     tokio::select! {
         biased;
-        () = wait_for_cancel(cancelled) => Err(TransferError::Cancelled),
+        stopped = wait_for_stop(cancelled) => Err(stopped),
         output = work => Ok(output),
     }
 }
@@ -834,6 +847,37 @@ fn publish(complete: &Complete) -> io::Result<PathBuf> {
         io::ErrorKind::AlreadyExists,
         "no free file name",
     ))
+}
+
+/// Removes the partial file of an interrupted download that is not going to be resumed (the
+/// user cancelled it). Only a regular file named exactly `<target name>.part`, in the target's
+/// own folder, is removed; anything else at that path (a link, a folder, another name) is
+/// refused with `InvalidInput` and left alone. A partial file that is already gone is fine.
+pub fn remove_partial_file(resume: &ResumeFrom) -> io::Result<()> {
+    let refuse = |reason: &str| io::Error::new(io::ErrorKind::InvalidInput, reason.to_owned());
+    let target_name = resume
+        .target_path
+        .file_name()
+        .ok_or_else(|| refuse("the target path has no file name"))?;
+    let mut expected = target_name.to_owned();
+    expected.push(PART_SUFFIX);
+    if resume.partial_path.file_name() != Some(expected.as_os_str()) {
+        return Err(refuse("the partial file does not belong to the target"));
+    }
+    if resume.partial_path.parent() != resume.target_path.parent() {
+        return Err(refuse("the partial file is not in the target's folder"));
+    }
+    match resume.partial_path.symlink_metadata() {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err(refuse("the partial file is not a regular file")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    // `unlink` never follows a link, so a link swapped in since the check is what is removed.
+    match std::fs::remove_file(&resume.partial_path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
 }
 
 async fn remove_partial(part: Option<PathBuf>) {

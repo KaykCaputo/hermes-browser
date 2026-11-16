@@ -268,6 +268,7 @@ async fn respond(stream: &mut TcpStream, port: u16, request: &Recorded) -> std::
         "/cut-plain" => cut(stream, false).await,
         "/slow" => slow(stream, SLOW_CHUNKS).await,
         "/slow-long" => slow(stream, 100_000).await,
+        "/slow-plain" => slow_plain(stream, 100_000).await,
         "/stall" => {
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {FILE_LEN}\r\nETag: {ETAG}\r\n\
@@ -360,6 +361,22 @@ async fn cut(stream: &mut TcpStream, validators: bool) -> std::io::Result<()> {
     stream.flush().await?;
     // Close without sending the rest.
     stream.shutdown().await
+}
+
+/// Like `slow`, without a validator or byte ranges, so it cannot be resumed.
+async fn slow_plain(stream: &mut TcpStream, chunks: usize) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        chunks * SLOW_CHUNK
+    );
+    stream.write_all(head.as_bytes()).await?;
+    let chunk = vec![b's'; SLOW_CHUNK];
+    for _ in 0..chunks {
+        stream.write_all(&chunk).await?;
+        stream.flush().await?;
+        tokio::time::sleep(SLOW_DELAY).await;
+    }
+    Ok(())
 }
 
 async fn slow(stream: &mut TcpStream, chunks: usize) -> std::io::Result<()> {

@@ -17,3 +17,4 @@ pub use manager::{
     DownloadEvent, DownloadId, DownloadManager, DownloadRequest, ResumeFrom, Timeouts,
 };
 pub use naming::{file_name_for, format_bytes, sanitize_file_name, unique_path};
+pub use transfer::remove_partial_file;

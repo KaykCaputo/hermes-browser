@@ -34,6 +34,8 @@ pub(crate) enum TransferError {
     AlreadyResuming,
     #[error("cannot resume: {0}")]
     InvalidResume(&'static str),
+    #[error("the download was interrupted")]
+    Interrupted,
     /// Not shown to anyone: a cancelled transfer ends with `DownloadEvent::Cancelled`.
     #[error("cancelled")]
     Cancelled,
@@ -50,7 +52,9 @@ impl TransferError {
     /// Whether trying again later could succeed, so a partial file is worth keeping.
     pub(crate) fn is_transient(&self) -> bool {
         match self {
-            Self::Network(_) | Self::Stalled(_) | Self::Truncated { .. } => true,
+            Self::Network(_) | Self::Stalled(_) | Self::Truncated { .. } | Self::Interrupted => {
+                true
+            }
             Self::Status(status) => {
                 status.is_server_error()
                     || *status == StatusCode::REQUEST_TIMEOUT
