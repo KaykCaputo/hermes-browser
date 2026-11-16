@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Download probe</title>
+</head>
+<body>
+<h1>Download probe</h1>
+<p id="case"></p>
+<form id="post" method="post"><input type="hidden" name="q" value="1"></form>
+<script>
+// Starts one kind of download on its own, chosen by the fragment, half a second after load:
+//   #post-zip, #post-csv     a form POST answered with an attachment
+//   #a-download-zip          <a download> to a type Servo cannot render
+//   #a-download-text         <a download="saved.txt"> to text/plain
+//   #blob                    a script-made Blob saved through <a download>
+//   #data                    a data: URL saved through <a download>
+const kind = location.hash.slice(1);
+document.getElementById("case").textContent = "case: " + kind;
+function click(href, name) {
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = name;
+  link.textContent = href;
+  document.body.appendChild(link);
+  link.click();
+}
+setTimeout(() => {
+  switch (kind) {
+    case "post-zip":
+      document.getElementById("post").action = "/download/report.zip?type=application/zip&disposition=attachment&filename=report.zip";
+      document.getElementById("post").submit();
+      break;
+    case "post-csv":
+      document.getElementById("post").action = "/download/report.csv?type=text/csv&disposition=attachment&filename=report.csv";
+      document.getElementById("post").submit();
+      break;
+    case "a-download-zip-big":
+      click("/download/big.zip?type=application/zip&size=20000000&rate=2000000", "big.zip");
+      break;
+    case "a-download-zip":
+      click("/download/archive.zip?type=application/zip", "archive.zip");
+      break;
+    case "a-download-text":
+      click("/download/notes.txt?type=text/plain", "saved.txt");
+      break;
+    case "blob":
+      click(URL.createObjectURL(new Blob(["made by script\n"], { type: "text/plain" })), "blob.txt");
+      break;
+    case "data":
+      click("data:application/octet-stream;base64,aGVsbG8K", "data.bin");
+      break;
+  }
+}, 500);
+</script>
+</body>
+</html>
