@@ -1,0 +1,188 @@
+import { PopupColors, PopupStyle, PopupButton } from "page-popup.slint";
+
+// The picker for `<input type=color>`: 232 × 282 px when there is room, mirrored in
+// `apps/mercury-desktop/src/controls/mod.rs`; a smaller page area clips it. The hex field is
+// typed into through the browser's key handling, so the page keeps keyboard focus while the
+// picker is open.
+export component ColorPicker inherits Rectangle {
+    in property <string> origin;
+    in property <[color]> swatches;
+    in property <color> current;
+    in property <string> hex;
+    in property <bool> hex-valid: true;
+    // Where `current` sits in the area: hue left to right, lightness top (white) to bottom.
+    in property <float> hue;
+    in property <float> lightness;
+    callback swatch-picked(int);
+    // Fractions of the area's width and height.
+    callback area-picked(float, float);
+    callback done();
+    callback cancelled();
+
+    property <PopupColors> colors: PopupStyle.colors;
+
+    preferred-width: 232px;
+    preferred-height: 282px;
+    clip: true;
+    background: root.colors.background;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.colors.border;
+    drop-shadow-blur: 14px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: root.colors.shadow;
+
+    VerticalLayout {
+        x: 0px;
+        y: 0px;
+        width: 232px;
+        height: 282px;
+        padding: 10px;
+        padding-top: 4px;
+        spacing: 8px;
+
+        Text {
+            height: 20px;
+            text: root.origin;
+            color: root.colors.muted;
+            font-size: 11px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        swatch-grid := Rectangle {
+            height: 50px;
+
+            for swatch[index] in root.swatches: Rectangle {
+                x: Math.mod(index, 8) * 27px;
+                y: Math.floor(index / 8) * 27px;
+                width: 23px;
+                height: 23px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: root.colors.border;
+                background: swatch;
+
+                TouchArea {
+                    clicked => {
+                        root.swatch-picked(index);
+                    }
+                }
+            }
+        }
+
+        area := Rectangle {
+            height: 110px;
+            border-radius: 4px;
+            clip: true;
+            background: @linear-gradient(90deg, #ff0000 0%, #ffff00 16.67%, #00ff00 33.33%, #00ffff 50%, #0000ff 66.67%, #ff00ff 83.33%, #ff0000 100%);
+
+            Rectangle {
+                y: 0px;
+                height: parent.height / 2;
+                background: @linear-gradient(180deg, #ffffff 0%, #ffffff00 100%);
+            }
+
+            Rectangle {
+                y: parent.height / 2;
+                height: parent.height / 2;
+                background: @linear-gradient(180deg, #00000000 0%, #000000 100%);
+            }
+
+            Rectangle {
+                x: root.hue * parent.width - 6px;
+                y: (1 - root.lightness) * parent.height - 6px;
+                width: 12px;
+                height: 12px;
+                border-radius: 6px;
+                border-width: 2px;
+                border-color: root.lightness > 0.6 ? root.colors.marker-on-light : root.colors.marker-on-dark;
+                background: transparent;
+            }
+
+            area-touch := TouchArea {
+                function pick() {
+                    root.area-picked(
+                        Math.clamp(self.mouse-x / self.width, 0, 1),
+                        Math.clamp(self.mouse-y / self.height, 0, 1),
+                    );
+                }
+
+                pointer-event(event) => {
+                    if event.kind == PointerEventKind.down && event.button == PointerEventButton.left {
+                        self.pick();
+                    }
+                }
+
+                moved => {
+                    if self.pressed {
+                        self.pick();
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            height: 28px;
+            spacing: 8px;
+
+            Rectangle {
+                width: 28px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: root.colors.border;
+                background: root.current;
+            }
+
+            Rectangle {
+                border-radius: 6px;
+                border-width: 1px;
+                border-color: root.hex-valid ? root.colors.focus : root.colors.invalid;
+                background: root.colors.background;
+
+                hex-text := Text {
+                    x: 8px;
+                    height: parent.height;
+                    text: root.hex;
+                    color: root.colors.text;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+
+                // A fixed caret: typing goes to the field whenever the picker is open.
+                Rectangle {
+                    x: hex-text.x + hex-text.preferred-width + 1px;
+                    y: 6px;
+                    width: 1px;
+                    height: parent.height - 12px;
+                    background: root.colors.text;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            height: 28px;
+            spacing: 8px;
+            alignment: end;
+
+            PopupButton {
+                width: 72px;
+                label: "Cancel";
+                colors: root.colors;
+                clicked => {
+                    root.cancelled();
+                }
+            }
+
+            PopupButton {
+                width: 72px;
+                label: "Done";
+                primary: true;
+                colors: root.colors;
+                clicked => {
+                    root.done();
+                }
+            }
+        }
+    }
+}

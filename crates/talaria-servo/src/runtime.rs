@@ -18,6 +18,7 @@ use talaria_core::{PageRequest, PageRequestKind};
 use url::Url;
 
 use crate::adblocker::ContentBlocker;
+use crate::embedder_controls::{ControlIds, EmbedderControls};
 use crate::exit_clearing::{EngineSwitches, ExitClearing, clear_at_exit};
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
@@ -105,6 +106,8 @@ pub struct ServoRuntime {
     redraw_waker: EventLoopWaker,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
+    // controls
+    control_ids: ControlIds,
     /// The user-origin style sheet every web view shares. Servo's `UserContentManager` holds a
     /// handle to Servo of its own, so this field must stay before `after_engine_cleanup`.
     user_content: Rc<servo::UserContentManager>,
@@ -168,6 +171,7 @@ impl ServoRuntime {
             redraw_waker,
             content_blocker,
             screen_metrics: Rc::default(),
+            control_ids: ControlIds::default(),
             user_content,
             after_engine_cleanup,
             switches,
@@ -197,6 +201,7 @@ impl ServoRuntime {
     ) -> Result<ServoWebView, ServoWebViewError> {
         let initial_url = Url::parse(initial_url)?;
         let frame_ready = FrameReadySignal::default();
+        let controls = EmbedderControls::new(self.control_ids.clone());
         let page_requests = ClosesOnDrop::new(PendingEngineRequests::default());
         let document_start = Rc::new(RefCell::new(DocumentStartTracker::default()));
         let delegate = Rc::new(BrowserDelegate {
@@ -206,6 +211,7 @@ impl ServoRuntime {
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
+            controls: controls.clone(),
             page_requests: page_requests.shared(),
             document_start: Rc::clone(&document_start),
             _after_engine_cleanup: self.after_engine_cleanup.clone(),
@@ -227,6 +233,7 @@ impl ServoRuntime {
             frame_ready,
             tab_id,
             scale_factor,
+            controls,
             page_requests,
             document_start,
         ))
@@ -304,6 +311,10 @@ fn mercury_preferences(runtime_options: &RuntimeOptions) -> Preferences {
     // the embedder for permission (`mediadevices.rs`), so WebRTC must stay disabled until
     // Mercury can gate device access itself.
     preferences.dom_webrtc_enabled = false;
+    // controls: always off. With it on, a page can call `selectFiles()` on a file input and have
+    // Servo accept the paths it names without any file panel (`htmlinputelement.rs`); it exists
+    // for Servo's own tests.
+    preferences.dom_testing_html_input_element_select_files_enabled = false;
     preferences.user_agent = firefox_compatible_user_agent(&preferences.user_agent);
     preferences
 }
@@ -363,6 +374,8 @@ struct BrowserDelegate {
     load_metrics: RefCell<PageLoadMetrics>,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
+    // controls
+    controls: EmbedderControls,
     /// Dialogs, leave prompts, sign-ins and permission prompts waiting for the user; shared with
     /// the tab's `ServoWebView`, which answers them.
     page_requests: Rc<RefCell<PendingEngineRequests<ServoPageRequest>>>,
@@ -377,6 +390,13 @@ impl BrowserDelegate {
         let _send_result = self
             .browser_event_sender
             .send(TabEvent::new(self.tab_id, event));
+    }
+
+    // controls
+    fn drop_controls(&self) {
+        for event in self.controls.drop_all() {
+            self.send_browser_event(event);
+        }
     }
 
     fn record_load_milestone(&self, milestone: LoadMilestone) {
@@ -444,6 +464,8 @@ impl servo::WebViewDelegate for BrowserDelegate {
         }
         match status {
             LoadStatus::Started => {
+                // controls: requests of the page being left are dropped.
+                self.drop_controls();
                 self.load_metrics.borrow_mut().start(Instant::now());
                 info!("tab {}: page load started", self.tab_id.value());
             }
@@ -483,16 +505,35 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn notify_crashed(&self, web_view: servo::WebView, reason: String, _backtrace: Option<String>) {
+        // controls
+        self.drop_controls();
         for event in crash_feedback(reason, web_view.cursor(), web_view.status_text()) {
             self.send_browser_event(event);
         }
     }
 
-    // dialogs
+    // controls, dialogs: simple dialogs are page requests; every other kind is a control.
     fn show_embedder_control(&self, web_view: servo::WebView, control: servo::EmbedderControl) {
-        // Other controls are not handled here: dropped, which gives the engine's default.
-        if let servo::EmbedderControl::SimpleDialog(dialog) = control {
-            self.show_simple_dialog(&web_view, dialog);
+        match control {
+            servo::EmbedderControl::SimpleDialog(dialog) => {
+                self.show_simple_dialog(&web_view, dialog);
+            }
+            control => {
+                if let Some(event) = self.controls.show(control) {
+                    self.send_browser_event(event);
+                }
+            }
+        }
+    }
+
+    // controls: Servo never sends a hide for simple dialogs.
+    fn hide_embedder_control(
+        &self,
+        _web_view: servo::WebView,
+        control_id: servo::EmbedderControlId,
+    ) {
+        if let Some(event) = self.controls.hide(control_id) {
+            self.send_browser_event(event);
         }
     }
 
@@ -835,6 +876,16 @@ mod tests {
                 preferences.get_value(name),
                 defaults.get_value(name),
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn pages_cannot_choose_their_own_upload_files() {
+        for enabled in [true, false] {
+            assert!(
+                !preferences_with_experimental_web_features(enabled)
+                    .dom_testing_html_input_element_select_files_enabled
             );
         }
     }

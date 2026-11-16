@@ -161,8 +161,9 @@ crate = "i-slint-renderer-skia"
 allow = ["LicenseRef-Slint-Royalty-free-2.0"]
 
 # Only in mercury-ui's dev graph, not part of the application: Slint's software renderer, which
-# `examples/render_settings.rs` (the settings window) and `tests/page_request_render.rs` (the
-# dialog components) use to render without a display.
+# `examples/render_settings.rs` (the settings window), `examples/render_controls.rs` (the
+# page-control popups) and `tests/page_request_render.rs` (the dialog components) use to render
+# without a display.
 [[licenses.exceptions]]
 crate = "i-slint-renderer-software"
 allow = ["LicenseRef-Slint-Royalty-free-2.0"]

@@ -10,7 +10,9 @@ use talaria_core::{
     KeyState, KeyboardInput, KeyboardModifiers, TabId,
 };
 use winit::event::{ElementState, Ime, WindowEvent};
-use winit::keyboard::{Key, KeyLocation as WinitKeyLocation, ModifiersState, PhysicalKey};
+use winit::keyboard::{
+    Key, KeyLocation as WinitKeyLocation, ModifiersState, NamedKey, PhysicalKey,
+};
 use winit::window::Theme;
 
 use crate::keyutils;
@@ -36,8 +38,15 @@ pub(crate) fn connect_native_keyboard_input(
             match event {
                 WindowEvent::ModifiersChanged(changed) => {
                     modifiers = changed.state();
+                    // controls: Control-click opens the context menu on macOS.
+                    crate::controls::set_control_key(modifiers.control_key());
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
+                    // controls: an open popup takes the keys; the page keeps its focus.
+                    if crate::controls::handle_key(&window, event, modifiers) {
+                        window.window().request_redraw();
+                        return EventResult::PreventDefault;
+                    }
                     if handle_browser_shortcut(
                         &window,
                         &controller,
@@ -51,6 +60,12 @@ pub(crate) fn connect_native_keyboard_input(
 
                     if web_view_focused.get() {
                         let active_tab_id = controller.borrow().active_tab_id();
+                        if is_activation_key(event) {
+                            crate::activation::note_user_activation(
+                                active_tab_id,
+                                std::time::Instant::now(),
+                            ); // activation (tabs lane)
+                        }
                         let keyboard_input = keyboard_input_from_winit(
                             event,
                             modifiers,
@@ -123,6 +138,28 @@ pub(crate) fn connect_native_keyboard_input(
 
             EventResult::Propagate
         });
+}
+
+/// A key press that counts as a user gesture for the page: not Escape, not a modifier alone.
+/// Browser shortcuts never get here (they are handled before keys are forwarded).
+fn is_activation_key(event: &winit::event::KeyEvent) -> bool {
+    event.state == ElementState::Pressed
+        && !matches!(
+            event.logical_key,
+            Key::Named(
+                NamedKey::Escape
+                    | NamedKey::Shift
+                    | NamedKey::Control
+                    | NamedKey::Alt
+                    | NamedKey::AltGraph
+                    | NamedKey::Super
+                    | NamedKey::Meta
+                    | NamedKey::Hyper
+                    | NamedKey::CapsLock
+                    | NamedKey::Fn
+                    | NamedKey::FnLock
+            )
+        )
 }
 
 pub(crate) fn keyboard_input_from_winit(

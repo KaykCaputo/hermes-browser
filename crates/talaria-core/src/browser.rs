@@ -1,4 +1,7 @@
-use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon, PointerCursor};
+use crate::{
+    ColorScheme, ControlAnswer, ControlId, ControlRect, ControlRequest, DEFAULT_ZOOM_PERCENT,
+    ImeInput, KeyboardInput, PageIcon, PointerCursor,
+};
 use crate::{PageRequest, PageRequestAnswer, PageRequestId};
 
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
@@ -69,6 +72,12 @@ pub enum BrowserCommand {
     ExitFullscreen,
     /// The pointer left the web view, or the tab stopped being shown.
     PointerLeft,
+    // controls
+    /// Answers (or drops) a control the engine asked for; see `BrowserEvent::ControlShown`.
+    AnswerControl {
+        id: ControlId,
+        answer: ControlAnswer,
+    },
     // dialogs
     /// Answers a page request (see `page_request`); `Discard` gives the engine's default.
     AnswerPageRequest {
@@ -135,6 +144,22 @@ pub enum BrowserEvent {
     FullscreenChanged {
         fullscreen: bool,
     },
+    // controls
+    /// The engine asks for a `<select>` popup, a picker or a context menu. It waits for exactly
+    /// one `BrowserCommand::AnswerControl` with this id.
+    ControlShown {
+        id: ControlId,
+        request: ControlRequest,
+    },
+    /// An editable element has focus; the input-method window belongs at `rect`.
+    InputMethodShown {
+        id: ControlId,
+        rect: ControlRect,
+    },
+    /// The engine closed a control or the input method itself; no answer is expected.
+    ControlHidden {
+        id: ControlId,
+    },
     // dialogs
     /// The page asks the user something; see `page_request`.
     PageRequested(PageRequest),
@@ -164,6 +189,9 @@ pub struct BrowserState {
     cursor: PointerCursor,
     status_text: Option<String>,
     fullscreen: bool,
+    // controls
+    pending_control: Option<(ControlId, ControlRequest)>,
+    input_method: Option<(ControlId, ControlRect)>,
 }
 
 impl Default for BrowserState {
@@ -179,6 +207,8 @@ impl Default for BrowserState {
             cursor: PointerCursor::Default,
             status_text: None,
             fullscreen: false,
+            pending_control: None,
+            input_method: None,
         }
     }
 }
@@ -220,6 +250,27 @@ impl BrowserState {
         self.zoom_percent = percent;
     }
 
+    /// The control waiting for the user's answer, if any.
+    pub fn pending_control(&self) -> Option<(ControlId, &ControlRequest)> {
+        self.pending_control
+            .as_ref()
+            .map(|(id, request)| (*id, request))
+    }
+
+    /// Where the focused editable element is, while the input method is active.
+    pub fn input_method(&self) -> Option<ControlRect> {
+        self.input_method.map(|(_, rect)| rect)
+    }
+
+    pub(crate) fn forget_controls(&mut self) {
+        self.pending_control = None;
+        self.input_method = None;
+    }
+
+    pub(crate) fn take_pending_control(&mut self) -> Option<ControlId> {
+        self.pending_control.take().map(|(id, _)| id)
+    }
+
     pub fn apply(&mut self, event: BrowserEvent) {
         match event {
             BrowserEvent::AddressChanged { url } => {
@@ -249,6 +300,9 @@ impl BrowserState {
                     // web view still caches its old cursor and reports it again.
                     self.fullscreen = false;
                     self.status_text = None;
+                    // The engine dropped every request of the crashed page.
+                    self.pending_control = None;
+                    self.input_method = None;
                 }
                 self.load_state = state;
             }
@@ -267,6 +321,27 @@ impl BrowserState {
             }
             BrowserEvent::FullscreenChanged { fullscreen } => {
                 self.fullscreen = fullscreen;
+            }
+            BrowserEvent::ControlShown { id, request } => {
+                self.pending_control = Some((id, request));
+            }
+            BrowserEvent::InputMethodShown { id, rect } => {
+                self.input_method = Some((id, rect));
+            }
+            BrowserEvent::ControlHidden { id } => {
+                if self
+                    .pending_control
+                    .as_ref()
+                    .is_some_and(|(pending_id, _)| *pending_id == id)
+                {
+                    self.pending_control = None;
+                }
+                if self
+                    .input_method
+                    .is_some_and(|(input_method_id, _)| input_method_id == id)
+                {
+                    self.input_method = None;
+                }
             }
             // dialogs: kept by the tab's page requests, not here.
             BrowserEvent::PageRequested(_) | BrowserEvent::PageLoadStarted => {}

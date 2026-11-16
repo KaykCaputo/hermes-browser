@@ -5,6 +5,8 @@ export { ChromePalette, ChromeTheme } from "theme/chrome-palette.slint";
 import { SettingsNotice } from "settings/settings-notice.slint";
 export { SearchEngineRow, SettingsWindow } from "settings/settings-window.slint";
 import { PageRequestSheet, PageRequestStyle, PageRequestView, PermissionPrompt } from "dialogs/page-requests.slint";
+// controls
+import { ColorPicker, ContextMenuPopup, ContextMenuRow, PopupBackdrop, SelectPopup, SelectPopupRow } from "controls/controls.slint";
 
 export enum WebViewPointerButton {
     left,
@@ -232,6 +234,51 @@ export component MainWindow inherits Window {
     callback go-home();
     callback dismiss-settings-notice();
     // --- end settings-ui ---
+
+    // --- controls ---
+    // Where the page area is in the window, for placing popups over page elements.
+    out property <length> controls-page-x: web-view-area.absolute-position.x;
+    out property <length> controls-page-y: web-view-area.absolute-position.y;
+    // 0: none, 1: select list, 2: colour picker, 3: context menu.
+    in property <int> controls-popup: 0;
+    in property <length> controls-popup-x;
+    in property <length> controls-popup-y;
+    in property <length> controls-popup-width;
+    in property <length> controls-popup-height;
+    in property <string> controls-origin;
+    in property <int> controls-highlighted: -1;
+    in property <[SelectPopupRow]> controls-select-rows;
+    in property <bool> controls-select-multiple;
+    in-out property <length> controls-select-scroll-y;
+    in property <[ContextMenuRow]> controls-menu-rows;
+    in property <[color]> controls-color-swatches;
+    in property <color> controls-color;
+    in property <string> controls-color-hex;
+    in property <bool> controls-color-hex-valid: true;
+    in property <float> controls-color-hue;
+    in property <float> controls-color-lightness;
+    callback controls-dismissed();
+    callback controls-row-clicked(int);
+    callback controls-row-hovered(int);
+    callback controls-select-done();
+    callback controls-color-swatch-picked(int);
+    callback controls-color-area-picked(float, float);
+    callback controls-color-done();
+    // The page area moved or was resized.
+    callback controls-page-changed();
+    changed controls-page-x => {
+        root.controls-page-changed();
+    }
+    changed controls-page-y => {
+        root.controls-page-changed();
+    }
+    changed web-view-width => {
+        root.controls-page-changed();
+    }
+    changed web-view-height => {
+        root.controls-page-changed();
+    }
+    // --- end controls ---
 
     pure function mouse-cursor-for(cursor: WebViewCursor) -> MouseCursor {
         if cursor == WebViewCursor.none {
@@ -781,6 +828,78 @@ export component MainWindow inherits Window {
                     root.page-request-answered(id, accepted, "", "", false);
                 }
             }
+        }
+    }
+
+    // controls
+    if root.controls-popup != 0: PopupBackdrop {
+        dismissed => {
+            root.controls-dismissed();
+        }
+    }
+
+    // controls
+    if root.controls-popup == 1: SelectPopup {
+        x: root.controls-popup-x;
+        y: root.controls-popup-y;
+        width: root.controls-popup-width;
+        height: root.controls-popup-height;
+        rows: root.controls-select-rows;
+        highlighted: root.controls-highlighted;
+        multiple: root.controls-select-multiple;
+        origin: root.controls-origin;
+        scroll-y <=> root.controls-select-scroll-y;
+        row-clicked(index) => {
+            root.controls-row-clicked(index);
+        }
+        row-hovered(index) => {
+            root.controls-row-hovered(index);
+        }
+        done => {
+            root.controls-select-done();
+        }
+    }
+
+    // controls
+    if root.controls-popup == 2: ColorPicker {
+        x: root.controls-popup-x;
+        y: root.controls-popup-y;
+        width: root.controls-popup-width;
+        height: root.controls-popup-height;
+        origin: root.controls-origin;
+        swatches: root.controls-color-swatches;
+        current: root.controls-color;
+        hex: root.controls-color-hex;
+        hex-valid: root.controls-color-hex-valid;
+        hue: root.controls-color-hue;
+        lightness: root.controls-color-lightness;
+        swatch-picked(index) => {
+            root.controls-color-swatch-picked(index);
+        }
+        area-picked(hue, lightness) => {
+            root.controls-color-area-picked(hue, lightness);
+        }
+        done => {
+            root.controls-color-done();
+        }
+        cancelled => {
+            root.controls-dismissed();
+        }
+    }
+
+    // controls
+    if root.controls-popup == 3: ContextMenuPopup {
+        x: root.controls-popup-x;
+        y: root.controls-popup-y;
+        width: root.controls-popup-width;
+        height: root.controls-popup-height;
+        rows: root.controls-menu-rows;
+        highlighted: root.controls-highlighted;
+        row-clicked(index) => {
+            root.controls-row-clicked(index);
+        }
+        row-hovered(index) => {
+            root.controls-row-hovered(index);
         }
     }
 }

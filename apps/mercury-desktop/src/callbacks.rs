@@ -131,11 +131,16 @@ pub(crate) fn connect_ui_callbacks(
         } else {
             PointerButtonAction::Up
         };
+        let tab_id = pointer_button_controller.borrow().active_tab_id();
+        if is_activation_press(action) {
+            crate::activation::note_user_activation(tab_id, std::time::Instant::now()); // activation (tabs lane)
+        }
         pointer_button_controller
             .borrow_mut()
             .queue_command(BrowserCommand::PointerButton {
                 action,
-                button: pointer_button_from_ui(button),
+                // controls: a macOS Control-click becomes a secondary click.
+                button: crate::controls::pointer_button(pointer_button_from_ui(button), action),
                 x,
                 y,
             });
@@ -185,4 +190,37 @@ pub(crate) fn connect_ui_callbacks(
             window.window().request_redraw();
         }
     });
+}
+
+/// Only a press counts as a gesture (HTML's activation-triggering events are `mousedown` and
+/// `pointerdown`), so one click is one activation.
+fn is_activation_press(action: PointerButtonAction) -> bool {
+    action == PointerButtonAction::Down
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use talaria_core::TabId;
+
+    use super::*;
+    use crate::activation::{consume_user_activation, note_user_activation};
+
+    /// The page's `mousedown` handler uses the press's activation; the release must not give
+    /// its `click` handler another one.
+    #[test]
+    fn one_click_is_one_activation() {
+        let tab = TabId::new(77);
+        let now = Instant::now();
+        let mut consumed = Vec::new();
+        for action in [PointerButtonAction::Down, PointerButtonAction::Up] {
+            if is_activation_press(action) {
+                note_user_activation(tab, now);
+            }
+            consumed.push(consume_user_activation(tab, now));
+        }
+
+        assert_eq!(consumed, vec![true, false]);
+    }
 }

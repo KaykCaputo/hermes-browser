@@ -1,0 +1,79 @@
+import { PopupColors, PopupStyle } from "page-popup.slint";
+
+export struct ContextMenuRow {
+    label: string,
+    enabled: bool,
+    separator: bool,
+}
+
+// The page context menu. Items are 26 px, separators 9 px, with 4 px above and below the list,
+// mirrored in `apps/mercury-desktop/src/controls/context_menu.rs` and `controls/mod.rs`.
+export component ContextMenuPopup inherits Rectangle {
+    in property <[ContextMenuRow]> rows;
+    in property <int> highlighted: -1;
+    callback row-clicked(int);
+    callback row-hovered(int);
+
+    property <PopupColors> colors: PopupStyle.colors;
+
+    background: root.colors.background;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.colors.border;
+    drop-shadow-blur: 14px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: root.colors.shadow;
+    clip: true;
+
+    VerticalLayout {
+        padding-top: 4px;
+        padding-bottom: 4px;
+        spacing: 0px;
+
+        for row[index] in root.rows: Rectangle {
+            height: row.separator ? 9px : 26px;
+
+            if row.separator: Rectangle {
+                x: 10px;
+                y: 4px;
+                width: parent.width - 20px;
+                height: 1px;
+                background: root.colors.separator;
+            }
+
+            if !row.separator: Rectangle {
+                x: 4px;
+                width: parent.width - 8px;
+                border-radius: 5px;
+                background: row.enabled && index == root.highlighted ? root.colors.highlight : transparent;
+
+                Text {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    height: parent.height;
+                    text: row.label;
+                    color: !row.enabled
+                        ? root.colors.disabled
+                        : index == root.highlighted ? root.colors.highlight-text : root.colors.text;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+
+            TouchArea {
+                enabled: !row.separator;
+
+                changed has-hover => {
+                    if self.has-hover {
+                        root.row-hovered(index);
+                    }
+                }
+
+                clicked => {
+                    root.row-clicked(index);
+                }
+            }
+        }
+    }
+}

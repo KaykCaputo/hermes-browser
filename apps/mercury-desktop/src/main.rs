@@ -15,8 +15,12 @@ use talaria_core::{BrowserController, TabActivation};
 use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
+// activation (tabs lane)
+mod activation;
 mod callbacks;
 mod cli;
+// controls
+mod controls;
 mod crash_handler;
 mod engine;
 mod keyboard;
@@ -133,6 +137,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&web_view_focused),
     );
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
+    // controls
+    controls::connect_controls(&window, Rc::clone(&controller));
 
     let screenshot_result = Rc::new(Cell::new(ScreenshotResult::Pending));
     let screenshot_timer = options.screenshot.map(|screenshot| {
