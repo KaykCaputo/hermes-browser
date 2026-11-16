@@ -58,8 +58,13 @@ ignore = [
     { id = "RUSTSEC-2026-0459", reason = "libsqlite3-sys 0.36 (links = sqlite3) is pinned by Servo's rusqlite 0.38; mercury-import opens copied third-party databases with their -wal, the advisory's scenario; fix needs a Servo upgrade or a patched libsqlite3-sys" },
 ]
 
-# Every workspace crate declares `publish = false`, so path dependencies between them are not
-# wildcards; any other wildcard version requirement is refused.
+[bans]
+# Servo's and Slint's graphs carry many duplicate versions (two wgpu majors,
+# for one); that is expected, not news.
+multiple-versions = "allow"
+# A `*` version requirement in our own manifests is refused. Every workspace
+# crate declares `publish = false`, so the path dependencies between them do
+# not count as wildcards.
 wildcards = "deny"
 # Path dependencies in crates with `publish = false` are not wildcards.
 allow-wildcard-paths = true
