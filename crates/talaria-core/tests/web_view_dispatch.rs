@@ -1,6 +1,7 @@
 use talaria_core::{
-    BrowserCommand, ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput,
-    KeyboardModifiers, PointerButton, PointerButtonAction, WebView, dispatch_command,
+    BrowserCommand, ClipboardCommand, ColorScheme, CompositionState, ImeInput, KeyLocation,
+    KeyState, KeyboardInput, KeyboardModifiers, PointerButton, PointerButtonAction, WebView,
+    dispatch_command,
 };
 
 #[derive(Debug, PartialEq)]
@@ -37,6 +38,7 @@ enum FakeCall {
         x: f32,
         y: f32,
     },
+    Clipboard(ClipboardCommand),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -142,6 +144,10 @@ impl WebView for FakeWebView {
 
     fn pointer_left(&mut self) -> Result<(), Self::Error> {
         self.record(FakeCall::PointerLeft)
+    }
+
+    fn clipboard(&mut self, command: ClipboardCommand) -> Result<(), Self::Error> {
+        self.record(FakeCall::Clipboard(command))
     }
 }
 
@@ -389,4 +395,20 @@ fn pointer_left_command_calls_pointer_left() {
 
     assert_eq!(result, Ok(()));
     assert_eq!(web_view.calls, vec![FakeCall::PointerLeft]);
+}
+
+#[test]
+fn clipboard_commands_reach_the_page_editing() {
+    for command in [
+        ClipboardCommand::Cut,
+        ClipboardCommand::Copy,
+        ClipboardCommand::Paste,
+    ] {
+        let mut web_view = FakeWebView::default();
+
+        let result = dispatch_command(&mut web_view, BrowserCommand::Clipboard(command));
+
+        assert_eq!(result, Ok(()));
+        assert_eq!(web_view.calls, vec![FakeCall::Clipboard(command)]);
+    }
 }

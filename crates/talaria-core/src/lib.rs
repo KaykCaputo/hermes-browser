@@ -15,7 +15,8 @@ pub use browser::{
 pub use controller::BrowserController;
 pub use cursor::{ColorScheme, PointerCursor};
 pub use input::{
-    CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, KeyboardModifiers,
+    ClipboardCommand, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput,
+    KeyboardModifiers,
 };
 pub use page_icon::PageIcon;
 pub use tab::{Tab, TabActivation, TabCommand, TabEvent, TabId};

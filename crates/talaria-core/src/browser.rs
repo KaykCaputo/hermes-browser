@@ -1,4 +1,7 @@
-use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon, PointerCursor};
+use crate::{
+    ClipboardCommand, ColorScheme, DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon,
+    PointerCursor,
+};
 
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
 const INITIAL_ADDRESS: &str = "";
@@ -68,6 +71,9 @@ pub enum BrowserCommand {
     ExitFullscreen,
     /// The pointer left the web view, or the tab stopped being shown.
     PointerLeft,
+    // menus
+    /// Cut, Copy or Paste chosen in the Edit menu while the page has focus.
+    Clipboard(ClipboardCommand),
 }
 
 impl BrowserCommand {

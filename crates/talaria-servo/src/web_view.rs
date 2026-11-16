@@ -3,15 +3,15 @@ use std::cell::Cell;
 use dpi::PhysicalSize;
 use euclid::{Point2D, Scale};
 use servo::{
-    Code, CompositionEvent as ServoCompositionEvent, CompositionState as ServoCompositionState,
-    DevicePoint, ImeEvent as ServoImeEvent, InputEvent, Key, KeyState as ServoKeyState,
-    KeyboardEvent as ServoKeyboardEvent, Location, Modifiers,
+    ClipboardAction, Code, CompositionEvent as ServoCompositionEvent,
+    CompositionState as ServoCompositionState, DevicePoint, ImeEvent as ServoImeEvent, InputEvent,
+    Key, KeyState as ServoKeyState, KeyboardEvent as ServoKeyboardEvent, Location, Modifiers,
     MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseLeftViewportEvent,
     MouseMoveEvent, NamedKey, Theme, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use talaria_core::{
-    ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
-    PointerButtonAction, TabId, WebView as TalariaWebView,
+    ClipboardCommand, ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState,
+    KeyboardInput, PointerButton, PointerButtonAction, TabId, WebView as TalariaWebView,
 };
 use url::Url;
 
@@ -209,6 +209,23 @@ impl TalariaWebView for ServoWebView {
         ));
         Ok(())
     }
+
+    // menus
+    fn clipboard(&mut self, command: ClipboardCommand) -> Result<(), Self::Error> {
+        let _event_id = self
+            .inner
+            .notify_input_event(InputEvent::EditingAction(servo_clipboard_action(command)));
+        Ok(())
+    }
+}
+
+/// The same editing Servo performs for Cmd/Ctrl+X, C and V in the page.
+fn servo_clipboard_action(command: ClipboardCommand) -> ClipboardAction {
+    match command {
+        ClipboardCommand::Cut => ClipboardAction::Cut,
+        ClipboardCommand::Copy => ClipboardAction::Copy,
+        ClipboardCommand::Paste => ClipboardAction::Paste,
+    }
 }
 
 fn servo_theme(scheme: ColorScheme) -> Theme {
@@ -307,6 +324,22 @@ fn servo_mouse_button(button: PointerButton) -> servo::MouseButton {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_commands_become_servo_editing_actions() {
+        assert_eq!(
+            servo_clipboard_action(ClipboardCommand::Cut),
+            ClipboardAction::Cut
+        );
+        assert_eq!(
+            servo_clipboard_action(ClipboardCommand::Copy),
+            ClipboardAction::Copy
+        );
+        assert_eq!(
+            servo_clipboard_action(ClipboardCommand::Paste),
+            ClipboardAction::Paste
+        );
+    }
 
     #[test]
     fn logical_coordinates_become_device_coordinates() {
