@@ -6,14 +6,19 @@ edition.workspace = true
 license.workspace = true
 build = "build.rs"
 
+[features]
+# Names the elements in the generated code, so tests can find them through Slint's testing
+# backend. Only for tests: it also turns off one of Slint's optimisations for the whole UI.
+test-support = []
+
 [dependencies]
 slint.workspace = true
 
-[build-dependencies]
-slint-build.workspace = true
-
-# menus lane: renders the browser menu and the About window headless (tests/render_menus.rs).
-# Slint's software renderer is already in Cargo.lock; tests only.
+# Only for `examples/render_settings.rs` and `tests/render_menus.rs`, which render the settings
+# window, the browser menu and the About window without a display.
 [dev-dependencies]
 image.workspace = true
 slint = { workspace = true, features = ["renderer-software"] }
+
+[build-dependencies]
+slint-build.workspace = true

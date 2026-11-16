@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::exit_clearing::{EngineSwitches, ExitClearing, remove_site_data_files};
+
 /// Servo's HTTP-authentication cache: user names and passwords, in plain text.
 const SAVED_CREDENTIALS_FILE: &str = "auth_cache.json";
 /// Servo's saved cookies.
@@ -47,7 +49,7 @@ pub(crate) fn end_session_cookies(servo: &servo::Servo) {
 }
 
 /// Runs `work`, turning a panic into an error log. Returns whether it completed.
-fn run_contained(what: &str, work: impl FnOnce()) -> bool {
+pub(crate) fn run_contained(what: &str, work: impl FnOnce()) -> bool {
     match std::panic::catch_unwind(AssertUnwindSafe(work)) {
         Ok(()) => true,
         Err(_) => {
@@ -178,7 +180,13 @@ fn write_privately_and_atomically(path: &Path, value: &Value) -> std::io::Result
 /// Clean-up before the engine is built: the previous run may have been killed, or ended by the
 /// shutdown watchdog, before it could end its session; its session cookies and credentials
 /// must not come back.
-pub(crate) fn clean_up_before_engine_start(config_dir: &Path) {
+///
+/// If the user asked for cookies and site data to be cleared at quit, they are removed here too,
+/// in case that quit never ran its clean-up.
+pub(crate) fn clean_up_before_engine_start(config_dir: &Path, clearing: ExitClearing) {
+    if clearing.cookies_and_site_data {
+        remove_site_data_files(config_dir);
+    }
     strip_session_cookies_from_saved_jar(config_dir);
     remove_saved_credentials(config_dir);
 }
@@ -187,18 +195,29 @@ pub(crate) fn clean_up_before_engine_start(config_dir: &Path) {
 /// cookies from the saved jar and deletes the saved HTTP credentials. Every holder of a Servo
 /// handle also holds one of these, dropped after its handle, so the last one goes after Servo
 /// has shut down — the point after which nothing can write the files again.
+///
+/// If the user asked for cookies and site data to be cleared at quit (read from `switches` at
+/// this moment, so the last choice counts), their files are removed here, when no engine can
+/// write them again.
 pub(crate) struct AfterEngineCleanup {
     config_dir: PathBuf,
+    switches: EngineSwitches,
 }
 
 impl AfterEngineCleanup {
-    pub(crate) fn new(config_dir: PathBuf) -> Self {
-        Self { config_dir }
+    pub(crate) fn new(config_dir: PathBuf, switches: EngineSwitches) -> Self {
+        Self {
+            config_dir,
+            switches,
+        }
     }
 }
 
 impl Drop for AfterEngineCleanup {
     fn drop(&mut self) {
+        if self.switches.clear_on_exit().cookies_and_site_data {
+            remove_site_data_files(&self.config_dir);
+        }
         strip_session_cookies_from_saved_jar(&self.config_dir);
         remove_saved_credentials(&self.config_dir);
     }
@@ -470,7 +489,10 @@ mod tests {
     fn the_cleanup_strips_the_jar_and_removes_the_credentials_when_dropped() {
         let directory = jar_directory("cleanup", FIXTURE_JAR);
 
-        drop(AfterEngineCleanup::new(directory.clone()));
+        drop(AfterEngineCleanup::new(
+            directory.clone(),
+            EngineSwitches::default(),
+        ));
         let saved = std::fs::read_to_string(directory.join(COOKIE_JAR_FILE)).expect("the jar");
         let leftovers = remaining_files(&directory);
         let _ = std::fs::remove_dir_all(&directory);
@@ -484,7 +506,7 @@ mod tests {
     fn before_the_engine_starts_session_cookies_and_credentials_are_removed() {
         let directory = jar_directory("before-start", FIXTURE_JAR);
 
-        clean_up_before_engine_start(&directory);
+        clean_up_before_engine_start(&directory, ExitClearing::default());
         let saved = std::fs::read_to_string(directory.join(COOKIE_JAR_FILE)).expect("the jar");
         let leftovers = remaining_files(&directory);
         let _ = std::fs::remove_dir_all(&directory);
@@ -520,7 +542,7 @@ mod tests {
     #[test]
     fn the_remover_deletes_the_credentials_when_dropped() {
         let directory = config_dir_with_files("drop");
-        let remover = AfterEngineCleanup::new(directory.clone());
+        let remover = AfterEngineCleanup::new(directory.clone(), EngineSwitches::default());
 
         let present_before = directory.join(SAVED_CREDENTIALS_FILE).exists();
         drop(remover);
@@ -529,5 +551,48 @@ mod tests {
 
         assert!(present_before);
         assert!(!present_after);
+    }
+
+    const CLEAR_SITE_DATA: ExitClearing = ExitClearing {
+        cookies_and_site_data: true,
+        cache: false,
+    };
+
+    #[test]
+    fn site_data_is_cleared_at_start_when_asked_in_case_the_last_quit_did_not() {
+        let directory = crate::exit_clearing::tests::servo_directory_with_site_data();
+
+        clean_up_before_engine_start(directory.path(), CLEAR_SITE_DATA);
+
+        assert_eq!(
+            crate::exit_clearing::tests::remaining(directory.path()),
+            vec!["hsts_list.json"]
+        );
+    }
+
+    #[test]
+    fn site_data_is_kept_at_start_when_not_asked() {
+        let directory = crate::exit_clearing::tests::servo_directory_with_site_data();
+
+        clean_up_before_engine_start(directory.path(), ExitClearing::default());
+
+        let left = crate::exit_clearing::tests::remaining(directory.path());
+        assert!(left.contains(&"clientstorage/default_v1/reg.sqlite".to_owned()));
+        assert!(left.contains(&"cookie_jar.json".to_owned()));
+    }
+
+    #[test]
+    fn after_the_engine_the_last_choice_decides_what_is_removed() {
+        let directory = crate::exit_clearing::tests::servo_directory_with_site_data();
+        let switches = EngineSwitches::default();
+        let cleanup = AfterEngineCleanup::new(directory.path().to_owned(), switches.clone());
+
+        switches.set_clear_on_exit(CLEAR_SITE_DATA);
+        drop(cleanup);
+
+        assert_eq!(
+            crate::exit_clearing::tests::remaining(directory.path()),
+            vec!["hsts_list.json"]
+        );
     }
 }
