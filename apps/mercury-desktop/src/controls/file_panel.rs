@@ -39,9 +39,13 @@ pub(crate) struct FileSheet {
 
 #[cfg(target_os = "macos")]
 impl FileSheet {
-    /// Closes the sheet; its completion handler then reports no files.
+    /// Closes the sheet if it is still attached; its completion handler then reports no files.
+    /// After the user chose or cancelled, the handler has already run and cleared the flag, so
+    /// a panel that is no longer attached is left alone.
     pub(crate) fn end(&self) {
-        self.window.endSheet(&self.panel);
+        if sheet_attached() {
+            self.window.endSheet(&self.panel);
+        }
     }
 }
 

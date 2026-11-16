@@ -422,7 +422,12 @@ impl Controls {
     fn files_chosen(&self, tab_id: TabId, id: ControlId, paths: Vec<PathBuf>) {
         let still_shown = {
             let state = self.state.borrow();
-            state.shown == Some((tab_id, id)) && matches!(state.popup, Popup::File { .. })
+            let Popup::File { sheet } = &state.popup else {
+                return;
+            };
+            // The sheet has closed: nothing is left to end.
+            sheet.borrow_mut().take();
+            state.shown == Some((tab_id, id))
         };
         if still_shown {
             self.finish(ControlAnswer::Files(paths), None);

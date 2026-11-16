@@ -245,7 +245,8 @@ fn element_urls(info: &ContextMenuElementInformation) -> (Option<String>, Option
     )
 }
 
-/// A label the page wrote, for showing in browser UI: control characters become spaces and
+/// A label the page wrote, for showing in browser UI: control characters and line or paragraph
+/// separators become spaces and
 /// bidirectional formatting characters are removed, so a label cannot reorder or break the text
 /// around it.
 fn page_label(label: &str) -> String {
@@ -253,7 +254,8 @@ fn page_label(label: &str) -> String {
         .chars()
         .filter(|character| !is_bidi_control(*character))
         .map(|character| {
-            if character.is_control() {
+            // U+2028 and U+2029 are line and paragraph separators, not control characters.
+            if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}') {
                 ' '
             } else {
                 character
@@ -441,6 +443,7 @@ mod tests {
             "paygpj.exe x"
         );
         assert_eq!(page_label("Ünïcödé ✓"), "Ünïcödé ✓");
+        assert_eq!(page_label("one\u{2028}two\u{2029}three"), "one two three");
     }
 
     #[test]
