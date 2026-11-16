@@ -112,6 +112,19 @@ impl ProfileData {
         );
     }
 
+    /// Records where the finished file really is, when the transfer published it under another
+    /// name than the one inserted. No reply; a failure is logged.
+    pub(crate) fn set_download_target_path(&self, guid: String, target_path: String) {
+        self.submit(
+            Area::Downloads,
+            "recording a download's file name",
+            move |db, _| {
+                let id = db.download_id(&guid)?;
+                db.store().set_download_target_path(id, &target_path)
+            },
+        );
+    }
+
     /// Marks a download complete, cancelled or interrupted, at the service's current time.
     pub(crate) fn finish_download(
         &self,

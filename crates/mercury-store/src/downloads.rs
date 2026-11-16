@@ -198,6 +198,25 @@ impl Store {
         Ok(())
     }
 
+    /// Stores where the finished file really is, in any state: the transfer may publish it under
+    /// another name than the one recorded at the start if that name was taken meanwhile. A path
+    /// longer than [`MAX_PATH_BYTES`](crate::MAX_PATH_BYTES) is refused.
+    pub fn set_download_target_path(
+        &mut self,
+        id: DownloadRecordId,
+        target_path: &str,
+    ) -> Result<()> {
+        check_path(target_path)?;
+        let changed = self
+            .conn
+            .prepare_cached("UPDATE downloads SET target_path = ?2 WHERE id = ?1")?
+            .execute(params![id.0, target_path])?;
+        if changed == 0 {
+            return Err(StoreError::NotFound);
+        }
+        Ok(())
+    }
+
     /// Marks a download in progress complete, cancelled or interrupted, or cancels an
     /// interrupted one (see the table on [`DownloadState`]). `state` must not be
     /// [`DownloadState::InProgress`]. Any other transition leaves the record unchanged and

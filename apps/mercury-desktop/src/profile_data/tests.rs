@@ -1350,3 +1350,18 @@ fn import_benchmark_100k_visits() {
         );
     }
 }
+
+// downloads-ui lane
+#[test]
+fn a_download_published_under_another_name_records_that_name() {
+    let harness = Harness::new();
+    let guid = new_guid().unwrap();
+    harness
+        .data
+        .insert_download(download(&guid), |result| result.unwrap());
+    harness
+        .data
+        .set_download_target_path(guid.clone(), "/downloads/f (1).zip".into());
+    let records = harness.ask(|data, reply| data.downloads(5, reply)).unwrap();
+    assert_eq!(records[0].target_path, "/downloads/f (1).zip");
+}

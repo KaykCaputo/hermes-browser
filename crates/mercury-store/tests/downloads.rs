@@ -404,3 +404,32 @@ fn an_interrupted_download_can_be_cancelled_but_not_completed() {
         Err(StoreError::InvalidState(_))
     ));
 }
+
+#[test]
+fn the_finished_file_can_be_recorded_under_another_name() {
+    use mercury_store::MAX_PATH_BYTES;
+    let mut store = Store::open_in_memory().unwrap();
+    let id = store.insert_download(&new("d-1", NOW)).unwrap();
+    store
+        .set_download_target_path(id, "/Users/me/Downloads/file (1).zip")
+        .unwrap();
+    assert_eq!(
+        find(&store, id).target_path,
+        "/Users/me/Downloads/file (1).zip"
+    );
+
+    // Too long a path is refused and changes nothing; an unknown record is not found.
+    let long_path = format!("/tmp/{}", "p".repeat(MAX_PATH_BYTES));
+    assert!(matches!(
+        store.set_download_target_path(id, &long_path),
+        Err(StoreError::InvalidArgument(_))
+    ));
+    assert_eq!(
+        find(&store, id).target_path,
+        "/Users/me/Downloads/file (1).zip"
+    );
+    assert!(matches!(
+        store.set_download_target_path(DownloadRecordId(999), "/tmp/x"),
+        Err(StoreError::NotFound)
+    ));
+}
