@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use super::jobs::{Background, Step, Upkeep};
 use super::{
-    Area, Clock, Database, Delivery, Job, Message, Payload, ProfileDataError, REFRESH_BATCH,
-    Timing, Wake,
+    Area, Change, Clock, Database, Delivery, Job, Message, Payload, ProfileDataError,
+    REFRESH_BATCH, Timing, Wake,
 };
 
 /// How long the thread sleeps when it has nothing scheduled (it still wakes for any message).
@@ -35,6 +35,9 @@ pub(super) struct Worker {
     last_request: Instant,
     /// When the last upkeep pass started.
     last_upkeep: Instant,
+    /// When the last `History` notification went out, and the one held back since.
+    history_sent: Option<Instant>,
+    history_held: Option<Change>,
 }
 
 impl Worker {
@@ -57,6 +60,8 @@ impl Worker {
             background: VecDeque::new(),
             last_request: Instant::now(),
             last_upkeep: Instant::now(),
+            history_sent: None,
+            history_held: None,
         }
     }
 
@@ -98,6 +103,7 @@ impl Worker {
                 Some(Message::Shutdown) => break,
                 None => {
                     self.flush_due_titles();
+                    self.flush_due_history();
                     if !self.background.is_empty() {
                         self.step_next_job();
                     } else if self.upkeep_is_due() {
@@ -124,8 +130,14 @@ impl Worker {
             (self.last_request + self.timing.idle_before_upkeep)
                 .max(self.last_upkeep + self.timing.upkeep_interval)
         });
+        let history = self
+            .history_held
+            .as_ref()
+            .and(self.history_sent)
+            .map(|sent| sent + self.timing.history_notify_interval);
         titles
             .chain(upkeep)
+            .chain(history)
             .min()
             .map_or(NOTHING_SCHEDULED, |at| at.saturating_duration_since(now))
     }
@@ -148,6 +160,7 @@ impl Worker {
                 refreshed: 0,
             }),
             wrote: false,
+            change: None,
         });
     }
 
@@ -155,6 +168,43 @@ impl Worker {
         if self.deliveries.send(delivery).is_ok() && !self.wake_pending.swap(true, Ordering::AcqRel)
         {
             (self.wake)();
+        }
+    }
+
+    /// Tells listeners about a change: at once, except that `History` changes go out at most
+    /// once per interval (the ones in between are merged and held).
+    fn notify(&mut self, change: Change) {
+        if change.area != Area::History {
+            self.deliver(Delivery::Changed(change));
+            return;
+        }
+        match &mut self.history_held {
+            Some(held) => held.merge(change),
+            None => self.history_held = Some(change),
+        }
+        self.flush_due_history();
+    }
+
+    fn flush_due_history(&mut self) {
+        let due = self
+            .history_sent
+            .is_none_or(|sent| sent.elapsed() >= self.timing.history_notify_interval);
+        if due && let Some(change) = self.history_held.take() {
+            self.history_sent = Some(Instant::now());
+            self.deliver(Delivery::Changed(change));
+        }
+    }
+
+    /// What the job that just ran changed: the hints it noted, or its area with none.
+    fn take_changes(&mut self, area: Option<Area>, wrote: bool) -> Vec<Change> {
+        let noted = match &mut self.database {
+            Ok(database) => std::mem::take(&mut database.changes),
+            Err(_) => Vec::new(),
+        };
+        match (wrote, area) {
+            (false, _) | (true, None) => Vec::new(),
+            (true, Some(area)) if noted.is_empty() => vec![Change::any(area)],
+            (true, Some(_)) => noted,
         }
     }
 
@@ -175,11 +225,12 @@ impl Worker {
                 if let (Some(id), Some(payload)) = (reply_to, outcome.reply) {
                     self.deliver(Delivery::Reply { id, payload });
                 }
-                if let (true, Some(area)) = (outcome.wrote, area) {
-                    self.deliver(Delivery::Changed(area));
+                for change in self.take_changes(area, outcome.wrote) {
+                    self.notify(change);
                 }
             }
             Err(_) => {
+                self.take_changes(None, false);
                 log::error!("a profile data request panicked; it is answered as unavailable");
                 if let (Some(id), Some(fail)) = (reply_to, fail) {
                     let payload = fail(unexpected());
@@ -213,6 +264,7 @@ impl Worker {
         match catch_unwind(AssertUnwindSafe(|| job.steps.step(database, now))) {
             Ok(Step::Continue { progress, wrote }) => {
                 job.wrote |= wrote;
+                self.collect_job_changes(&mut job, wrote);
                 if let (Some(id), Some(payload)) = (job.id, progress) {
                     self.deliver(Delivery::Progress { id, payload });
                 }
@@ -220,9 +272,11 @@ impl Worker {
             }
             Ok(Step::Finished { summary, wrote }) => {
                 job.wrote |= wrote;
+                self.collect_job_changes(&mut job, wrote);
                 self.end_job(job, summary);
             }
             Err(_) => {
+                self.take_changes(None, false);
                 log::error!("a profile data job panicked: {}", job.steps.describe());
                 let summary = job.steps.failed(unexpected());
                 self.end_job(job, summary);
@@ -230,7 +284,18 @@ impl Worker {
         }
     }
 
-    fn end_job(&self, job: Background, summary: Payload) {
+    /// Adds what a job's chunk changed to the job's one notification.
+    fn collect_job_changes(&mut self, job: &mut Background, wrote: bool) {
+        for change in self.take_changes(job.area, wrote) {
+            match &mut job.change {
+                Some(merged) => merged.merge(change),
+                None => job.change = Some(change),
+            }
+        }
+    }
+
+    /// Delivers a job's summary, then its change notification if a chunk wrote.
+    fn end_job(&mut self, job: Background, summary: Payload) {
         if let Some(id) = job.id {
             self.deliver(Delivery::Reply {
                 id,
@@ -238,7 +303,7 @@ impl Worker {
             });
         }
         if let (true, Some(area)) = (job.wrote, job.area) {
-            self.deliver(Delivery::Changed(area));
+            self.notify(job.change.unwrap_or_else(|| Change::any(area)));
         }
     }
 
@@ -266,7 +331,7 @@ impl Worker {
             return;
         };
         match database.store.set_page_title(url, title) {
-            Ok(true) => self.deliver(Delivery::Changed(Area::History)),
+            Ok(true) => self.notify(Change::any(Area::History)),
             Ok(false) => {}
             Err(error) => log::warn!("recording a page title failed: {error}"),
         }
@@ -312,6 +377,9 @@ impl Worker {
     /// the worker then closes the database.
     fn finish(mut self, messages: &Receiver<Message>) {
         self.flush_titles();
+        if let Some(change) = self.history_held.take() {
+            self.deliver(Delivery::Changed(change));
+        }
         for mut job in std::mem::take(&mut self.background) {
             if job.id.is_some() {
                 log::info!("cancelled at shutdown: {}", job.steps.describe());

@@ -66,6 +66,18 @@ impl Store {
         schema::user_version(&self.conn)
     }
 
+    /// Copies what it can of the write-ahead log into the database file without waiting for
+    /// readers or writers (`PRAGMA wal_checkpoint(PASSIVE)`), so the log does not keep growing
+    /// between SQLite's automatic checkpoints. Returns the frames in the log and how many of
+    /// them are now in the database file (both -1 when the database is not in WAL mode).
+    pub fn checkpoint(&self) -> Result<(i64, i64)> {
+        Ok(self
+            .conn
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                Ok((row.get(1)?, row.get(2)?))
+            })?)
+    }
+
     fn init(mut conn: Connection) -> Result<Self> {
         conn.busy_timeout(BUSY_TIMEOUT)?;
         conn.set_prepared_statement_cache_capacity(STATEMENT_CACHE_CAPACITY);

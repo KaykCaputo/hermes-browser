@@ -21,23 +21,41 @@
 //! - **Replaced entries.** A commit to another URL that leaves the history's length and index
 //!   unchanged, with no user origin, replaced the current entry (`replaceState`,
 //!   `location.replace`): the current visit moves to the new URL (`Forget` the old visit,
-//!   `Visit` the new URL with the old origin, and the old title, if any, as `Title`).
-//! - **Not recorded:** anything but `http`, `https` and `file`; a commit consumed by `Restored`
-//!   (its titles are ignored too). User names and passwords are removed from recorded URLs.
+//!   `Visit` the new URL with the old origin). The old title is carried only *provisionally*,
+//!   and only when no new document announced itself: the page's own first title replaces it
+//!   (and still goes through the error-page check); it is written only if none came before
+//!   the next commit, or when the tab closes.
+//! - **Not recorded:** anything but `http`, `https` and `file`; a commit consumed by `Restored`,
+//!   and the replaced entries after it, until a user origin or a commit that pushes a new entry
+//!   (the same flag will serve private tabs). User names and passwords are removed from
+//!   recorded URLs.
 //! - **Titles** come with the URL the web view showed when the title was reported, which is not
-//!   always the title's own document: Servo sends titles and commits on different channels, and
-//!   a page's title can arrive before its commit. A title reported while the web view showed no
-//!   page (an empty URL: before the first commit, or on the blank page, which has no title)
-//!   belongs to the next page and is applied when that page is recorded. Otherwise a title for
-//!   another URL than the current visit's is dropped. The first non-blank title of a visit is
-//!   emitted at once; if it is an engine error page's title, the visit is taken back
-//!   (`Forget`), or never recorded if the title came first.
+//!   always the title's own document: Servo sends titles and commits on different channels.
+//!   Measured on Servo 0.8: a new document announces itself with a `None` title, and its titles
+//!   can arrive *before* its commit, carrying the previous page's URL (a page navigating to an
+//!   unreachable host reports `None`, `""`, "Error loading page", then commits). So:
+//!   - after a `None` title, the titles are the next document's: they are placed on the next
+//!     recorded commit, or, if the commit came first (a reload), on the current visit when the
+//!     page has loaded;
+//!   - before a web view's first commit every title is the first page's;
+//!   - a title reported on the blank page after that (an opened window titled by its opener)
+//!     belongs to nobody, and so does one for another URL than the current visit's;
+//!   - the order of titles and commits within one engine pump means nothing, so a tab's titles
+//!     are placed when the pump ends (`take_updates`), and only the last one counts; a
+//!     same-document commit later in the same pump takes the title (`pushState` followed by a
+//!     new `document.title` reaches the embedder title first). Across pumps this cannot be
+//!     corrected.
+//! - **An error page that replaced an entry** (a `location.replace` that commits before its
+//!   error title) takes its own visit back and records the replaced page again, as of now.
+//!
+//!   The first title of a visit's own page is emitted at once; if it is an engine error page's
+//!   title, the visit is taken back (`Forget`), or never recorded if the title came first.
 
 use std::collections::HashMap;
 
 use url::Url;
 
-use crate::{BrowserEvent, TabId};
+use crate::{BrowserEvent, LoadState, TabId};
 
 /// How the user reached a page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -108,12 +126,20 @@ struct TabVisits {
     pending: Option<PendingOrigin>,
     /// The URL of the tab's last commit, as the engine reported it.
     committed_url: Option<String>,
-    /// The history's length and index at the last commit.
+    /// The history's length and index at the last commit; `None` before the first commit.
     position: Option<(usize, usize)>,
     current: Option<CurrentVisit>,
-    /// The last title reported while the web view showed no page (an empty URL), which can
-    /// only belong to the next page.
-    early_title: Option<String>,
+    /// `Some` once a new document has announced itself (a `None` title, or any title before
+    /// the web view's first commit) and until its titles are placed: its latest non-blank
+    /// title, if any.
+    incoming: Option<Option<String>>,
+    /// Commits are not recorded: set by a `Restored` commit, until a user origin or a commit
+    /// that pushes a new entry. A per-tab "do not record" (private tabs) would set it for good.
+    not_recorded: bool,
+    /// The last title reported for the current visit's URL in this pump, placed when the pump
+    /// ends (`take_updates`): a same-document commit arriving later in the pump overtook it,
+    /// and takes it.
+    unplaced: Option<String>,
 }
 
 #[derive(Debug)]
@@ -128,8 +154,13 @@ struct CurrentVisit {
     key: VisitKey,
     url: String,
     origin: NavigationOrigin,
-    /// The last title reported for this visit, if any.
+    /// The last title reported for this visit's own page, if any.
     title: Option<String>,
+    /// A title carried from the entry this one replaced: written only if the page reports none
+    /// of its own before the next commit.
+    provisional: Option<String>,
+    /// The entry this visit replaced, recorded again if this one turns out to be an error page.
+    replaced: Option<Box<CurrentVisit>>,
 }
 
 impl VisitTracker {
@@ -146,6 +177,9 @@ impl VisitTracker {
         target: Option<&str>,
     ) {
         let tab = self.tabs.entry(tab_id).or_default();
+        if origin != NavigationOrigin::Restored {
+            tab.not_recorded = false;
+        }
         tab.pending = match target {
             None => Some(PendingOrigin {
                 origin,
@@ -171,12 +205,37 @@ impl VisitTracker {
         }
     }
 
+    /// The tab closed: its last titles are placed, as no others will come.
     pub(crate) fn forget_tab(&mut self, tab_id: TabId) {
-        self.tabs.remove(&tab_id);
+        self.place_titles(tab_id);
+        if let Some(mut tab) = self.tabs.remove(&tab_id) {
+            Self::settle_provisional(&mut self.updates, tab.current.as_mut());
+        }
     }
 
+    /// The updates so far; called once per engine pump, which ends it: the titles reported in
+    /// the pump are placed first.
     pub(crate) fn take_updates(&mut self) -> Vec<VisitUpdate> {
+        let tabs = self
+            .tabs
+            .iter()
+            .filter(|(_, tab)| tab.unplaced.is_some())
+            .map(|(tab_id, _)| *tab_id)
+            .collect::<Vec<_>>();
+        for tab_id in tabs {
+            self.place_titles(tab_id);
+        }
         std::mem::take(&mut self.updates)
+    }
+
+    fn place_titles(&mut self, tab_id: TabId) {
+        if let Some(title) = self
+            .tabs
+            .get_mut(&tab_id)
+            .and_then(|tab| tab.unplaced.take())
+        {
+            self.apply_title(tab_id, &title);
+        }
     }
 
     pub(crate) fn observe(&mut self, tab_id: TabId, event: &BrowserEvent) {
@@ -186,10 +245,10 @@ impl VisitTracker {
                 history_length,
                 history_index,
             } => self.committed(tab_id, url, (*history_length, *history_index)),
-            BrowserEvent::PageTitleAt {
-                url,
-                title: Some(title),
-            } => self.titled(tab_id, url, title),
+            BrowserEvent::PageTitleAt { url, title } => self.titled(tab_id, url, title.as_deref()),
+            BrowserEvent::LoadStateChanged {
+                state: LoadState::Loaded,
+            } => self.loaded(tab_id),
             _ => {}
         }
     }
@@ -200,15 +259,28 @@ impl VisitTracker {
         key
     }
 
+    fn is_error_title(&self, title: &str) -> bool {
+        self.error_page_titles.iter().any(|t| t == title)
+    }
+
+    /// Writes a visit's provisional title, if it still has one.
+    fn settle_provisional(updates: &mut Vec<VisitUpdate>, current: Option<&mut CurrentVisit>) {
+        if let Some(current) = current
+            && let Some(title) = current.provisional.take()
+        {
+            updates.push(VisitUpdate::Title {
+                url: current.url.clone(),
+                title,
+            });
+        }
+    }
+
     fn committed(&mut self, tab_id: TabId, url: &str, position: (usize, usize)) {
         let key = self.new_key();
         let tab = self.tabs.entry(tab_id).or_default();
         let recordable = recordable_url(url);
         let same_url = tab.committed_url.as_deref() == Some(url);
         let same_position = tab.position == Some(position);
-        tab.committed_url = Some(url.to_owned());
-        tab.position = Some(position);
-        let early_title = tab.early_title.take();
 
         let origin = match &tab.pending {
             Some(pending)
@@ -219,23 +291,50 @@ impl VisitTracker {
             }
             _ => None,
         };
+        tab.committed_url = Some(url.to_owned());
+        tab.position = Some(position);
         if same_url && !origin.is_some_and(NavigationOrigin::loads_the_same_url) {
+            // Subframe or `replaceState` noise: an announced document is still to come.
             return;
         }
+        let incoming = tab.incoming.take();
+        // A title reported before this commit: the old page's if a new document was announced
+        // since, otherwise it overtook this same-document commit and is the new page's.
+        let unplaced = tab.unplaced.take();
+        let carried_title = match (&incoming, unplaced) {
+            (None, title) => title,
+            (Some(_), Some(title)) => {
+                self.apply_title(tab_id, &title);
+                None
+            }
+            (Some(_), None) => None,
+        };
+        let tab = self.tabs.entry(tab_id).or_default();
         let replaced = match (origin, same_position) {
             (None, true) => tab.current.take(),
-            _ => None,
+            _ => {
+                Self::settle_provisional(&mut self.updates, tab.current.as_mut());
+                tab.current = None;
+                None
+            }
         };
-        tab.current = None;
-        // A future per-tab "do not record" flag (private tabs) belongs here, with `Restored`.
-        let (Some(url), false) = (recordable, origin == Some(NavigationOrigin::Restored)) else {
+        if origin.is_some() || !same_position {
+            tab.not_recorded = false;
+        }
+        if origin == Some(NavigationOrigin::Restored) {
+            tab.not_recorded = true;
+        }
+        let Some(url) = recordable.filter(|_| !tab.not_recorded) else {
             return;
         };
-        if early_title
-            .as_ref()
-            .is_some_and(|title| self.error_page_titles.contains(title))
+        let own_title = incoming.clone().flatten();
+        if own_title
+            .as_deref()
+            .is_some_and(|title| self.error_page_titles.iter().any(|t| t == title))
         {
-            // An error page, known before its commit: not recorded at all.
+            // An error page, known before its commit: not recorded, and the entry it replaced
+            // (if any) stays as it was. The same URL loaded again is a visit.
+            tab.current = replaced;
             tab.committed_url = None;
             return;
         }
@@ -245,50 +344,132 @@ impl VisitTracker {
         if let Some(old) = &replaced {
             self.updates.push(VisitUpdate::Forget { key: old.key });
         }
+        let replaced = replaced.map(|mut old| {
+            // Only one entry back is kept.
+            old.replaced = None;
+            Box::new(old)
+        });
         self.updates.push(VisitUpdate::Visit {
             key,
             url: url.clone(),
             origin,
         });
-        let title = early_title.or_else(|| replaced.and_then(|old| old.title));
-        if let Some(title) = &title {
+        if let Some(title) = &own_title {
             self.updates.push(VisitUpdate::Title {
                 url: url.clone(),
                 title: title.clone(),
             });
         }
+        // A title is carried only across a replace that announced no new document.
+        let provisional = match (&incoming, &replaced) {
+            (None, Some(old)) => old.title.clone().or_else(|| old.provisional.clone()),
+            _ => None,
+        };
         tab.current = Some(CurrentVisit {
             key,
             url,
             origin,
-            title,
+            title: own_title,
+            provisional,
+            replaced,
         });
+        if let Some(title) = carried_title {
+            self.apply_title(tab_id, &title);
+        }
     }
 
-    fn titled(&mut self, tab_id: TabId, url: &str, title: &str) {
-        if title.trim().is_empty() {
+    fn titled(&mut self, tab_id: TabId, url: &str, title: Option<&str>) {
+        let tab = self.tabs.entry(tab_id).or_default();
+        if tab.position.is_none() {
+            // Before the web view's first commit every title is the first page's.
+            let held = tab.incoming.get_or_insert(None);
+            if let Some(title) = title.filter(|title| !title.trim().is_empty()) {
+                *held = Some(title.to_owned());
+            }
             return;
         }
         if url.is_empty() {
-            self.tabs.entry(tab_id).or_default().early_title = Some(title.to_owned());
+            // The blank page has no title; one set on it (an opened window) belongs to nobody.
             return;
         }
+        let Some(title) = title else {
+            // A new document has started; its titles may come before its commit.
+            tab.incoming = Some(None);
+            return;
+        };
+        if title.trim().is_empty() {
+            return;
+        }
+        if let Some(held) = tab.incoming.as_mut() {
+            *held = Some(title.to_owned());
+            return;
+        }
+        if tab
+            .current
+            .as_ref()
+            .is_some_and(|current| recordable_url(url).as_deref() == Some(current.url.as_str()))
+        {
+            tab.unplaced = Some(title.to_owned());
+        }
+    }
+
+    /// The tab's page finished loading: titles of a document announced after its commit (a
+    /// reload) belong to the current visit.
+    fn loaded(&mut self, tab_id: TabId) {
+        let Some(tab) = self.tabs.get_mut(&tab_id) else {
+            return;
+        };
+        if tab.position.is_none() {
+            return;
+        }
+        match tab.incoming.take() {
+            Some(Some(title)) => self.apply_title(tab_id, &title),
+            Some(None) => {
+                if let Some(current) = tab.current.as_mut() {
+                    // The page reported no title of its own.
+                    current.provisional = None;
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// A non-blank title of the current visit's own page.
+    fn apply_title(&mut self, tab_id: TabId, title: &str) {
+        let is_error = self.is_error_title(title);
         let Some(tab) = self.tabs.get_mut(&tab_id) else {
             return;
         };
         let Some(current) = tab.current.as_mut() else {
             return;
         };
-        if recordable_url(url).as_deref() != Some(current.url.as_str()) {
-            return;
-        }
-        if current.title.is_none() && self.error_page_titles.iter().any(|t| t == title) {
+        current.provisional = None;
+        if current.title.is_none() && is_error {
             self.updates.push(VisitUpdate::Forget { key: current.key });
-            tab.current = None;
             // The same URL loaded again (a "proceed anyway", a retry) is a visit.
             tab.committed_url = None;
+            // An entry this error page replaced was seen: it is recorded again (as of now).
+            let restored = tab.current.take().and_then(|current| current.replaced);
+            if let Some(mut old) = restored {
+                let key = VisitKey(self.next_key);
+                self.next_key += 1;
+                self.updates.push(VisitUpdate::Visit {
+                    key,
+                    url: old.url.clone(),
+                    origin: old.origin,
+                });
+                if let Some(title) = old.title.clone().or_else(|| old.provisional.take()) {
+                    self.updates.push(VisitUpdate::Title {
+                        url: old.url.clone(),
+                        title,
+                    });
+                }
+                old.key = key;
+                tab.current = Some(*old);
+            }
             return;
         }
+        current.replaced = None;
         if current.title.as_deref() == Some(title) {
             return;
         }
