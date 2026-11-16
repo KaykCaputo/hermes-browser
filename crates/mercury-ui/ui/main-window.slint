@@ -1,7 +1,6 @@
 import { Palette } from "std-widgets.slint";
 import { AddressBarEdit, BrowserMenu, BrowserMenuCommand, BrowserMenuEntry } from "menus/browser-menu.slint";
 export { AboutLink, AboutWindow } from "about/about-window.slint";
-export { BrowserMenuPreview } from "menus/browser-menu.slint";
 
 export enum WebViewPointerButton {
     left,
@@ -488,8 +487,11 @@ export component MainWindow inherits Window {
                     clicked => { root.show-browser-menu(); }
 
                     // menus: the browser menu, below the button, right edges aligned. A child of the
-                    // button because Slint 1.17.1's `absolute-position` of this component instance
-                    // counts its own offset twice (measured: x 1700 for a button at 850).
+                    // button, not placed with `absolute-position`: in Slint 1.17.1 that counts an
+                    // element's offset twice when the element has a property lowered to an injected
+                    // parent, such as ChromeButton's `opacity` (the `Opacity` parent takes the
+                    // geometry: lower_property_to_element.rs:85, object_tree.rs:3441-3446).
+                    // Measured: x 1700 for a button at 850.
                     browser-menu := BrowserMenu {
                         x: browser-menu-button.width - self.width;
                         y: browser-menu-button.height + 4px;

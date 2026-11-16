@@ -46,12 +46,18 @@ pub(crate) fn toggle_bookmarks_bar(_window: &MainWindow) {}
 /// Bookmarks lane: open the bookmarks manager.
 pub(crate) fn show_bookmarks_manager(_window: &MainWindow) {}
 
-/// Bookmarks lane: the titles of the bookmarks bar folder's first level, in order. Called when
+/// Bookmarks lane: a bookmark's stable id in its store, so a menu item still names the same
+/// bookmark if the bar changes after the menu opened. Replace the inner type with the store's
+/// (keep it `Copy`; a GUID fits in a `u128`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct BookmarkId(pub(crate) i64);
+
+/// Bookmarks lane: the bookmarks bar folder's first level, in order: id and title. Called when
 /// the UI syncs (never from inside AppKit); the Bookmarks menu lists them when it opens.
-pub(crate) fn bookmarks_bar_items(_controller: &BrowserController) -> Vec<String> {
+pub(crate) fn bookmarks_bar_items(_controller: &BrowserController) -> Vec<(BookmarkId, String)> {
     Vec::new()
 }
 
-/// Bookmarks lane: open the entry at `index` of `bookmarks_bar_items` (a folder may open a
-/// submenu in a later version; the menu builder is the lane's).
-pub(crate) fn open_bookmarks_bar_item(_window: &MainWindow, _index: usize) {}
+/// Bookmarks lane: open the bookmark `id` (ignore an id that no longer exists; a folder may
+/// open a submenu in a later version; the menu builder is the lane's).
+pub(crate) fn open_bookmark(_window: &MainWindow, _id: BookmarkId) {}

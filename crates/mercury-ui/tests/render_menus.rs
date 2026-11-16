@@ -5,13 +5,77 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use mercury_ui::{
-    AboutWindow, BrowserMenuCommand, BrowserMenuEntry, BrowserMenuPreview, MainWindow,
-};
+use mercury_ui::{AboutWindow, BrowserMenuCommand, BrowserMenuEntry, MainWindow};
 use slint::language::ColorScheme;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Key, Platform, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, LogicalSize, ModelRc, PhysicalSize, SharedPixelBuffer, VecModel};
+
+// The menu's panel in a window of its own, with a forced colour scheme. Built here, in the test,
+// so the shipped UI exports nothing for it. Its types are the macro's own, hence the module.
+mod preview {
+    slint::slint! {
+        import { Palette } from "std-widgets.slint";
+        import { BrowserMenuPanel, BrowserMenuEntry } from "ui/menus/browser-menu.slint";
+
+        export component BrowserMenuPreview inherits Window {
+            in property <[BrowserMenuEntry]> top-entries;
+            in property <[BrowserMenuEntry]> bottom-entries;
+            in property <int> zoom-percent: 100;
+            in property <ColorScheme> preview-color-scheme: ColorScheme.unknown;
+
+            changed preview-color-scheme => {
+                Palette.color-scheme = self.preview-color-scheme;
+            }
+
+            width: 280px;
+            height: 320px;
+            background: Palette.background;
+
+            BrowserMenuPanel {
+                x: 8px;
+                y: 8px;
+                width: 264px;
+                top-entries: root.top-entries;
+                bottom-entries: root.bottom-entries;
+                zoom-percent: root.zoom-percent;
+            }
+        }
+    }
+
+    /// The same rows, as the preview's own types.
+    pub fn rows(
+        rows: &slint::ModelRc<mercury_ui::BrowserMenuEntry>,
+    ) -> slint::ModelRc<BrowserMenuEntry> {
+        use slint::Model;
+        let entries = rows
+            .iter()
+            .map(|entry| BrowserMenuEntry {
+                title: entry.title,
+                shortcut: entry.shortcut,
+                enabled: entry.enabled,
+                command: command(entry.command),
+                separator_before: entry.separator_before,
+            })
+            .collect::<Vec<_>>();
+        slint::ModelRc::new(slint::VecModel::from(entries))
+    }
+
+    fn command(command: mercury_ui::BrowserMenuCommand) -> BrowserMenuCommand {
+        use mercury_ui::BrowserMenuCommand as Shipped;
+        match command {
+            Shipped::NewTab => BrowserMenuCommand::NewTab,
+            Shipped::ZoomIn => BrowserMenuCommand::ZoomIn,
+            Shipped::ZoomOut => BrowserMenuCommand::ZoomOut,
+            Shipped::ZoomReset => BrowserMenuCommand::ZoomReset,
+            Shipped::Find => BrowserMenuCommand::Find,
+            Shipped::Settings => BrowserMenuCommand::Settings,
+            Shipped::About => BrowserMenuCommand::About,
+            Shipped::Help => BrowserMenuCommand::Help,
+            Shipped::Quit => BrowserMenuCommand::Quit,
+        }
+    }
+}
 
 struct SoftwarePlatform;
 
@@ -149,11 +213,11 @@ fn render_browser_menu_in_window() {
 }
 
 fn render_browser_menu(scheme: ColorScheme, name: &str) -> [u8; 3] {
-    let preview = BrowserMenuPreview::new().expect("the preview can be created");
+    let preview = preview::BrowserMenuPreview::new().expect("the preview can be created");
     preview.window().set_size(LogicalSize::new(280.0, 320.0));
     let (top, bottom) = rows();
-    preview.set_top_entries(top);
-    preview.set_bottom_entries(bottom);
+    preview.set_top_entries(preview::rows(&top));
+    preview.set_bottom_entries(preview::rows(&bottom));
     preview.set_zoom_percent(110);
     preview.set_preview_color_scheme(scheme);
     preview.show().expect("the preview can be shown");

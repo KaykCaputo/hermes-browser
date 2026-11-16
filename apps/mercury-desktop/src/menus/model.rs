@@ -25,8 +25,8 @@ pub(crate) enum MenuCommand {
     BookmarkThisPage,
     ToggleBookmarksBar,
     ShowBookmarksManager,
-    /// An entry of the bookmarks bar's first level, by position.
-    OpenBookmarksBarItem(usize),
+    /// An entry of the bookmarks bar's first level, by its stable id.
+    OpenBookmark(super::seams::BookmarkId),
     // No engine API in Servo 0.8.0: always disabled.
     Find,
     Stop,
@@ -538,7 +538,7 @@ pub(crate) const fn is_available(command: MenuCommand) -> bool {
         RestorePreviousSession => super::seams::RESTORE_PREVIOUS_SESSION_AVAILABLE,
         ShowHistory => super::seams::SHOW_HISTORY_AVAILABLE,
         ClearBrowsingData => super::seams::CLEAR_BROWSING_DATA_AVAILABLE,
-        BookmarkThisPage | ToggleBookmarksBar | ShowBookmarksManager | OpenBookmarksBarItem(_) => {
+        BookmarkThisPage | ToggleBookmarksBar | ShowBookmarksManager | OpenBookmark(_) => {
             super::seams::BOOKMARKS_AVAILABLE
         }
         Find | Stop => false,
@@ -579,8 +579,9 @@ pub(crate) struct MenuSnapshot {
     pub(crate) can_go_forward: bool,
     pub(crate) tab_titles: Vec<String>,
     pub(crate) active_tab_index: usize,
-    /// Titles of the bookmarks bar's first level (bookmarks lane).
-    pub(crate) bookmarks_bar: Vec<String>,
+    /// The bookmarks bar's first level, in order: each entry's stable id and title (bookmarks
+    /// lane).
+    pub(crate) bookmarks_bar: Vec<(super::seams::BookmarkId, String)>,
 }
 
 pub(crate) fn is_enabled(command: MenuCommand, snapshot: &MenuSnapshot, edit: EditTarget) -> bool {
@@ -875,7 +876,7 @@ mod tests {
             MenuCommand::BookmarkThisPage,
             MenuCommand::ToggleBookmarksBar,
             MenuCommand::ShowBookmarksManager,
-            MenuCommand::OpenBookmarksBarItem(0),
+            MenuCommand::OpenBookmark(crate::menus::seams::BookmarkId::default()),
             MenuCommand::Find,
             MenuCommand::Stop,
         ] {
@@ -1115,6 +1116,13 @@ mod tests {
             ("k", CMD, Browser, false, Option::None, Perform),
             ("k", CMD, Browser, true, Option::None, Perform),
             ("t", CMD, KeyWindow::None, false, new_tab, Perform),
+            // A disabled Edit item with the About window key: the key goes to that window.
+            ("c", CMD, OtherMercury, false, copy_disabled, Decline),
+            // A disabled item that is not an Edit item stays disabled in a native panel.
+            ("f", CMD, Native, false, find, Decline),
+            // Repeats of keys no item of ours shows: AppKit as usual.
+            ("k", CMD, Native, true, Option::None, Perform),
+            ("k", CMD, OtherMercury, true, Option::None, Perform),
         ];
         for (text, modifiers, key_window, repeat, item, expected) in cases {
             assert_eq!(

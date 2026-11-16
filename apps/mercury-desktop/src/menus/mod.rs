@@ -93,6 +93,8 @@ pub(crate) fn release() {
         state.handler.take();
         state.web_view_focused.take();
     });
+    #[cfg(target_os = "macos")]
+    macos::release();
     about::release();
 }
 
@@ -121,7 +123,17 @@ pub(crate) fn sync(controller: &BrowserController) {
 }
 
 /// Called first for every winit event of the browser window.
-pub(crate) fn observe_window_event(event: &WindowEvent, shortcut_keys: &mut ShortcutKeys) {
+pub(crate) fn observe_window_event(
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] window: &MainWindow,
+    event: &WindowEvent,
+    shortcut_keys: &mut ShortcutKeys,
+) {
+    #[cfg(target_os = "macos")]
+    macos::remember_browser_window(window);
+    observe_event(event, shortcut_keys);
+}
+
+fn observe_event(event: &WindowEvent, shortcut_keys: &mut ShortcutKeys) {
     STATE.with(|state| {
         for key in state.claimed_keys.take() {
             shortcut_keys.claim(key);
@@ -187,7 +199,7 @@ fn run_command(
         MenuCommand::BookmarkThisPage => seams::bookmark_this_page(window),
         MenuCommand::ToggleBookmarksBar => seams::toggle_bookmarks_bar(window),
         MenuCommand::ShowBookmarksManager => seams::show_bookmarks_manager(window),
-        MenuCommand::OpenBookmarksBarItem(index) => seams::open_bookmarks_bar_item(window, index),
+        MenuCommand::OpenBookmark(id) => seams::open_bookmark(window, id),
         MenuCommand::Find | MenuCommand::Stop => {}
     }
 }
@@ -324,7 +336,7 @@ mod tests {
         let mut shortcut_keys = ShortcutKeys::default();
         claim_key(key);
 
-        observe_window_event(&WindowEvent::Occluded(false), &mut shortcut_keys);
+        observe_event(&WindowEvent::Occluded(false), &mut shortcut_keys);
 
         assert_eq!(shortcut_keys.release(key), KeyDisposition::Consume);
         assert_eq!(shortcut_keys.release(key), KeyDisposition::Forward);
@@ -332,7 +344,7 @@ mod tests {
 
     #[test]
     fn edit_clicks_follow_window_focus() {
-        observe_window_event(&WindowEvent::Focused(false), &mut ShortcutKeys::default());
+        observe_event(&WindowEvent::Focused(false), &mut ShortcutKeys::default());
         STATE.with(|state| state.address_bar_focused.set(true));
         assert_eq!(current_edit_target(), EditTarget::None);
 

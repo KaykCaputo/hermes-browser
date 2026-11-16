@@ -17,23 +17,27 @@
 //! `slint::invoke_from_event_loop` (`super::dispatch`), and the state read here is a snapshot.
 
 use std::cell::RefCell;
-use std::time::Duration;
 
+use mercury_ui::MainWindow;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, Bool, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{ClassType, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEvent, NSEventModifierFlags,
-    NSEventType, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSEventType, NSMenu, NSMenuDelegate, NSMenuItem, NSView, NSWindow,
 };
 use objc2_foundation::NSString;
+use slint::ComponentHandle;
+use slint::winit_030::WinitWindowAccessor;
 use slint::winit_030::winit::keyboard::{Key, PhysicalKey};
 use slint::winit_030::winit::platform::scancode::PhysicalKeyExtScancode;
+use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use super::model::{
     self, KeyDecision, KeyEquivalent, KeyWindow, MatchedItem, MenuCommand, MenuItem, Modifiers,
     StandardAction, SystemAction, key_from_appkit_characters,
 };
+use super::seams::BookmarkId;
 use crate::shortcuts::ShortcutAction;
 
 /// Tags of the Window menu's tab items: this plus the tab's index.
@@ -53,9 +57,14 @@ struct NativeMenu {
 }
 
 thread_local! {
+    /// The browser window's `NSWindow`, once its winit window exists.
+    static BROWSER_WINDOW: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
     static NATIVE: RefCell<Option<NativeMenu>> = const { RefCell::new(None) };
     /// The command of each item, by tag.
     static COMMANDS: RefCell<Vec<MenuCommand>> = const { RefCell::new(Vec::new()) };
+    /// The bookmark each bar item of the Bookmarks menu opens, by position, as listed when the
+    /// menu was last built.
+    static BOOKMARK_IDS: RefCell<Vec<BookmarkId>> = const { RefCell::new(Vec::new()) };
 }
 
 define_class!(
@@ -134,7 +143,10 @@ define_class!(
                 replace_dynamic_items(self, menu, FIRST_TAB_TAG, items);
             }
             if is_bookmarks_menu {
-                let items = snapshot.bookmarks_bar.iter().map(|title| (title.clone(), None));
+                BOOKMARK_IDS.with(|ids| {
+                    ids.replace(snapshot.bookmarks_bar.iter().map(|(id, _)| *id).collect())
+                });
+                let items = snapshot.bookmarks_bar.iter().map(|(_, title)| (title.clone(), None));
                 replace_dynamic_items(self, menu, FIRST_BOOKMARK_TAG, items);
             }
         }
@@ -184,15 +196,25 @@ impl MenuTarget {
     }
 }
 
-/// Which window has keyboard focus. Every Slint window is a winit `WinitWindow`; anything else
-/// that becomes key (an open panel, a sheet, an alert) was made by AppKit.
+/// Which window has keyboard focus. AppKit's key window is compared with the browser's
+/// `NSWindow` first: winit's `Focused` event can still be queued (a sheet begun from inside a
+/// Slint callback is key before the browser window's `Focused(false)` arrives). Every Slint
+/// window is a winit `WinitWindow`; any other key window (an open panel, a sheet, an alert) was
+/// made by AppKit. winit's focus flag is used only while the browser's `NSWindow` is not known.
 fn key_window(mtm: MainThreadMarker) -> KeyWindow {
-    if super::browser_window_focused() {
-        return KeyWindow::Browser;
-    }
+    let browser = BROWSER_WINDOW.with(|browser| browser.borrow().clone());
     let Some(window) = NSApplication::sharedApplication(mtm).keyWindow() else {
-        return KeyWindow::None;
+        return if browser.is_none() && super::browser_window_focused() {
+            KeyWindow::Browser
+        } else {
+            KeyWindow::None
+        };
     };
+    match browser {
+        Some(browser) if std::ptr::eq(&*window, &*browser) => return KeyWindow::Browser,
+        None if super::browser_window_focused() => return KeyWindow::Browser,
+        _ => {}
+    }
     let is_winit_window =
         AnyClass::get(c"WinitWindow").is_some_and(|class| window.isKindOfClass(class));
     if is_winit_window {
@@ -200,6 +222,36 @@ fn key_window(mtm: MainThreadMarker) -> KeyWindow {
     } else {
         KeyWindow::Native
     }
+}
+
+/// Records the browser window's `NSWindow` the first time its winit window exists. Called from
+/// the browser window's winit event hook, where Slint lends the winit window (`keyboard.rs`
+/// does the same).
+pub(super) fn remember_browser_window(window: &MainWindow) {
+    if BROWSER_WINDOW.with(|browser| browser.borrow().is_some()) {
+        return;
+    }
+    let ns_window = window
+        .window()
+        .with_winit_window(|winit_window| {
+            let handle = winit_window.window_handle().ok()?;
+            let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+                return None;
+            };
+            // SAFETY: winit's AppKit handle is a valid `NSView` while the winit window exists,
+            // which it does for the duration of this closure.
+            let view = unsafe { handle.ns_view.cast::<NSView>().as_ref() };
+            view.window()
+        })
+        .flatten();
+    if let Some(ns_window) = ns_window {
+        BROWSER_WINDOW.with(|browser| browser.replace(Some(ns_window)));
+    }
+}
+
+/// Forgets the browser's `NSWindow` when the menus are released.
+pub(super) fn release() {
+    BROWSER_WINDOW.with(|browser| browser.take());
 }
 
 fn standard_selector(action: StandardAction) -> Sel {
@@ -281,7 +333,8 @@ fn command_for_tag(tag: isize) -> Option<MenuCommand> {
         return Some(MenuCommand::Shortcut(ShortcutAction::SelectTab(index)));
     }
     if let Some(index) = dynamic_index(tag, FIRST_BOOKMARK_TAG) {
-        return Some(MenuCommand::OpenBookmarksBarItem(index));
+        let id = BOOKMARK_IDS.with(|ids| ids.borrow().get(index).copied())?;
+        return Some(MenuCommand::OpenBookmark(id));
     }
     let index = usize::try_from(tag).ok()?;
     COMMANDS.with(|commands| commands.borrow().get(index).copied())
@@ -466,6 +519,7 @@ pub(super) fn install() {
     ensure_installed("start-up");
     // Again once the event loop runs, after anything that happens while it starts.
     ensure_installed_later("the event loop started");
+    #[cfg(feature = "menu-diagnostics")]
     start_diagnostics();
 }
 
@@ -525,12 +579,15 @@ fn main_menu_is_ours(application: &NSApplication) -> bool {
         .is_some_and(|menu| menu.isKindOfClass(MainMenu::class()))
 }
 
-/// `MERCURY_MENU_DIAGNOSTICS=<directory>` (a diagnostic, documented in
-/// docs/developer-guide/testing.md): reads the main menu back after start-up, after the About
+/// `MERCURY_MENU_DIAGNOSTICS=<directory>`, in builds with the `menu-diagnostics` feature
+/// (documented in docs/developer-guide/testing.md): reads the main menu back after start-up, after the About
 /// window opens and after it closes, and logs it; saves the About window, rendered by the app's
 /// renderer, as `about-window.png` in the directory. Works in `--background` runs and needs no
 /// input.
+#[cfg(feature = "menu-diagnostics")]
 fn start_diagnostics() {
+    use std::time::Duration;
+
     let Some(directory) = std::env::var_os("MERCURY_MENU_DIAGNOSTICS") else {
         return;
     };

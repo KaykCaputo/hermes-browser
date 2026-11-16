@@ -62,7 +62,7 @@ pub(crate) fn hide() {
 }
 
 /// Renders the open About window into a PNG through the app's own renderer (menu diagnostics).
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "menu-diagnostics"))]
 pub(crate) fn save_snapshot(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let about = ABOUT
         .with(|about| about.borrow().as_ref().map(ComponentHandle::clone_strong))

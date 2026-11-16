@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# menus lane: `MERCURY_MENU_DIAGNOSTICS`, a read-back of the macOS menu bar for checks without
+# input (docs/developer-guide/testing.md). Off in `make build-release` and the app bundle;
+# `make check` and `make lint` compile it (`--all-features`).
+menu-diagnostics = []
+
 [[bin]]
 name = "mercury-browser"
 path = "src/main.rs"
@@ -46,6 +52,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSMenu",
     "NSMenuItem",
     "NSResponder",
+    "NSView",
     "NSWindow",
 ] }
 objc2-foundation = { workspace = true, features = [

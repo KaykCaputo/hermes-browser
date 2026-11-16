@@ -1,7 +1,5 @@
 // The browser menu behind the toolbar's "⋮" button.
 
-import { Palette } from "std-widgets.slint";
-
 // Every colour the menus lane's chrome uses. They match the browser chrome, which is dark in
 // both system appearances today; at the merge with the settings lane's `ChromePalette`
 // (crates/mercury-ui/ui/theme/chrome-palette.slint) each one maps onto a palette role.
@@ -350,27 +348,3 @@ export component BrowserMenu inherits PopupWindow {
     }
 }
 
-// The menu's panel in a window of its own, for the rendering test (crates/mercury-ui/tests).
-export component BrowserMenuPreview inherits Window {
-    in property <[BrowserMenuEntry]> top-entries;
-    in property <[BrowserMenuEntry]> bottom-entries;
-    in property <int> zoom-percent: 100;
-    in property <ColorScheme> preview-color-scheme: ColorScheme.unknown;
-
-    changed preview-color-scheme => {
-        Palette.color-scheme = self.preview-color-scheme;
-    }
-
-    width: 280px;
-    height: 320px;
-    background: Palette.background;
-
-    BrowserMenuPanel {
-        x: 8px;
-        y: 8px;
-        width: 264px;
-        top-entries: root.top-entries;
-        bottom-entries: root.bottom-entries;
-        zoom-percent: root.zoom-percent;
-    }
-}
