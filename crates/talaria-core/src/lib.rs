@@ -9,7 +9,9 @@ mod tab;
 mod web_view;
 mod zoom;
 
-pub use address::{AddressResolutionError, NavigationTarget, classify_address, resolve_address};
+pub use address::{
+    AddressResolutionError, NavigationTarget, SearchUrlBuilder, classify_address, resolve_address,
+};
 pub use browser::{
     BrowserCommand, BrowserEvent, BrowserState, LoadState, PointerButton, PointerButtonAction,
 };

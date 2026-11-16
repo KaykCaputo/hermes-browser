@@ -1,0 +1,782 @@
+import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
+import { ChromePalette } from "../theme/chrome-palette.slint";
+
+// One search engine as the settings window lists it.
+export struct SearchEngineRow {
+    id: string,
+    name: string,
+    keyword: string,
+    custom: bool,
+}
+
+// A section in the side bar: clicked, or focused with Tab and chosen with Return or Space.
+component SectionButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected;
+    callback clicked;
+
+    height: 32px;
+    border-radius: 6px;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: ChromePalette.focus-ring;
+    background: root.selected
+        ? Palette.accent-background
+        : touch.has-hover ? Palette.alternate-background : transparent;
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-item-selected: root.selected;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    Text {
+        x: 12px;
+        width: parent.width - 24px;
+        height: parent.height;
+        text: root.label;
+        color: root.selected ? Palette.accent-foreground : Palette.foreground;
+        font-size: 13px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+component Heading inherits Text {
+    font-size: 18px;
+    font-weight: 650;
+    color: Palette.foreground;
+}
+
+component GroupTitle inherits Text {
+    font-size: 13px;
+    font-weight: 650;
+    color: Palette.foreground;
+}
+
+// A short explanation under a control.
+component Note inherits Text {
+    font-size: 12px;
+    color: Palette.foreground.with-alpha(0.62);
+    wrap: word-wrap;
+}
+
+// A validation message under a field.
+component Problem inherits Text {
+    font-size: 12px;
+    color: ChromePalette.danger;
+    wrap: word-wrap;
+}
+
+// A label on the left and its control on the right.
+component LabelledRow inherits HorizontalLayout {
+    in property <string> label;
+    spacing: 12px;
+    alignment: stretch;
+
+    Text {
+        width: 170px;
+        text: root.label;
+        color: Palette.foreground;
+        font-size: 13px;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+
+    @children
+}
+
+export component SettingsWindow inherits Window {
+    // The colour scheme the appearance setting asks for; `unknown` follows the system, whose
+    // scheme the browser passes in `system-color-scheme`.
+    in property <ColorScheme> forced-color-scheme: ColorScheme.unknown;
+    in property <ColorScheme> system-color-scheme: ColorScheme.unknown;
+    out property <ColorScheme> effective-color-scheme: root.forced-color-scheme != ColorScheme.unknown
+        ? root.forced-color-scheme
+        : root.system-color-scheme;
+    in-out property <int> section: 0;
+
+    // Every value below is bound both ways to its control, so the browser can always show the
+    // current setting and the control keeps following it after the user has used it.
+
+    // General
+    in-out property <int> startup-index;
+    in-out property <string> homepage;
+    in-out property <string> homepage-problem;
+    in property <[string]> engine-choices;
+    in-out property <int> engine-index;
+    in property <[SearchEngineRow]> engines;
+    in property <bool> search-suggestions;
+    in property <[string]> zoom-choices;
+    in-out property <int> zoom-index;
+    // The custom search engine form; `editor-id` is empty when adding.
+    in property <bool> editor-open;
+    in property <string> editor-id;
+    in-out property <string> editor-name;
+    in-out property <string> editor-keyword;
+    in-out property <string> editor-url;
+    in property <string> editor-problem;
+    in property <string> editor-warning;
+    in property <bool> can-add-engine: true;
+
+    // Appearance
+    in-out property <int> theme-index;
+    in-out property <bool> show-home-button;
+    in-out property <bool> show-bookmarks-bar;
+
+    // Privacy and security
+    in-out property <bool> block-ads-and-trackers;
+    in-out property <bool> block-popups;
+    in property <bool> https-only;
+    in-out property <bool> clear-history-on-exit;
+    in-out property <bool> clear-cookies-on-exit;
+    in-out property <bool> clear-cache-on-exit;
+    // Set by the history work once "Clear browsing data…" exists.
+    in property <bool> clear-browsing-data-available: false;
+
+    // Downloads
+    in-out property <string> download-directory;
+    in-out property <string> download-directory-problem;
+    in-out property <bool> ask-where-to-save;
+
+    // Passwords
+    in-out property <bool> offer-to-save-passwords;
+    in property <[string]> never-save-origins;
+
+    // Advanced
+    in-out property <bool> experimental-web-features;
+    in-out property <bool> gpu-canvas;
+    in-out property <string> language;
+    in-out property <string> language-problem;
+
+    // Shown at the top while the settings cannot be saved (newer file, or unreadable).
+    in property <string> save-problem;
+
+    callback toggled(string, bool);
+    callback chosen(string, int);
+    // A text field's value, given when the user presses Return or leaves the field. The
+    // browser writes back the form it stored, or sets the field's problem.
+    callback text-committed(string, string);
+    // Every text field's current value is to be committed: before the section changes and
+    // before the window closes.
+    callback commit-texts();
+    callback editor-url-edited(string);
+    callback add-engine();
+    callback edit-engine(string);
+    callback remove-engine(string);
+    callback save-engine();
+    callback cancel-engine();
+    callback remove-never-save(int);
+    callback clear-browsing-data();
+    callback close-settings();
+    callback quit-browser();
+
+    title: "Settings";
+    icon: @image-url("../../../../apps/mercury-desktop/resources/mercury-browser.svg");
+    preferred-width: 780px;
+    preferred-height: 580px;
+    min-width: 560px;
+    min-height: 420px;
+    background: Palette.background;
+
+    init => {
+        Palette.color-scheme = root.effective-color-scheme;
+        // So that Escape and Cmd+W work before any field has been clicked.
+        keys.focus();
+    }
+    changed effective-color-scheme => {
+        Palette.color-scheme = root.effective-color-scheme;
+    }
+
+    property <[string]> sections: [
+        "General",
+        "Appearance",
+        "Privacy and security",
+        "Downloads",
+        "Passwords",
+        "Advanced",
+    ];
+
+    // Without a menu bar of its own, Slint's winit backend installs its default macOS
+    // application menu whenever this window becomes active, and that menu's Quit ends the
+    // process without Mercury's ordered shutdown. An empty, hidden one keeps it out; Mercury's
+    // own menu is reinstalled when this window becomes key.
+    MenuBar {
+        visible: false;
+        Menu { }
+    }
+
+    keys := FocusScope {
+        // Slint reports the Command key as `control` on Apple platforms.
+        key-pressed(event) => {
+            if event.text == Key.Escape || (event.modifiers.control && event.text == "w") {
+                root.commit-texts();
+                root.close-settings();
+                return accept;
+            }
+            if event.modifiers.control && event.text == "q" {
+                root.commit-texts();
+                root.quit-browser();
+                return accept;
+            }
+            reject
+        }
+
+        HorizontalLayout {
+            Rectangle {
+                width: 200px;
+                background: Palette.alternate-background;
+
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 2px;
+                    alignment: start;
+
+                    Text {
+                        text: "Settings";
+                        font-size: 15px;
+                        font-weight: 650;
+                        color: Palette.foreground;
+                        height: 36px;
+                        vertical-alignment: center;
+                    }
+
+                    for name[index] in root.sections: SectionButton {
+                        label: name;
+                        selected: root.section == index;
+                        clicked => {
+                            root.commit-texts();
+                            root.section = index;
+                        }
+                    }
+                }
+            }
+
+            ScrollView {
+                horizontal-stretch: 1;
+                viewport-width: self.visible-width;
+
+                VerticalLayout {
+                    width: parent.visible-width;
+                    padding: 24px;
+                    spacing: 14px;
+                    alignment: start;
+
+                    if root.save-problem != "": Rectangle {
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: Palette.border;
+                        background: Palette.alternate-background;
+                        height: save-problem-text.preferred-height + 16px;
+
+                        save-problem-text := Text {
+                            x: 10px;
+                            width: parent.width - 20px;
+                            text: root.save-problem;
+                            color: Palette.foreground;
+                            font-size: 12px;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                        }
+                    }
+
+                    Heading {
+                        text: root.sections[root.section];
+                    }
+
+                    // General
+                    if root.section == 0: VerticalLayout {
+                        spacing: 12px;
+
+                        LabelledRow {
+                            label: "On start-up, open";
+                            ComboBox {
+                                horizontal-stretch: 1;
+                                accessible-label: "On start-up, open";
+                                model: ["A new tab", "The home page", "The tabs from last time"];
+                                current-index <=> root.startup-index;
+                                selected => {
+                                    root.chosen("startup", self.current-index);
+                                }
+                            }
+                        }
+
+                        LabelledRow {
+                            label: "Home page";
+                            VerticalLayout {
+                                spacing: 4px;
+                                LineEdit {
+                                    accessible-label: "Home page";
+                                    text <=> root.homepage;
+                                    placeholder-text: "https://example.com/ (empty for none)";
+                                    accepted(text) => {
+                                        root.text-committed("homepage", text);
+                                    }
+                                    changed has-focus => {
+                                        if !self.has-focus {
+                                            root.text-committed("homepage", self.text);
+                                        }
+                                    }
+                                }
+                                if root.homepage-problem != "": Problem {
+                                    text: root.homepage-problem;
+                                }
+                            }
+                        }
+
+                        LabelledRow {
+                            label: "Default page zoom";
+                            ComboBox {
+                                horizontal-stretch: 1;
+                                accessible-label: "Default page zoom";
+                                model: root.zoom-choices;
+                                current-index <=> root.zoom-index;
+                                selected => {
+                                    root.chosen("default-zoom", self.current-index);
+                                }
+                            }
+                        }
+
+                        GroupTitle {
+                            text: "Search";
+                        }
+
+                        LabelledRow {
+                            label: "Search engine";
+                            ComboBox {
+                                horizontal-stretch: 1;
+                                accessible-label: "Search engine";
+                                model: root.engine-choices;
+                                current-index <=> root.engine-index;
+                                selected => {
+                                    root.chosen("search-engine", self.current-index);
+                                }
+                            }
+                        }
+
+                        Note {
+                            text: "Type a keyword before your search in the address bar to use another engine, for example \"@wikipedia rust\".";
+                        }
+
+                        for engine in root.engines: HorizontalLayout {
+                            spacing: 8px;
+                            height: 30px;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: engine.name;
+                                color: Palette.foreground;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            Text {
+                                width: 140px;
+                                text: engine.keyword == "" ? "no keyword" : engine.keyword;
+                                color: Palette.foreground.with-alpha(0.7);
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            // Always as wide, so the keywords line up.
+                            HorizontalLayout {
+                                width: 170px;
+                                spacing: 8px;
+                                alignment: end;
+
+                                if engine.custom: Button {
+                                    text: "Edit";
+                                    accessible-label: "Edit " + engine.name;
+                                    clicked => {
+                                        root.edit-engine(engine.id);
+                                    }
+                                }
+
+                                if engine.custom: Button {
+                                    text: "Remove";
+                                    accessible-label: "Remove " + engine.name;
+                                    clicked => {
+                                        root.remove-engine(engine.id);
+                                    }
+                                }
+                            }
+                        }
+
+                        if !root.editor-open: HorizontalLayout {
+                            alignment: start;
+                            Button {
+                                text: "Add search engine…";
+                                enabled: root.can-add-engine;
+                                clicked => {
+                                    root.add-engine();
+                                }
+                            }
+                        }
+
+                        if root.editor-open: Rectangle {
+                            border-radius: 8px;
+                            border-width: 1px;
+                            border-color: Palette.border;
+                            background: Palette.alternate-background;
+                            height: editor-layout.preferred-height;
+
+                            editor-layout := VerticalLayout {
+                                padding: 14px;
+                                spacing: 10px;
+
+                                GroupTitle {
+                                    text: root.editor-id == "" ? "Add a search engine" : "Edit search engine";
+                                }
+
+                                LabelledRow {
+                                    label: "Name";
+                                    LineEdit {
+                                        accessible-label: "Engine name";
+                                        text <=> root.editor-name;
+                                        placeholder-text: "Example Search";
+                                    }
+                                }
+
+                                LabelledRow {
+                                    label: "Keyword";
+                                    LineEdit {
+                                        accessible-label: "Engine keyword";
+                                        text <=> root.editor-keyword;
+                                        placeholder-text: "@example (optional)";
+                                    }
+                                }
+
+                                LabelledRow {
+                                    label: "URL with {searchTerms}";
+                                    LineEdit {
+                                        accessible-label: "Engine URL";
+                                        text <=> root.editor-url;
+                                        placeholder-text: "https://example.com/search?q={searchTerms}";
+                                        edited(text) => {
+                                            root.editor-url-edited(text);
+                                        }
+                                    }
+                                }
+
+                                if root.editor-warning != "": Note {
+                                    text: root.editor-warning;
+                                }
+
+                                if root.editor-problem != "": Problem {
+                                    text: root.editor-problem;
+                                }
+
+                                HorizontalLayout {
+                                    alignment: end;
+                                    spacing: 8px;
+
+                                    Button {
+                                        text: "Cancel";
+                                        clicked => {
+                                            root.cancel-engine();
+                                        }
+                                    }
+
+                                    Button {
+                                        text: "Save";
+                                        primary: true;
+                                        clicked => {
+                                            root.save-engine();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        CheckBox {
+                            text: "Show search suggestions while typing";
+                            checked: root.search-suggestions;
+                            enabled: false;
+                        }
+
+                        Note {
+                            text: "Off: suggestions would send everything you type in the address bar to the search engine.";
+                        }
+                    }
+
+                    // Appearance
+                    if root.section == 1: VerticalLayout {
+                        spacing: 12px;
+
+                        LabelledRow {
+                            label: "Theme";
+                            ComboBox {
+                                horizontal-stretch: 1;
+                                accessible-label: "Theme";
+                                model: ["Follow the system", "Light", "Dark"];
+                                current-index <=> root.theme-index;
+                                selected => {
+                                    root.chosen("theme", self.current-index);
+                                }
+                            }
+                        }
+
+                        Note {
+                            text: "Changes the browser's own colours and the colour scheme pages are told to use.";
+                        }
+
+                        CheckBox {
+                            text: "Show the home button";
+                            checked <=> root.show-home-button;
+                            toggled => {
+                                root.toggled("show-home-button", self.checked);
+                            }
+                        }
+
+                        CheckBox {
+                            text: "Show the bookmarks bar";
+                            checked <=> root.show-bookmarks-bar;
+                            toggled => {
+                                root.toggled("show-bookmarks-bar", self.checked);
+                            }
+                        }
+
+                        Note {
+                            text: "The bookmarks bar arrives with bookmarks; this choice is kept until then.";
+                        }
+                    }
+
+                    // Privacy and security
+                    if root.section == 2: VerticalLayout {
+                        spacing: 12px;
+
+                        CheckBox {
+                            text: "Block ads and trackers";
+                            checked <=> root.block-ads-and-trackers;
+                            toggled => {
+                                root.toggled("block-ads-and-trackers", self.checked);
+                            }
+                        }
+
+                        Note {
+                            text: "Applies to everything loaded from now on; reload a page to apply it there.";
+                        }
+
+                        CheckBox {
+                            text: "Block pop-up windows";
+                            checked <=> root.block-popups;
+                            toggled => {
+                                root.toggled("block-popups", self.checked);
+                            }
+                        }
+
+                        CheckBox {
+                            text: "Load pages over HTTPS only";
+                            checked: root.https-only;
+                            enabled: false;
+                        }
+
+                        Note {
+                            text: "Not available yet: Mercury Browser cannot yet warn you before it opens a page that has no HTTPS version.";
+                        }
+
+                        GroupTitle {
+                            text: "When Mercury Browser quits, clear";
+                        }
+
+                        CheckBox {
+                            text: "Browsing history";
+                            checked <=> root.clear-history-on-exit;
+                            toggled => {
+                                root.toggled("clear-history-on-exit", self.checked);
+                            }
+                        }
+
+                        CheckBox {
+                            text: "Cookies and site data";
+                            checked <=> root.clear-cookies-on-exit;
+                            toggled => {
+                                root.toggled("clear-cookies-on-exit", self.checked);
+                            }
+                        }
+
+                        Note {
+                            text: "Site data is what sites keep in the browser: local and session storage, IndexedDB databases and Cache Storage. If Mercury Browser does not quit normally, they are cleared the next time it starts.";
+                        }
+
+                        CheckBox {
+                            text: "Cached files";
+                            checked <=> root.clear-cache-on-exit;
+                            toggled => {
+                                root.toggled("clear-cache-on-exit", self.checked);
+                            }
+                        }
+
+                        HorizontalLayout {
+                            alignment: start;
+                            Button {
+                                text: "Clear browsing data…";
+                                enabled: root.clear-browsing-data-available;
+                                clicked => {
+                                    root.clear-browsing-data();
+                                }
+                            }
+                        }
+                    }
+
+                    // Downloads
+                    if root.section == 3: VerticalLayout {
+                        spacing: 12px;
+
+                        LabelledRow {
+                            label: "Save downloads in";
+                            VerticalLayout {
+                                spacing: 4px;
+                                LineEdit {
+                                    accessible-label: "Save downloads in";
+                                    text <=> root.download-directory;
+                                    placeholder-text: "The Downloads folder";
+                                    accepted(text) => {
+                                        root.text-committed("download-directory", text);
+                                    }
+                                    changed has-focus => {
+                                        if !self.has-focus {
+                                            root.text-committed("download-directory", self.text);
+                                        }
+                                    }
+                                }
+                                if root.download-directory-problem != "": Problem {
+                                    text: root.download-directory-problem;
+                                }
+                            }
+                        }
+
+                        CheckBox {
+                            text: "Ask where to save each download";
+                            checked <=> root.ask-where-to-save;
+                            toggled => {
+                                root.toggled("ask-where-to-save", self.checked);
+                            }
+                        }
+
+                        Note {
+                            text: "Kept for downloads, which arrive in a later version.";
+                        }
+                    }
+
+                    // Passwords
+                    if root.section == 4: VerticalLayout {
+                        spacing: 12px;
+
+                        CheckBox {
+                            text: "Offer to save passwords";
+                            checked <=> root.offer-to-save-passwords;
+                            toggled => {
+                                root.toggled("offer-to-save-passwords", self.checked);
+                            }
+                        }
+
+                        Note {
+                            text: "Kept for the password manager, which arrives in a later version.";
+                        }
+
+                        GroupTitle {
+                            text: "Never save passwords for";
+                        }
+
+                        if root.never-save-origins.length == 0: Note {
+                            text: "No sites.";
+                        }
+
+                        for origin[index] in root.never-save-origins: HorizontalLayout {
+                            spacing: 8px;
+                            height: 30px;
+
+                            Text {
+                                horizontal-stretch: 1;
+                                text: origin;
+                                color: Palette.foreground;
+                                font-size: 13px;
+                                vertical-alignment: center;
+                                overflow: elide;
+                            }
+
+                            Button {
+                                text: "Remove";
+                                accessible-label: "Remove " + origin;
+                                clicked => {
+                                    root.remove-never-save(index);
+                                }
+                            }
+                        }
+                    }
+
+                    // Advanced
+                    if root.section == 5: VerticalLayout {
+                        spacing: 12px;
+
+                        CheckBox {
+                            text: "Experimental web features";
+                            checked <=> root.experimental-web-features;
+                            toggled => {
+                                root.toggled("experimental-web-features", self.checked);
+                            }
+                        }
+
+                        CheckBox {
+                            text: "Draw canvases on the GPU";
+                            checked <=> root.gpu-canvas;
+                            toggled => {
+                                root.toggled("gpu-canvas", self.checked);
+                            }
+                        }
+
+                        Note {
+                            text: "These two apply the next time Mercury Browser starts. The command-line options --disable-experimental-web-features and --disable-gpu-canvas turn them off for that run, whatever is chosen here.";
+                        }
+
+                        LabelledRow {
+                            label: "Language";
+                            VerticalLayout {
+                                spacing: 4px;
+                                LineEdit {
+                                    accessible-label: "Language";
+                                    text <=> root.language;
+                                    placeholder-text: "Follow the system (for example en-GB)";
+                                    accepted(text) => {
+                                        root.text-committed("language", text);
+                                    }
+                                    changed has-focus => {
+                                        if !self.has-focus {
+                                            root.text-committed("language", self.text);
+                                        }
+                                    }
+                                }
+                                if root.language-problem != "": Problem {
+                                    text: root.language-problem;
+                                }
+                            }
+                        }
+
+                        Note {
+                            text: "Kept for later: Mercury Browser is only in English for now.";
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
