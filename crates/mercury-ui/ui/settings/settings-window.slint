@@ -1,4 +1,5 @@
 import { Button, CheckBox, ComboBox, LineEdit, Palette, ScrollView } from "std-widgets.slint";
+import { ChromePalette } from "../theme/chrome-palette.slint";
 
 // One search engine as the settings window lists it.
 export struct SearchEngineRow {
@@ -17,7 +18,7 @@ component SectionButton inherits Rectangle {
     height: 32px;
     border-radius: 6px;
     border-width: focus.has-focus ? 2px : 0px;
-    border-color: Palette.accent-background;
+    border-color: ChromePalette.focus-ring;
     background: root.selected
         ? Palette.accent-background
         : touch.has-hover ? Palette.alternate-background : transparent;
@@ -76,11 +77,10 @@ component Note inherits Text {
     wrap: word-wrap;
 }
 
-// A validation message under a field. Its colour follows the scheme the window actually uses.
+// A validation message under a field.
 component Problem inherits Text {
-    in property <bool> dark;
     font-size: 12px;
-    color: root.dark ? #ff9e94 : #b3261e;
+    color: ChromePalette.danger;
     wrap: word-wrap;
 }
 
@@ -110,7 +110,6 @@ export component SettingsWindow inherits Window {
     out property <ColorScheme> effective-color-scheme: root.forced-color-scheme != ColorScheme.unknown
         ? root.forced-color-scheme
         : root.system-color-scheme;
-    property <bool> dark: root.effective-color-scheme == ColorScheme.dark;
     in-out property <int> section: 0;
 
     // Every value below is bound both ways to its control, so the browser can always show the
@@ -336,7 +335,6 @@ export component SettingsWindow inherits Window {
                                     }
                                 }
                                 if root.homepage-problem != "": Problem {
-                                    dark: root.dark;
                                     text: root.homepage-problem;
                                 }
                             }
@@ -483,7 +481,6 @@ export component SettingsWindow inherits Window {
                                 }
 
                                 if root.editor-problem != "": Problem {
-                                    dark: root.dark;
                                     text: root.editor-problem;
                                 }
 
@@ -662,7 +659,6 @@ export component SettingsWindow inherits Window {
                                     }
                                 }
                                 if root.download-directory-problem != "": Problem {
-                                    dark: root.dark;
                                     text: root.download-directory-problem;
                                 }
                             }
@@ -770,7 +766,6 @@ export component SettingsWindow inherits Window {
                                     }
                                 }
                                 if root.language-problem != "": Problem {
-                                    dark: root.dark;
                                     text: root.language-problem;
                                 }
                             }

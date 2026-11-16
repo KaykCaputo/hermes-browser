@@ -1,3 +1,5 @@
+// Rule: every window gets its own copy of this global, so each window's Rust side must call
+// `settings::apply_chrome_theme(&window)` once after creating it; colours come only from here.
 import { Palette } from "std-widgets.slint";
 
 // The appearance setting, as the browser's own chrome applies it.
@@ -43,6 +45,37 @@ export global ChromePalette {
     out property <color> status-background: root.dark ? #1a222c : #ffffff;
     out property <color> status-border: root.dark ? #29323d : #c5ccd5;
     out property <color> status-text: root.dark ? #c9d3de : #2d3540;
+    // A warning bar (the settings notice).
     out property <color> notice-background: root.dark ? #2a2212 : #fff4d6;
     out property <color> notice-border: root.dark ? #5c4a1f : #e8cf87;
+    // An information bar (for example "restore your tabs?"); text on it uses `info-text`.
+    out property <color> info-background: root.dark ? #10243a : #e6f2fd;
+    out property <color> info-border: root.dark ? #1f4a70 : #9cc8f0;
+    out property <color> info-text: root.dark ? #edf4fa : #141a21;
+
+    // Popups and menus.
+    out property <color> popup-background: root.dark ? #161e28 : #ffffff;
+    out property <color> popup-border: root.dark ? #2b3744 : #c5ccd5;
+    out property <color> item-hover: root.dark ? #1f2a36 : #e8edf3;
+    out property <color> item-selected: root.dark ? #1d4f7a : #d4e7fb;
+    out property <color> item-selected-text: root.dark ? #f4f9fd : #0b2a45;
+    out property <color> separator: root.dark ? #29323d : #d6dce3;
+    // A shortcut shown beside a menu item.
+    out property <color> shortcut-text: root.dark ? #7f8c9c : #6a7480;
+    out property <color> disabled-text: root.dark ? #5d6a7a : #9aa3ad;
+
+    // Dialog sheets.
+    // Laid over the page behind a sheet.
+    out property <color> scrim: root.dark ? #00000099 : #0000004d;
+    out property <color> sheet-background: root.dark ? #141b24 : #ffffff;
+    out property <color> shadow: root.dark ? #00000080 : #00000040;
+    out property <color> primary-button-background: root.dark ? #62bfff : #1683d8;
+    out property <color> primary-button-text: root.dark ? #09131c : #ffffff;
+    // Errors and destructive actions; readable as text on `sheet-background` and the windows.
+    out property <color> danger: root.dark ? #ff9e94 : #b3261e;
+    // The outline of the control that has keyboard focus.
+    out property <color> focus-ring: root.dark ? #9fd8ff : #0b5fa5;
+
+    // The part of a suggestion that matches what was typed.
+    out property <color> match-highlight: root.dark ? #71c5ff : #0b6fc0;
 }

@@ -160,7 +160,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     // gone before the window (and the renderer whose device Servo uses) is destroyed.
     drop(screenshot_timer);
     // settings-ui: last settings write and the clear-history-on-exit hook.
-    settings.finish_run(std::time::Instant::now() + std::time::Duration::from_secs(2));
+    settings.finish_run(std::time::Instant::now() + settings::FINISH_RUN_BUDGET);
     shut_down_engine(exit_code);
     drop(window);
 

@@ -40,9 +40,16 @@ thread_local! {
     static HANDLE: RefCell<Weak<SettingsHandle>> = const { RefCell::new(Weak::new()) };
 }
 
+/// How long `finish_run` may wait at quit for the settings write in flight. The quit work's
+/// overall shutdown budget will own this number.
+pub(crate) const FINISH_RUN_BUDGET: Duration = Duration::from_secs(2);
+
 /// How often the window theme is retried until the native window exists, and for how long.
 const WINDOW_THEME_RETRY: Duration = Duration::from_millis(50);
 const WINDOW_THEME_ATTEMPTS: u32 = 200;
+
+/// Called after a change; returns false when it no longer wants to be called.
+type Listener = dyn Fn() -> bool;
 
 /// The settings of this run. One per process, created in `main` after the profile is locked.
 pub(crate) struct SettingsHandle {
@@ -56,7 +63,9 @@ pub(crate) struct SettingsHandle {
     notice: RefCell<Option<String>>,
     /// Why changes are not being saved, shown in the settings window.
     save_problem: RefCell<Option<String>>,
-    listeners: RefCell<Vec<Rc<dyn Fn()>>>,
+    /// Called after every change; a listener that returns false is dropped.
+    listeners: RefCell<Vec<(u64, Rc<Listener>)>>,
+    next_listener: Cell<u64>,
     window: window::SettingsWindowSlot,
     /// The theme last given to the native window.
     window_theme: Cell<Option<Theme>>,
@@ -101,6 +110,7 @@ impl SettingsHandle {
             notice: RefCell::new(startup.notice.clone()),
             save_problem: RefCell::new(save_problem),
             listeners: RefCell::default(),
+            next_listener: Cell::new(0),
             window: window::SettingsWindowSlot::default(),
             window_theme: Cell::new(None),
             window_theme_timer: Timer::default(),
@@ -166,7 +176,17 @@ impl SettingsHandle {
 
     /// Calls `listener` after every change.
     pub(crate) fn subscribe(&self, listener: impl Fn() + 'static) {
-        self.listeners.borrow_mut().push(Rc::new(listener));
+        self.subscribe_while(move || {
+            listener();
+            true
+        });
+    }
+
+    /// Calls `listener` after every change until it returns false.
+    pub(crate) fn subscribe_while(&self, listener: impl Fn() -> bool + 'static) {
+        let id = self.next_listener.get();
+        self.next_listener.set(id + 1);
+        self.listeners.borrow_mut().push((id, Rc::new(listener)));
     }
 
     pub(crate) fn notice(&self) -> Option<String> {
@@ -196,9 +216,31 @@ impl SettingsHandle {
     fn notify(&self) {
         window::refresh(self);
         let listeners = self.listeners.borrow().clone();
-        for listener in listeners {
-            listener();
+        let finished = listeners
+            .into_iter()
+            .filter(|(_, listener)| !listener())
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        if !finished.is_empty() {
+            self.listeners
+                .borrow_mut()
+                .retain(|(id, _)| !finished.contains(id));
         }
+    }
+
+    /// Closes the settings window, keeping what was typed in its text fields first. Every way
+    /// the window closes goes through here or through its own close request.
+    pub(crate) fn close_settings_window(&self) {
+        let window = self
+            .window
+            .window
+            .borrow()
+            .as_ref()
+            .map(ComponentHandle::clone_strong);
+        if let Some(window) = &window {
+            window::commit_all_texts(self, window);
+        }
+        self.window.close();
     }
 
     fn mark_changed(&self) {
@@ -257,7 +299,7 @@ impl SettingsHandle {
             return;
         }
         self.save_timer.stop();
-        self.window.close();
+        self.close_settings_window();
         if let Some(worker) = self.worker.borrow_mut().take() {
             let SaveWorker { sender, thread } = worker;
             drop(sender);
@@ -338,8 +380,44 @@ impl SaveWorker {
 /// which runs while any window is open, ends.
 pub(crate) fn main_window_closing() {
     if let Some(handle) = HANDLE.with(|current| current.borrow().upgrade()) {
-        handle.window.close();
+        handle.close_settings_window();
     }
+}
+
+/// The system appearance changed: under "Follow the system" the settings window follows it.
+pub(crate) fn system_theme_changed() {
+    // After Slint has handled the same event, so that the browser window reports the new scheme.
+    Timer::single_shot(Duration::ZERO, || {
+        if let Some(handle) = HANDLE.with(|current| current.borrow().upgrade()) {
+            window::refresh(&handle);
+        }
+    });
+}
+
+/// Gives a window the chrome theme the settings ask for, now and after every change, until the
+/// window is dropped. Each window has its own copy of `ChromePalette`, so every window the
+/// browser creates calls this once.
+pub(crate) fn apply_chrome_theme<C>(component: &C)
+where
+    C: ComponentHandle + 'static,
+    for<'a> ChromePalette<'a>: slint::Global<'a, C>,
+{
+    let Some(handle) = HANDLE.with(|current| current.borrow().upgrade()) else {
+        log::warn!("settings: no settings yet; the window keeps the default theme");
+        return;
+    };
+    let theme = chrome_theme(handle.settings.borrow().appearance.theme);
+    component.global::<ChromePalette>().set_theme(theme);
+    let weak = component.as_weak();
+    let settings = Rc::downgrade(&handle);
+    handle.subscribe_while(move || {
+        let (Some(component), Some(settings)) = (weak.upgrade(), settings.upgrade()) else {
+            return false;
+        };
+        let theme = chrome_theme(settings.settings.borrow().appearance.theme);
+        component.global::<ChromePalette>().set_theme(theme);
+        true
+    });
 }
 
 /// The engine's options with the privacy settings it needs before it starts: content blocking
@@ -385,6 +463,7 @@ pub(crate) fn connect(
     controller: &Rc<RefCell<BrowserController>>,
 ) {
     *settings.main_window.borrow_mut() = window.as_weak();
+    apply_chrome_theme(window);
     // Taken once, before the event loop runs; from then on settings reach the engine through
     // the shared switches, never by borrowing it.
     let mut switches = None;
@@ -446,9 +525,6 @@ fn apply_everywhere(
         switches.set_clear_on_exit(apply::exit_clearing(&current.privacy.clear_on_exit));
     }
 
-    window
-        .global::<ChromePalette>()
-        .set_theme(chrome_theme(current.appearance.theme));
     window.set_show_home_button(current.appearance.show_home_button);
     window.set_default_zoom_percent(i32::from(current.appearance.default_zoom_percent));
     window.set_search_engine_name(current.search.default_engine().name.into());
@@ -657,5 +733,29 @@ pub(crate) mod tests {
         handle.finish_run(deadline());
 
         assert!(!directory.path().join("settings.json").exists());
+    }
+
+    #[test]
+    fn any_window_follows_the_chrome_theme_until_it_is_dropped() {
+        init_slint();
+        let handle = SettingsHandle::start(None);
+        let listeners_before = handle.listeners.borrow().len();
+        let window = mercury_ui::SettingsWindow::new().expect("a window");
+
+        apply_chrome_theme(&window);
+        assert_eq!(
+            window.global::<ChromePalette>().get_theme(),
+            ChromeTheme::System
+        );
+        handle.update(|settings| settings.appearance.theme = Theme::Light);
+        assert_eq!(
+            window.global::<ChromePalette>().get_theme(),
+            ChromeTheme::Light
+        );
+
+        drop(window);
+        handle.update(|settings| settings.appearance.theme = Theme::Dark);
+
+        assert_eq!(handle.listeners.borrow().len(), listeners_before);
     }
 }

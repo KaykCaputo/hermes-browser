@@ -114,13 +114,10 @@ pub(crate) fn clear_at_exit(servo: &servo::Servo, clearing: ExitClearing) {
 
 /// The files and directories in Servo's profile directory that hold cookies and site data
 /// (Servo 0.8.0: `servo-net` `cookie_storage`, `servo-storage` `webstorage`, `client_storage`
-/// for IndexedDB and `cache_storage`). Re-check at every Servo upgrade.
+/// for IndexedDB and `cache_storage`). The storage roots go whole: Servo recreates them with
+/// `create_dir_all` when it starts. Re-check at every Servo upgrade (a test fails then).
 const SITE_DATA_FILES: [&str; 2] = ["cookie_jar.json", "localstorage.json"];
-const SITE_DATA_DIRECTORIES: [&str; 3] = [
-    "webstorage",
-    "clientstorage/default_v1",
-    "cachestorage/default_v1",
-];
+const SITE_DATA_DIRECTORIES: [&str; 3] = ["webstorage", "clientstorage", "cachestorage"];
 
 /// Removes cookies and site data from Servo's profile directory. Only ever call it while no
 /// Servo is running on that directory: before the engine starts, or after it has gone.
@@ -233,19 +230,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn removing_site_data_keeps_hsts_and_the_storage_roots() {
+    fn removing_site_data_keeps_hsts_and_credentials_only() {
         let directory = servo_directory_with_site_data();
 
         remove_site_data_files(directory.path());
 
         assert_eq!(
             remaining(directory.path()),
-            vec![
-                "auth_cache.json",
-                "cachestorage",
-                "clientstorage",
-                "hsts_list.json"
-            ]
+            vec!["auth_cache.json", "hsts_list.json"]
         );
     }
 
@@ -260,22 +252,29 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_symlinked_storage_directory_is_unlinked_not_followed() {
+    fn a_symlinked_storage_root_is_unlinked_not_followed() {
         let outside = tempfile::tempdir().expect("a directory");
-        std::fs::write(outside.path().join("keep.txt"), "mine").expect("a file");
+        std::fs::create_dir_all(outside.path().join("default_v1")).expect("a directory");
+        std::fs::write(outside.path().join("default_v1/keep.txt"), "mine").expect("a file");
         let directory = tempfile::tempdir().expect("a directory");
-        std::fs::create_dir_all(directory.path().join("clientstorage")).expect("a directory");
-        std::os::unix::fs::symlink(
-            outside.path(),
-            directory.path().join("clientstorage/default_v1"),
-        )
-        .expect("a link");
+        std::os::unix::fs::symlink(outside.path(), directory.path().join("clientstorage"))
+            .expect("a link");
 
         remove_site_data_files(directory.path());
 
-        assert!(outside.path().join("keep.txt").exists());
+        assert!(outside.path().join("default_v1/keep.txt").exists());
+        assert!(std::fs::symlink_metadata(directory.path().join("clientstorage")).is_err());
+    }
+
+    /// The store names come from Servo 0.8.0's sources (see `SITE_DATA_DIRECTORIES`). When
+    /// Servo is upgraded this test fails: check where the new version keeps cookies, web
+    /// storage, IndexedDB and Cache Storage, update the lists, then this version number.
+    #[test]
+    fn the_site_data_layout_was_read_from_the_servo_in_use() {
+        let lockfile = include_str!("../../../Cargo.lock");
         assert!(
-            std::fs::symlink_metadata(directory.path().join("clientstorage/default_v1")).is_err()
+            lockfile.contains("name = \"servo\"\nversion = \"0.8.0\"\n"),
+            "Servo is no longer 0.8.0: re-check where it keeps site data"
         );
     }
 }

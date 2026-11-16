@@ -43,7 +43,7 @@ impl BrowserController {
     /// cannot navigate it, so the pending page is replaced instead: the URL becomes the tab's
     /// initial URL again and the engine recreates the tab's web view with it.
     pub fn queue_navigation(&mut self, input: &str) -> Result<(), AddressResolutionError> {
-        let url = self.resolve(input)?.to_string();
+        let url = self.resolve_address(input)?.to_string();
         let tab_id = self.active_tab_id;
         let tab = self
             .tab_mut(tab_id)
@@ -93,7 +93,7 @@ impl BrowserController {
         activation: TabActivation,
     ) -> Result<TabId, AddressResolutionError> {
         let initial_url = initial_address
-            .map(|address| self.resolve(address).map(|url| url.to_string()))
+            .map(|address| self.resolve_address(address).map(|url| url.to_string()))
             .transpose()?;
         let tab_id = self.open_blank_tab(activation);
 
@@ -114,7 +114,7 @@ impl BrowserController {
         tab_id: TabId,
         address: &str,
     ) -> Result<bool, AddressResolutionError> {
-        let url = self.resolve(address)?.to_string();
+        let url = self.resolve_address(address)?.to_string();
         Ok(self
             .tab_mut(tab_id)
             .is_some_and(|tab| set_tab_initial_url(tab, url)))
@@ -380,9 +380,10 @@ impl BrowserController {
 
     // settings
 
-    /// Resolves address-bar input. Until a search builder is set, text that is not an address
-    /// is refused rather than searched for anywhere.
-    fn resolve(&self, input: &str) -> Result<url::Url, AddressResolutionError> {
+    /// The URL address-bar input stands for, with searches built by this controller's search
+    /// builder (keywords included), without navigating anywhere. Until a builder is set, text
+    /// that is not an address is refused rather than searched for anywhere.
+    pub fn resolve_address(&self, input: &str) -> Result<url::Url, AddressResolutionError> {
         match &self.search {
             Some(search) => resolve_address(input, search),
             None => resolve_address(input, &SearchUrlBuilder::new(|_| Err(NO_SEARCH.to_owned()))),

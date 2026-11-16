@@ -16,6 +16,10 @@ pub(crate) struct Startup {
     pub notice: Option<String>,
 }
 
+/// Said when the stored choices cannot be used: the defaults clear nothing at quit.
+pub(crate) const NOTHING_CLEARED: &str =
+    "Nothing is cleared when Mercury Browser quits in this session.";
+
 /// Interprets the result of `SettingsStore::load` as the crate's contract asks: repairs are
 /// saved once; a damaged file gives the defaults, its backup is kept and the user is told; a
 /// file from a newer version gives the defaults, is never written in this run, and the user is
@@ -51,12 +55,11 @@ pub(crate) fn interpret(result: Result<Loaded<Settings>, SettingsError>) -> Star
             settings: value,
             save_now: false,
             may_save: false,
-            notice: Some(
+            notice: Some(format!(
                 "Your settings were saved by a newer version of Mercury Browser. This version \
                  is using its defaults and will not save changes, so your settings are kept \
-                 for the newer version."
-                    .to_owned(),
-            ),
+                 for the newer version. {NOTHING_CLEARED}"
+            )),
         },
         Err(error) => {
             log::warn!("settings: {error}");
@@ -64,11 +67,10 @@ pub(crate) fn interpret(result: Result<Loaded<Settings>, SettingsError>) -> Star
                 settings: Settings::default(),
                 save_now: false,
                 may_save: false,
-                notice: Some(
+                notice: Some(format!(
                     "Your settings could not be read, so Mercury Browser is using its defaults \
-                     and will not save changes in this session."
-                        .to_owned(),
-                ),
+                     and will not save changes in this session. {NOTHING_CLEARED}"
+                )),
             }
         }
     }
@@ -181,12 +183,9 @@ mod tests {
         assert_eq!(startup.settings, Settings::default());
         assert!(!startup.save_now);
         assert!(!startup.may_save);
-        assert!(
-            startup
-                .notice
-                .expect("the user is told")
-                .contains("newer version")
-        );
+        let notice = startup.notice.expect("the user is told");
+        assert!(notice.contains("newer version"), "{notice}");
+        assert!(notice.contains(NOTHING_CLEARED), "{notice}");
     }
 
     #[test]
@@ -197,7 +196,8 @@ mod tests {
 
         assert_eq!(startup.settings, Settings::default());
         assert!(!startup.may_save);
-        assert!(startup.notice.is_some());
+        let notice = startup.notice.expect("the user is told");
+        assert!(notice.contains(NOTHING_CLEARED), "{notice}");
     }
 
     #[test]

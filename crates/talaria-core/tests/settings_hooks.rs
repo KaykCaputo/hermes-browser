@@ -223,3 +223,26 @@ fn forcing_the_scheme_pages_already_have_queues_nothing() {
 
     assert_eq!(queued(&mut controller), Vec::new());
 }
+
+#[test]
+fn others_resolve_address_bar_text_through_the_controllers_own_builder() {
+    let mut controller = BrowserController::default();
+    controller.set_search_url_builder(test_search());
+
+    let search = controller
+        .resolve_address("@keyword rust book")
+        .expect("a search");
+    let address = controller
+        .resolve_address("example.org")
+        .expect("an address");
+
+    assert_eq!(
+        search.as_str(),
+        "https://search.test/?q=%40keyword+rust+book"
+    );
+    assert_eq!(address.as_str(), "https://example.org/");
+    assert!(
+        controller.active_state().url().is_empty(),
+        "nothing navigates"
+    );
+}

@@ -15,7 +15,7 @@ use super::{SettingsHandle, edit};
 /// The open settings window, if any, and the search engine being edited in it.
 #[derive(Default)]
 pub(crate) struct SettingsWindowSlot {
-    window: RefCell<Option<SettingsWindow>>,
+    pub(super) window: RefCell<Option<SettingsWindow>>,
     /// `Some(None)` while adding an engine, `Some(Some(id))` while editing one.
     editing: RefCell<Option<Option<String>>>,
 }
@@ -53,6 +53,7 @@ pub(crate) fn show(handle: &Rc<SettingsHandle>) {
     slot.close();
     match SettingsWindow::new() {
         Ok(window) => {
+            super::apply_chrome_theme(&window);
             connect(&window, Rc::downgrade(handle));
             fill_text_fields(&window, &handle.settings());
             *slot.window.borrow_mut() = Some(window);
@@ -179,6 +180,14 @@ fn text_field(window: &SettingsWindow, name: &str) -> SharedString {
     }
 }
 
+/// Commits every text field's current text (see `commit_text`).
+pub(crate) fn commit_all_texts(handle: &SettingsHandle, window: &SettingsWindow) {
+    for name in edit::TEXT_FIELDS {
+        let text = text_field(window, name);
+        commit_text(handle, window, name, &text);
+    }
+}
+
 /// Applies a text field's value. Accepted, the field shows the form that was stored; refused,
 /// it keeps the text and shows why.
 fn commit_text(handle: &SettingsHandle, window: &SettingsWindow, name: &str, text: &str) {
@@ -233,14 +242,22 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     let commit_handle = handle.clone();
     let commit_window = window.as_weak();
     window.on_commit_texts(move || {
-        let (Some(handle), Some(window)) = (commit_handle.upgrade(), commit_window.upgrade())
-        else {
-            return;
-        };
-        for name in edit::TEXT_FIELDS {
-            let text = text_field(&window, name);
-            commit_text(&handle, &window, name, &text);
+        if let (Some(handle), Some(window)) = (commit_handle.upgrade(), commit_window.upgrade()) {
+            commit_all_texts(&handle, &window);
         }
+    });
+
+    // The native close button: keep what was typed, then hide as usual.
+    let close_request_handle = handle.clone();
+    let close_request_window = window.as_weak();
+    window.window().on_close_requested(move || {
+        if let (Some(handle), Some(window)) = (
+            close_request_handle.upgrade(),
+            close_request_window.upgrade(),
+        ) {
+            commit_all_texts(&handle, &window);
+        }
+        slint::CloseRequestResponse::HideWindow
     });
 
     let warning_window = window.as_weak();
@@ -359,7 +376,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
         // Dropping the window inside its own callback is not safe; do it right after.
         slint::Timer::single_shot(std::time::Duration::ZERO, move || {
             if let Some(handle) = close_handle.upgrade() {
-                handle.window.close();
+                handle.close_settings_window();
             }
         });
     });
@@ -537,5 +554,65 @@ mod tests {
 
         assert_eq!(window.get_section(), 3);
         assert_eq!(downloads.accessible_item_selected(), Some(true));
+    }
+
+    #[test]
+    fn typed_text_is_kept_when_the_browser_window_closes_the_settings() {
+        init_slint();
+        let handle = SettingsHandle::start(None);
+        let window = open(&handle);
+        element(&window, "Home page").set_accessible_value("example.org");
+
+        handle.close_settings_window();
+
+        assert_eq!(handle.settings().homepage, "https://example.org/");
+        assert!(handle.window.window.borrow().is_none());
+    }
+
+    #[test]
+    fn typed_text_is_kept_when_the_native_close_button_is_used() {
+        init_slint();
+        let handle = SettingsHandle::start(None);
+        let window = open(&handle);
+        element(&window, "Home page").set_accessible_value("example.org");
+
+        window
+            .window()
+            .dispatch_event(slint::platform::WindowEvent::CloseRequested);
+
+        assert_eq!(handle.settings().homepage, "https://example.org/");
+        assert!(!window.window().is_visible());
+    }
+
+    #[test]
+    fn typed_text_is_saved_at_quit() {
+        init_slint();
+        let directory = tempfile::tempdir().expect("a directory");
+        let handle = SettingsHandle::start(Some(directory.path()));
+        let window = open(&handle);
+        element(&window, "Advanced").invoke_accessible_default_action();
+        element(&window, "Language").set_accessible_value("pt-BR");
+        drop(window);
+
+        handle.finish_run(std::time::Instant::now() + super::super::FINISH_RUN_BUDGET);
+
+        let saved = std::fs::read_to_string(directory.path().join("settings.json"))
+            .expect("a settings file");
+        assert!(saved.contains(r#""language": "pt-BR""#), "{saved}");
+    }
+
+    #[test]
+    fn the_settings_window_takes_the_chrome_theme_and_follows_it() {
+        init_slint();
+        let handle = SettingsHandle::start(None);
+        handle.update(|settings| settings.appearance.theme = mercury_settings::Theme::Light);
+        let window = open(&handle);
+        let theme =
+            |window: &SettingsWindow| window.global::<mercury_ui::ChromePalette>().get_theme();
+        assert_eq!(theme(&window), mercury_ui::ChromeTheme::Light);
+
+        handle.update(|settings| settings.appearance.theme = mercury_settings::Theme::Dark);
+
+        assert_eq!(theme(&window), mercury_ui::ChromeTheme::Dark);
     }
 }

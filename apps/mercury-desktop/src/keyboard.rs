@@ -102,6 +102,8 @@ pub(crate) fn connect_native_keyboard_input(
                     controller
                         .borrow_mut()
                         .set_color_scheme(color_scheme_from_winit(*theme));
+                    // settings-ui: the settings window follows the system under "Follow the system".
+                    crate::settings::system_theme_changed();
                     window.window().request_redraw();
                 }
                 // settings-ui: the settings window closes with the browser window, so the

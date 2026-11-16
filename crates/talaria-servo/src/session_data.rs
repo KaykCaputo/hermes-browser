@@ -566,7 +566,7 @@ mod tests {
 
         assert_eq!(
             crate::exit_clearing::tests::remaining(directory.path()),
-            vec!["cachestorage", "clientstorage", "hsts_list.json"]
+            vec!["hsts_list.json"]
         );
     }
 
@@ -592,7 +592,7 @@ mod tests {
 
         assert_eq!(
             crate::exit_clearing::tests::remaining(directory.path()),
-            vec!["cachestorage", "clientstorage", "hsts_list.json"]
+            vec!["hsts_list.json"]
         );
     }
 }
