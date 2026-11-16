@@ -21,9 +21,11 @@ mod crash_handler;
 mod engine;
 mod keyboard;
 mod keyutils;
-mod panic_hook;
+#[cfg(target_os = "macos")]
+mod media_buffers;
 #[cfg(target_os = "macos")]
 mod media_isolation;
+mod panic_hook;
 #[cfg(target_os = "macos")]
 mod platform_macos;
 mod profile;
@@ -50,6 +52,13 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     }
     // With the early environment changes: before any thread exists, and only in the browser.
     record_browser_process_id();
+
+    // (5) Media: GLib's user directories, where GStreamer writes its download buffers (copies of
+    // the media being played), point into a private directory of this run under Mercury's cache;
+    // content processes inherit them. Removed when this run ends (dropped at the end of `main`),
+    // and leftovers of killed runs at the next start. Before any thread starts.
+    #[cfg(target_os = "macos")]
+    let _media_buffers = media_buffers::keep_media_buffers_private();
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let parsed = reject_non_utf8_paths(&arguments).unwrap_or_else(|| {

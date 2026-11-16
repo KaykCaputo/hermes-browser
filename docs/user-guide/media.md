@@ -38,6 +38,17 @@ ignores GStreamer plugins, registries and GIO modules that other software instal
 user account (`GST_PLUGIN_PATH`, `~/.local/share/gstreamer-1.0/plugins`, `~/.cache/gstreamer-1.0`,
 `GIO_EXTRA_MODULES`).
 
+**What media playback writes to disk, and when it is removed.** Everything is under Mercury's
+cache folder, `~/Library/Caches/io.github.thepigdestroyer.mercury-browser/`, and nothing is
+written to `~/.cache`, `~/.local` or `~/.config`:
+
+| Where | What | Removed |
+|---|---|---|
+| `gstreamer/registry-<version>-<architecture>.bin` | GStreamer's list of the bundled plugins (no media). | Kept; rebuilt when Mercury's GStreamer changes. |
+| `media-buffers/<process id>-<time>/` | One private folder (readable only by you) for each running Mercury. While media plays, GStreamer keeps a copy of each stream it downloads in its `cache` subfolder, so that playback can seek without downloading again. These copies are of what you played. | When Mercury quits normally, the whole folder. If Mercury was killed or crashed, at its next start (a folder still locked by a running Mercury is left alone, so several copies of Mercury can run at once). |
+
+If the media folder cannot be created, media still plays, without those download copies.
+
 What has been checked on Apple Silicon (GStreamer 1.28.9):
 
 | Format | Status |

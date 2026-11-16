@@ -66,28 +66,42 @@ pub fn gstreamer_isolation(cache_dir: &Path, executable_dir: &Path) -> Vec<EnvCh
     ]
 }
 
-/// Mercury's cache directory, from the value of `HOME`.
-pub fn mercury_cache_dir(home: Option<OsString>) -> PathBuf {
-    match home {
-        Some(home) if !home.is_empty() => PathBuf::from(home)
-            .join("Library")
-            .join("Caches")
-            .join(BUNDLE_IDENTIFIER),
-        _ => std::env::temp_dir().join(BUNDLE_IDENTIFIER),
-    }
+/// Mercury's cache directory inside the platform's cache directory (`dirs::cache_dir()`,
+/// `~/Library/Caches` on macOS), or inside the temporary directory if there is none.
+pub fn mercury_cache_dir(platform_cache_dir: Option<PathBuf>) -> PathBuf {
+    platform_cache_dir
+        .unwrap_or_else(std::env::temp_dir)
+        .join(BUNDLE_IDENTIFIER)
 }
 
-/// Applies [`gstreamer_isolation`] to this process. Content processes are started from this
-/// executable and inherit the result.
-pub fn isolate_gstreamer_from_user_environment() {
-    let cache_dir = mercury_cache_dir(std::env::var_os("HOME"));
-    let executable_dir = std::env::current_exe()
-        .ok()
-        .and_then(|executable| executable.parent().map(Path::to_path_buf))
-        .unwrap_or_default();
-    for change in gstreamer_isolation(&cache_dir, &executable_dir) {
-        // SAFETY: called first thing in `main`, before any thread exists and before anything
-        // reads the environment.
+/// The user directories GLib (and so GStreamer) writes to, pointed into `root`, a private
+/// per-run directory: `XDG_CACHE_HOME` is where GStreamer's download buffers go (copies of the
+/// media being played, `<cache>/<program name>-XXXXXX`), and the data, configuration and
+/// runtime directories are moved with it so that nothing GLib writes lands in the home
+/// directory.
+pub fn glib_user_directories(root: &Path) -> Vec<EnvChange> {
+    GLIB_USER_DIRECTORIES
+        .iter()
+        .map(|(name, child)| EnvChange::Set(name, root.join(child).into_os_string()))
+        .collect()
+}
+
+/// The GLib user-directory variables and the subdirectory of the run directory each names.
+pub const GLIB_USER_DIRECTORIES: [(&str, &str); 4] = [
+    ("XDG_CACHE_HOME", "cache"),
+    ("XDG_DATA_HOME", "data"),
+    ("XDG_CONFIG_HOME", "config"),
+    ("XDG_RUNTIME_DIR", "runtime"),
+];
+
+/// Applies environment changes to this process.
+///
+/// # Safety
+///
+/// Must be called before any thread exists and before anything reads the environment.
+pub unsafe fn apply(changes: Vec<EnvChange>) {
+    for change in changes {
+        // SAFETY: the caller guarantees that no other thread exists.
         unsafe {
             match change {
                 EnvChange::Set(name, value) => std::env::set_var(name, value),
@@ -95,6 +109,19 @@ pub fn isolate_gstreamer_from_user_environment() {
             }
         }
     }
+}
+
+/// Applies [`gstreamer_isolation`] to this process. Content processes are started from this
+/// executable and inherit the result.
+pub fn isolate_gstreamer_from_user_environment() {
+    let cache_dir = mercury_cache_dir(dirs::cache_dir());
+    let executable_dir = std::env::current_exe()
+        .ok()
+        .and_then(|executable| executable.parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    // SAFETY: called at the top of `main`, before any thread exists and before anything
+    // reads the environment.
+    unsafe { apply(gstreamer_isolation(&cache_dir, &executable_dir)) };
 }
 
 #[cfg(test)]
@@ -180,20 +207,34 @@ mod tests {
     }
 
     #[test]
-    fn the_cache_directory_follows_home_and_falls_back_to_the_temporary_directory() {
+    fn the_cache_directory_is_inside_the_platform_cache_directory() {
         assert_eq!(
-            mercury_cache_dir(Some(OsString::from("/Users/someone"))),
+            mercury_cache_dir(Some(PathBuf::from("/Users/someone/Library/Caches"))),
             PathBuf::from(
                 "/Users/someone/Library/Caches/io.github.thepigdestroyer.mercury-browser"
             )
         );
         assert_eq!(
-            mercury_cache_dir(Some(OsString::new())),
-            std::env::temp_dir().join("io.github.thepigdestroyer.mercury-browser")
-        );
-        assert_eq!(
             mercury_cache_dir(None),
             std::env::temp_dir().join("io.github.thepigdestroyer.mercury-browser")
         );
+    }
+
+    #[test]
+    fn glib_writes_only_inside_the_run_directory() {
+        let root = Path::new("/c/media-buffers/42-7");
+        let changes = glib_user_directories(root);
+        for (name, child) in [
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_DATA_HOME", "data"),
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_RUNTIME_DIR", "runtime"),
+        ] {
+            assert!(
+                changes.contains(&EnvChange::Set(name, root.join(child).into_os_string())),
+                "{name}"
+            );
+        }
+        assert_eq!(changes.len(), 4);
     }
 }

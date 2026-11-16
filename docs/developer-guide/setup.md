@@ -141,6 +141,14 @@ Notes:
   starts SIP-protected programs such as `make` and `/bin/sh`, so setting it in a parent shell
   script or in `make` does not work. Use `make test CARGO_FLAGS=--release` (likewise `check` and
   `lint`) for release-mode runs.
+- **Where GStreamer and GLib write.** At the top of `main()`,
+  `apps/mercury-desktop/src/media_isolation.rs` points GStreamer's registry and plugin paths at
+  the application's own files, and `apps/mercury-desktop/src/media_buffers.rs` creates a private,
+  locked run directory under `<dirs::cache_dir()>/io.github.thepigdestroyer.mercury-browser/media-buffers/`
+  and points `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME` and `XDG_RUNTIME_DIR` into it,
+  so GStreamer's download buffers (copies of played media) land there. It is removed at a normal
+  quit, and leftovers of killed runs at the next start. `scripts/macos/test-media.sh` plays the
+  media page with a scratch `HOME` and fails if anything appears outside that directory.
 - **Expected start-up warning while Ogg is excluded.** Every launch logs
   `WARN servo::servo::media_platform] Error initializing GStreamer: ErrorLoadingPlugins(["libgstogg.dylib"]). Trying fallback initialization.`
   Servo loads its plugins by name and treats the missing Ogg plugin as an error; it then starts
