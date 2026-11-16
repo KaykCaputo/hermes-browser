@@ -109,6 +109,7 @@ pub(crate) fn start_screenshot(
     let timer = Timer::default();
 
     timer.start(TimerMode::Repeated, POLL_INTERVAL, move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let Some(window) = weak_window.upgrade() else {
             return;
         };

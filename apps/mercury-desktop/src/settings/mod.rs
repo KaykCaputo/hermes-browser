@@ -40,10 +40,6 @@ thread_local! {
     static HANDLE: RefCell<Weak<SettingsHandle>> = const { RefCell::new(Weak::new()) };
 }
 
-/// How long `finish_run` may wait at quit for the settings write in flight. The quit work's
-/// overall shutdown budget will own this number.
-pub(crate) const FINISH_RUN_BUDGET: Duration = Duration::from_secs(2);
-
 /// How often the window theme is retried until the native window exists, and for how long.
 const WINDOW_THEME_RETRY: Duration = Duration::from_millis(50);
 const WINDOW_THEME_ATTEMPTS: u32 = 200;
@@ -255,6 +251,7 @@ impl SettingsHandle {
         let this = self.this.clone();
         self.save_timer
             .start(TimerMode::SingleShot, delay, move || {
+                let _slint = crate::callback_scope::InSlintCallback::enter();
                 if let Some(handle) = this.upgrade() {
                     handle.save_if_due();
                 }
@@ -365,6 +362,7 @@ impl SaveWorker {
                     };
                     last = Some(outcome);
                     let _queued = slint::invoke_from_event_loop(move || {
+                        let _slint = crate::callback_scope::InSlintCallback::enter();
                         if let Some(handle) = HANDLE.with(|current| current.borrow().upgrade()) {
                             handle.write_finished(outcome);
                         }
@@ -388,6 +386,7 @@ pub(crate) fn main_window_closing() {
 pub(crate) fn system_theme_changed() {
     // After Slint has handled the same event, so that the browser window reports the new scheme.
     Timer::single_shot(Duration::ZERO, || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let Some(handle) = HANDLE.with(|current| current.borrow().upgrade()) {
             window::refresh(&handle);
         }
@@ -488,6 +487,7 @@ pub(crate) fn connect(
 
     let show_settings = Rc::downgrade(settings);
     window.on_show_settings(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let Some(settings) = show_settings.upgrade() {
             window::show(&settings);
         }
@@ -496,6 +496,7 @@ pub(crate) fn connect(
     let go_home_settings = Rc::downgrade(settings);
     let go_home_window = window.as_weak();
     window.on_go_home(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let (Some(settings), Some(window)) = (go_home_settings.upgrade(), go_home_window.upgrade())
         else {
             return;
@@ -506,6 +507,7 @@ pub(crate) fn connect(
 
     let dismiss_settings = Rc::downgrade(settings);
     window.on_dismiss_settings_notice(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let Some(settings) = dismiss_settings.upgrade() {
             settings.dismiss_notice();
         }

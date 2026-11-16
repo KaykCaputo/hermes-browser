@@ -23,10 +23,13 @@ use crate::page_requests::{
     ClosesOnDrop, DocumentStartTracker, EngineRequest, Navigation, ServoPageRequest,
     arms_document_start,
 };
+use crate::session_data::{AfterEngineCleanup, HandleThenCleanup};
 use crate::{ServoWebViewError, ViewportSize};
 
 pub struct ServoWebView {
-    inner: servo::WebView,
+    /// Servo's `WebView` holds handles to Servo (its own and its user-content manager's); the
+    /// share of the after-engine clean-up beside it is released only after them.
+    inner: HandleThenCleanup<servo::WebView, AfterEngineCleanup>,
     frame_ready: FrameReadySignal,
     tab_id: TabId,
     /// Device pixels per logical pixel; pointer positions arrive in logical pixels.
@@ -41,7 +44,7 @@ pub struct ServoWebView {
 
 impl ServoWebView {
     pub(crate) fn new(
-        inner: servo::WebView,
+        inner: HandleThenCleanup<servo::WebView, AfterEngineCleanup>,
         frame_ready: FrameReadySignal,
         tab_id: TabId,
         scale_factor: f32,

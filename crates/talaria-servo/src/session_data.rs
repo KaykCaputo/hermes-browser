@@ -9,8 +9,10 @@
 //! when the Servo version changes, to force that check). A jar in any other shape is left
 //! exactly as it is.
 
+use std::ops::Deref;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use serde_json::Value;
 
@@ -193,8 +195,9 @@ pub(crate) fn clean_up_before_engine_start(config_dir: &Path, clearing: ExitClea
 
 /// Clean-up that must run after the engine has exited and written its files: removes session
 /// cookies from the saved jar and deletes the saved HTTP credentials. Every holder of a Servo
-/// handle also holds one of these, dropped after its handle, so the last one goes after Servo
-/// has shut down — the point after which nothing can write the files again.
+/// handle also holds one of these, dropped after its handle (the runtime by field order, each
+/// web view through `HandleThenCleanup`), so the last one goes after Servo has shut down — the
+/// point after which nothing can write the files again.
 ///
 /// If the user asked for cookies and site data to be cleared at quit (read from `switches` at
 /// this moment, so the last choice counts), their files are removed here, when no engine can
@@ -223,11 +226,108 @@ impl Drop for AfterEngineCleanup {
     }
 }
 
+/// A handle that keeps the engine alive, paired with a share of the clean-up that must follow
+/// the engine. Dropping it releases the handle first and the share after, whatever the fields
+/// of the handle itself hold (Servo's `WebView` drops its delegate before its user-content
+/// manager, which holds a handle to Servo too).
+pub(crate) struct HandleThenCleanup<H, C> {
+    handle: Option<H>,
+    cleanup: Option<Rc<C>>,
+}
+
+impl<H, C> HandleThenCleanup<H, C> {
+    pub(crate) fn new(handle: H, cleanup: Option<Rc<C>>) -> Self {
+        Self {
+            handle: Some(handle),
+            cleanup,
+        }
+    }
+}
+
+impl<H, C> Deref for HandleThenCleanup<H, C> {
+    type Target = H;
+
+    fn deref(&self) -> &H {
+        self.handle
+            .as_ref()
+            .expect("the handle is present until the holder is dropped")
+    }
+}
+
+impl<H, C> Drop for HandleThenCleanup<H, C> {
+    fn drop(&mut self) {
+        drop(self.handle.take());
+        drop(self.cleanup.take());
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
+
+    type Log = Rc<RefCell<Vec<&'static str>>>;
+
+    struct Recorded(&'static str, Log);
+
+    impl Drop for Recorded {
+        fn drop(&mut self) {
+            self.1.borrow_mut().push(self.0);
+        }
+    }
+
+    /// The engine (shut down when its last handle goes) and two holders of a handle and a share
+    /// of the clean-up: the runtime and a web view.
+    fn engine_and_two_holders(
+        log: &Log,
+    ) -> (
+        HandleThenCleanup<Rc<Recorded>, Recorded>,
+        HandleThenCleanup<Rc<Recorded>, Recorded>,
+    ) {
+        let engine = Rc::new(Recorded("engine shut down", Rc::clone(log)));
+        let cleanup = Rc::new(Recorded("clean-up", Rc::clone(log)));
+        (
+            HandleThenCleanup::new(Rc::clone(&engine), Some(Rc::clone(&cleanup))),
+            HandleThenCleanup::new(engine, Some(cleanup)),
+        )
+    }
+
+    #[test]
+    fn the_clean_up_follows_the_engine_when_the_runtime_goes_last() {
+        let log = Log::default();
+        let (runtime, web_view) = engine_and_two_holders(&log);
+
+        drop(web_view);
+        assert!(log.borrow().is_empty());
+        drop(runtime);
+
+        assert_eq!(*log.borrow(), vec!["engine shut down", "clean-up"]);
+    }
+
+    #[test]
+    fn the_clean_up_follows_the_engine_when_a_web_view_outlives_the_runtime() {
+        let log = Log::default();
+        let (runtime, web_view) = engine_and_two_holders(&log);
+
+        drop(runtime);
+        assert!(log.borrow().is_empty());
+        drop(web_view);
+
+        assert_eq!(*log.borrow(), vec!["engine shut down", "clean-up"]);
+    }
+
+    #[test]
+    fn a_holder_gives_access_to_its_handle_and_may_have_no_clean_up() {
+        let log = Log::default();
+        let holder: HandleThenCleanup<_, Recorded> =
+            HandleThenCleanup::new(Recorded("handle", Rc::clone(&log)), None);
+
+        assert_eq!(holder.0, "handle");
+        drop(holder);
+        assert_eq!(*log.borrow(), vec!["handle"]);
+    }
 
     fn config_dir_with_files(label: &str) -> PathBuf {
         let nanoseconds = SystemTime::now()

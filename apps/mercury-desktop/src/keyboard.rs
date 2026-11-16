@@ -31,6 +31,7 @@ pub(crate) fn connect_native_keyboard_input(
     window
         .window()
         .on_winit_window_event(move |_slint_window, event| {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
             let Some(window) = weak_window.upgrade() else {
                 return EventResult::Propagate;
             };

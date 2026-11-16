@@ -106,6 +106,7 @@ pub(crate) fn connect_page_request_callbacks(
 ) {
     let weak_window = window.as_weak();
     window.on_page_request_answered(move |id, accepted, text, password, checked| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let Ok(id) = u64::try_from(id) else {
             return;
         };

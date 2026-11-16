@@ -28,7 +28,9 @@ use crate::page_requests::{
     simple_dialog_kind,
 };
 use crate::screen::ScreenMetrics;
-use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
+use crate::session_data::{
+    AfterEngineCleanup, HandleThenCleanup, clean_up_before_engine_start, end_session_cookies,
+};
 use crate::{ServoWebView, ServoWebViewError};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
@@ -112,8 +114,8 @@ pub struct ServoRuntime {
     /// handle to Servo of its own, so this field must stay before `after_engine_cleanup`.
     user_content: Rc<servo::UserContentManager>,
     /// Declared after `inner` and `user_content`, the two fields that hold a handle to Servo,
-    /// so it is dropped after the last of them. Every web view's delegate holds a clone too;
-    /// see `AfterEngineCleanup`.
+    /// so it is dropped after the last of them. Every web view holds a clone too, released
+    /// after its own handle; see `AfterEngineCleanup`.
     after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
     /// Content blocking and what to clear at quit, shared with the browser.
     switches: EngineSwitches,
@@ -214,7 +216,6 @@ impl ServoRuntime {
             controls: controls.clone(),
             page_requests: page_requests.shared(),
             document_start: Rc::clone(&document_start),
-            _after_engine_cleanup: self.after_engine_cleanup.clone(),
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -229,7 +230,7 @@ impl ServoRuntime {
         }
         info!("created Servo WebView for tab {}", tab_id.value());
         Ok(ServoWebView::new(
-            inner,
+            HandleThenCleanup::new(inner, self.after_engine_cleanup.clone()),
             frame_ready,
             tab_id,
             scale_factor,
@@ -381,8 +382,6 @@ struct BrowserDelegate {
     page_requests: Rc<RefCell<PendingEngineRequests<ServoPageRequest>>>,
     /// Shared with the tab's `ServoWebView`, which arms it when it navigates.
     document_start: Rc<RefCell<DocumentStartTracker>>,
-    /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
-    _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }
 
 impl BrowserDelegate {
