@@ -3,7 +3,10 @@ use std::collections::VecDeque;
 use crate::address::{AddressResolutionError, resolve_address};
 use crate::browser::LoadState;
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
-use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, Tab, TabActivation, TabCommand, TabId};
+use crate::{
+    ColorScheme, ControlAnswer, ControlId, DEFAULT_ZOOM_PERCENT, Tab, TabActivation, TabCommand,
+    TabId,
+};
 
 #[derive(Debug)]
 pub struct BrowserController {
@@ -114,6 +117,8 @@ impl BrowserController {
     pub fn take_initial_url(&mut self, tab_id: TabId) -> Option<String> {
         let tab = self.tab_mut(tab_id)?;
         let url = tab.take_initial_url()?;
+        // controls: the new web view has asked for nothing yet.
+        tab.state_mut().forget_controls();
         show_loading(tab, url.clone());
         Some(url)
     }
@@ -334,6 +339,11 @@ impl BrowserController {
     }
 
     pub fn handle_event(&mut self, tab_id: TabId, event: BrowserEvent) -> bool {
+        // controls
+        let event = match self.route_control_request(tab_id, event) {
+            Some(event) => event,
+            None => return true,
+        };
         let Some(tab) = self.tab_mut(tab_id) else {
             return false;
         };
@@ -343,6 +353,72 @@ impl BrowserController {
         }
         tab.state_mut().apply(event);
         true
+    }
+
+    // controls
+    /// Answers the active tab's pending control. Returns false, and sends nothing, unless `id`
+    /// is that control: every request is answered at most once.
+    pub fn answer_control(&mut self, id: ControlId, answer: ControlAnswer) -> bool {
+        let tab_id = self.active_tab_id;
+        let Some(tab) = self.tab_mut(tab_id) else {
+            return false;
+        };
+        if tab
+            .state()
+            .pending_control()
+            .map(|(pending_id, _)| pending_id)
+            != Some(id)
+        {
+            return false;
+        }
+        tab.state_mut().take_pending_control();
+        self.queue_command_for(tab_id, BrowserCommand::AnswerControl { id, answer })
+    }
+
+    /// Drops the tab's pending control, if any, with the engine's default answer. Called when
+    /// the tab stops being shown: pickers are interactive, and a stale one makes no sense.
+    pub fn dismiss_control(&mut self, tab_id: TabId) {
+        let Some(id) = self
+            .tab_mut(tab_id)
+            .and_then(|tab| tab.state_mut().take_pending_control())
+        else {
+            return;
+        };
+        self.queue_command_for(
+            tab_id,
+            BrowserCommand::AnswerControl {
+                id,
+                answer: ControlAnswer::Dismiss,
+            },
+        );
+    }
+
+    /// A control for a background tab is dropped at once; one that replaces a pending control
+    /// drops the older one. Returns the event to apply, or None if it was consumed.
+    fn route_control_request(
+        &mut self,
+        tab_id: TabId,
+        event: BrowserEvent,
+    ) -> Option<BrowserEvent> {
+        let BrowserEvent::ControlShown { id, .. } = &event else {
+            return Some(event);
+        };
+        let id = *id;
+        if !self.tabs.iter().any(|tab| tab.id() == tab_id) {
+            return Some(event);
+        }
+        if tab_id != self.active_tab_id {
+            self.queue_command_for(
+                tab_id,
+                BrowserCommand::AnswerControl {
+                    id,
+                    answer: ControlAnswer::Dismiss,
+                },
+            );
+            return None;
+        }
+        self.dismiss_control(tab_id);
+        Some(event)
     }
 
     fn open_blank_tab(&mut self, activation: TabActivation) -> TabId {

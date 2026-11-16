@@ -1,0 +1,88 @@
+// Shared look of the popups a page opens (select lists, the colour picker, the context menu).
+// They follow the system appearance and are neutral grey or white, unlike the browser's navy
+// chrome, so they never pass for the browser's own controls.
+
+export struct PopupColors {
+    background: color,
+    border: color,
+    text: color,
+    muted: color,
+    disabled: color,
+    highlight: color,
+    highlight-text: color,
+    separator: color,
+    button: color,
+    button-text: color,
+}
+
+export global PopupStyle {
+    pure public function colors(dark: bool) -> PopupColors {
+        if dark {
+            return {
+                background: #2b2b2e,
+                border: #4b4b50,
+                text: #ececee,
+                muted: #a2a2a8,
+                disabled: #707076,
+                highlight: #3d6fd6,
+                highlight-text: #ffffff,
+                separator: #45454a,
+                button: #3d3d42,
+                button-text: #ececee,
+            };
+        }
+        return {
+            background: #ffffff,
+            border: #c6c6cc,
+            text: #1d1d1f,
+            muted: #6e6e73,
+            disabled: #a8a8ad,
+            highlight: #2f6fe0,
+            highlight-text: #ffffff,
+            separator: #e2e2e6,
+            button: #ececf0,
+            button-text: #1d1d1f,
+        };
+    }
+}
+
+// Catches presses outside an open popup; the popup is drawn above it.
+export component PopupBackdrop inherits TouchArea {
+    callback dismissed();
+
+    pointer-event(event) => {
+        if event.kind == PointerEventKind.down {
+            root.dismissed();
+        }
+    }
+
+    scroll-event(event) => {
+        accept
+    }
+}
+
+export component PopupButton inherits Rectangle {
+    in property <string> label;
+    in property <PopupColors> colors;
+    in property <bool> primary: false;
+    callback clicked;
+
+    height: 28px;
+    border-radius: 6px;
+    background: root.primary ? root.colors.highlight : root.colors.button;
+    opacity: touch.pressed ? 0.8 : 1;
+
+    Text {
+        text: root.label;
+        color: root.primary ? root.colors.highlight-text : root.colors.button-text;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}

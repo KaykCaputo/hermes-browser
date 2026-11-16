@@ -36,8 +36,15 @@ pub(crate) fn connect_native_keyboard_input(
             match event {
                 WindowEvent::ModifiersChanged(changed) => {
                     modifiers = changed.state();
+                    // controls: Control-click opens the context menu on macOS.
+                    crate::controls::set_control_key(modifiers.control_key());
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
+                    // controls: an open popup takes the keys; the page keeps its focus.
+                    if crate::controls::handle_key(&window, event, modifiers) {
+                        window.window().request_redraw();
+                        return EventResult::PreventDefault;
+                    }
                     if handle_browser_shortcut(
                         &window,
                         &controller,

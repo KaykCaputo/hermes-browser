@@ -1,5 +1,6 @@
 mod adblocker;
 mod content_process;
+mod embedder_controls;
 mod error;
 mod frame_ready;
 mod load_metrics;

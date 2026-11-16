@@ -649,6 +649,8 @@ pub(crate) fn resting_pointer_move(
 /// cursor and status text), and a fullscreen page leaves fullscreen.
 pub(crate) fn queue_leaving_tab(controller: &mut BrowserController, tab_id: TabId) {
     controller.queue_command_for(tab_id, BrowserCommand::PointerLeft);
+    // controls: a picker or menu left open in the tab gets the engine's default answer.
+    controller.dismiss_control(tab_id);
     let is_fullscreen = controller
         .tabs()
         .any(|tab| tab.id() == tab_id && tab.state().is_fullscreen());
@@ -764,6 +766,13 @@ mod tests {
             Ok(())
         }
         fn pointer_left(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn answer_control(
+            &mut self,
+            _id: talaria_core::ControlId,
+            _answer: talaria_core::ControlAnswer,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
     }

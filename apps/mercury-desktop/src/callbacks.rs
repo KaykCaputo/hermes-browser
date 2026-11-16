@@ -134,7 +134,8 @@ pub(crate) fn connect_ui_callbacks(
             .borrow_mut()
             .queue_command(BrowserCommand::PointerButton {
                 action,
-                button: pointer_button_from_ui(button),
+                // controls: a macOS Control-click becomes a secondary click.
+                button: crate::controls::pointer_button(pointer_button_from_ui(button), action),
                 x,
                 y,
             });

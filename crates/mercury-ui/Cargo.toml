@@ -10,3 +10,8 @@ slint.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
+
+# `examples/render_controls.rs` draws the page-control popups without a display.
+[dev-dependencies]
+image.workspace = true
+slint = { workspace = true, features = ["renderer-software"] }

@@ -10,11 +10,12 @@ use servo::{
     MouseMoveEvent, NamedKey, Theme, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use talaria_core::{
-    ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
-    PointerButtonAction, TabId, WebView as TalariaWebView,
+    ColorScheme, CompositionState, ControlAnswer, ControlId, ImeInput, KeyLocation, KeyState,
+    KeyboardInput, PointerButton, PointerButtonAction, TabId, WebView as TalariaWebView,
 };
 use url::Url;
 
+use crate::embedder_controls::EmbedderControls;
 use crate::frame_ready::FrameReadySignal;
 use crate::{ServoWebViewError, ViewportSize};
 
@@ -24,6 +25,8 @@ pub struct ServoWebView {
     tab_id: TabId,
     /// Device pixels per logical pixel; pointer positions arrive in logical pixels.
     scale_factor: Cell<f32>,
+    // controls
+    controls: EmbedderControls,
 }
 
 impl ServoWebView {
@@ -32,12 +35,14 @@ impl ServoWebView {
         frame_ready: FrameReadySignal,
         tab_id: TabId,
         scale_factor: f32,
+        controls: EmbedderControls,
     ) -> Self {
         Self {
             inner,
             frame_ready,
             tab_id,
             scale_factor: Cell::new(scale_factor),
+            controls,
         }
     }
 
@@ -76,6 +81,8 @@ impl ServoWebView {
 impl Drop for ServoWebView {
     fn drop(&mut self) {
         log::info!("closing Servo WebView for tab {}", self.tab_id.value());
+        // controls: requests of a closed or replaced web view get the engine's default answer.
+        let _hidden = self.controls.drop_all();
     }
 }
 
@@ -207,6 +214,12 @@ impl TalariaWebView for ServoWebView {
         let _event_id = self.inner.notify_input_event(InputEvent::MouseLeftViewport(
             MouseLeftViewportEvent::default(),
         ));
+        Ok(())
+    }
+
+    // controls
+    fn answer_control(&mut self, id: ControlId, answer: ControlAnswer) -> Result<(), Self::Error> {
+        self.controls.answer(id, answer);
         Ok(())
     }
 }

@@ -17,6 +17,8 @@ use ui_sync::sync_ui;
 
 mod callbacks;
 mod cli;
+// controls
+mod controls;
 mod crash_handler;
 mod engine;
 mod keyboard;
@@ -105,6 +107,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&web_view_focused),
     );
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
+    // controls
+    controls::connect_controls(&window, Rc::clone(&controller));
 
     let screenshot_result = Rc::new(Cell::new(ScreenshotResult::Pending));
     let screenshot_timer = options.screenshot.map(|screenshot| {
