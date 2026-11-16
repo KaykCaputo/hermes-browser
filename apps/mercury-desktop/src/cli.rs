@@ -69,8 +69,14 @@ pub(crate) enum CliOutcome {
     PrintAndExit { text: String, code: i32 },
 }
 
-const EXIT_BY_VALUES: &str = if cfg!(target_os = "macos") {
+/// `--exit-by logout` sends the browser a log-out quit event; only builds with the
+/// `quit-diagnostics` feature (never released ones) have it.
+const LOG_OUT_DIAGNOSTIC: bool = cfg!(all(target_os = "macos", feature = "quit-diagnostics"));
+
+const EXIT_BY_VALUES: &str = if LOG_OUT_DIAGNOSTIC {
     "close-request|quit|terminate|logout"
+} else if cfg!(target_os = "macos") {
+    "close-request|quit|terminate"
 } else {
     "close-request|quit"
 };
@@ -106,8 +112,9 @@ Diagnostics:
                                    request, as the close button does; as the quit
                                    shortcut does (default quit); on macOS only, through
                                    the system's terminate request, as a Quit menu item
-                                   sends it (terminate), or through the quit Apple event
-                                   of a log-out, sent to this process only (logout)
+                                   sends it (terminate); in diagnostic builds only, the
+                                   quit Apple event of a log-out, sent to this process
+                                   only (logout)
 
 Exit status:
   0  Success
@@ -210,7 +217,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
                     "close-request" => ExitBy::CloseRequest,
                     "quit" => ExitBy::Quit,
                     "terminate" if cfg!(target_os = "macos") => ExitBy::Terminate,
-                    "logout" if cfg!(target_os = "macos") => ExitBy::LogOut,
+                    "logout" if LOG_OUT_DIAGNOSTIC => ExitBy::LogOut,
                     _ => {
                         return Err(format!(
                             "invalid --exit-by '{value}': expected {EXIT_BY_VALUES}"
@@ -650,10 +657,13 @@ mod tests {
     }
 
     #[test]
-    fn exit_by_terminate_and_logout_are_accepted_on_macos_only() {
-        for (value, expected) in [("terminate", ExitBy::Terminate), ("logout", ExitBy::LogOut)] {
+    fn exit_by_terminate_is_macos_only_and_logout_needs_a_diagnostic_build() {
+        for (value, expected, available) in [
+            ("terminate", ExitBy::Terminate, cfg!(target_os = "macos")),
+            ("logout", ExitBy::LogOut, LOG_OUT_DIAGNOSTIC),
+        ] {
             let outcome = parse(&["--exit-after", "0", "--exit-by", value]);
-            if cfg!(target_os = "macos") {
+            if available {
                 let CliOutcome::Run(options) = outcome else {
                     panic!("--exit-by {value} should run the browser on macOS");
                 };

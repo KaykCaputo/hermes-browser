@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
@@ -108,6 +109,48 @@ pub(crate) fn drop_catching_panic<T>(value: T) -> bool {
     // Sound for the same reason as in `shut_down_runtime`: the value is consumed by the
     // closure and nothing it reaches is used after a caught panic.
     std::panic::catch_unwind(AssertUnwindSafe(move || drop(value))).is_ok()
+}
+
+/// How long a watchdog's own clean-up may take before the process ends regardless. Removing
+/// the temporary profile took up to 0.8 s under heavy load in tests (and about 4 s once), so
+/// this leaves room for it.
+pub(crate) const STUCK_CLEAN_UP_GRACE: Duration = Duration::from_secs(5);
+
+/// What a watchdog does when the part of the quit it covers has not finished in time: removes
+/// the temporary profile (which holds this run's cookies) and ends the process with `_exit`,
+/// which skips the destructors the main thread is in the middle of running. The exit status is
+/// `exit_code`, or 128 + the signal if a quit signal started the quit.
+///
+/// The clean-up takes locks a stuck thread may hold (standard error's, the logger's, the
+/// profile's), so a backstop thread ends the process after `STUCK_CLEAN_UP_GRACE` whatever
+/// happens to it. Each step is noted on standard error with its time, to show where a slow
+/// clean-up spent it.
+pub(crate) fn exit_because_stuck(what: &str, exit_code: u8) -> ! {
+    let code =
+        crate::signals::received().map_or(i32::from(exit_code), crate::signals::exit_status_for);
+    let started = Instant::now();
+    let _backstop = thread::Builder::new()
+        .name("quit watchdog backstop".to_owned())
+        .spawn(move || {
+            thread::sleep(STUCK_CLEAN_UP_GRACE);
+            // SAFETY: `_exit` ends the process at once; nothing runs after it.
+            unsafe { libc::_exit(code) }
+        });
+    let note = |step: &str| {
+        let _ = writeln!(
+            std::io::stderr(),
+            "mercury-browser: {what} in time: {step} ({} ms)",
+            started.elapsed().as_millis()
+        );
+    };
+    note("exiting without waiting");
+    crate::profile::remove_temporary_profile();
+    note("temporary profile removed");
+    log::error!("{what} in time; exiting with status {code} without waiting");
+    log::logger().flush();
+    note("log flushed");
+    // SAFETY: `_exit` ends the process at once; nothing runs after it.
+    unsafe { libc::_exit(code) }
 }
 
 /// Runs `on_timeout` on a separate thread unless `disarm` is called within `timeout`.

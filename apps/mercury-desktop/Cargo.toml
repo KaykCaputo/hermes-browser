@@ -64,5 +64,10 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 signal-hook-registry.workspace = true
 
+[features]
+# `--exit-by logout`: the browser sends itself the quit Apple event of a log-out. For tests
+# only; never in a released build. `make lint` and `make check` turn it on (`--all-features`).
+quit-diagnostics = []
+
 [build-dependencies]
 gl_generator = "0.14"

@@ -20,6 +20,7 @@ pub(crate) fn request_quit() {
 /// 547-554), which tears rendering down before the engine has shut down.
 pub(crate) fn quit_when_the_window_is_closed(window: &MainWindow) {
     window.window().on_close_requested(|| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         request_quit();
         CloseRequestResponse::KeepWindowShown
     });
@@ -31,6 +32,7 @@ pub(crate) fn start_exit_request(window: &MainWindow, request: ExitRequest) -> T
     let weak_window = window.as_weak();
     let timer = Timer::default();
     timer.start(TimerMode::SingleShot, request.after, move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         log::info!(
             "diagnostics: requesting a quit by {} at unix time {} ms",
             match request.by {
@@ -45,11 +47,13 @@ pub(crate) fn start_exit_request(window: &MainWindow, request: ExitRequest) -> T
             ExitBy::Quit => request_quit(),
             #[cfg(target_os = "macos")]
             ExitBy::Terminate => crate::macos_terminate::send_terminate(),
-            #[cfg(target_os = "macos")]
-            ExitBy::LogOut => crate::macos_terminate::send_log_out_quit_event(),
+            #[cfg(all(target_os = "macos", feature = "quit-diagnostics"))]
+            ExitBy::LogOut => crate::macos_terminate::log_out_diagnostic::send_log_out_quit_event(),
             #[cfg(not(target_os = "macos"))]
-            ExitBy::Terminate | ExitBy::LogOut => {
-                log::warn!("diagnostics: this exit request needs macOS")
+            ExitBy::Terminate => log::warn!("diagnostics: this exit request needs macOS"),
+            #[cfg(not(all(target_os = "macos", feature = "quit-diagnostics")))]
+            ExitBy::LogOut => {
+                log::warn!("diagnostics: this exit request needs a quit-diagnostics macOS build")
             }
             ExitBy::CloseRequest => {
                 let Some(window) = weak_window.upgrade() else {

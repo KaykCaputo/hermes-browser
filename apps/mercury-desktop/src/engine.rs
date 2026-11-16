@@ -30,8 +30,6 @@ pub(crate) const MAX_COMMANDS_PER_FRAME: usize = 128;
 /// How long the window may go without its first render before one is forced offscreen.
 const GRAPHICS_BOOTSTRAP_DELAY: Duration = Duration::from_millis(300);
 const GRAPHICS_BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-/// How long the shutdown watchdog's own clean-up may take before the process ends regardless.
-const WATCHDOG_CLEAN_UP_GRACE: Duration = Duration::from_secs(1);
 
 thread_local! {
     /// Lets Servo's waker, whose callback must be `Send`, reach the engine on the main thread.
@@ -127,6 +125,7 @@ pub(crate) fn connect_servo_runtime(
     window
         .window()
         .set_rendering_notifier(move |state, graphics_api| {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
             rendering_engine.on_rendering_state(state, graphics_api);
         })
 }
@@ -159,7 +158,18 @@ pub(crate) fn shut_down_engine(exit_code_if_stuck: u8) {
     state.shut_down(window.as_ref(), exit_code_if_stuck);
 }
 
+/// Whether the engine's state is borrowed right now (a pump or a render is running).
+pub(crate) fn engine_busy() -> bool {
+    ENGINE.with(|current| {
+        current
+            .borrow()
+            .upgrade()
+            .is_some_and(|engine| engine.state.try_borrow_mut().is_err())
+    })
+}
+
 fn pump_after_wake() {
+    let _slint = crate::callback_scope::InSlintCallback::enter();
     let Some(engine) = ENGINE.with(|current| current.borrow().upgrade()) else {
         return;
     };
@@ -176,6 +186,7 @@ fn pump_after_wake() {
 /// into an offscreen snapshot target instead; `take_snapshot` bypasses the occlusion check.
 fn schedule_graphics_bootstrap(engine: Weak<Engine>, delay: Duration) {
     Timer::single_shot(delay, move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let Some(strong_engine) = engine.upgrade() else {
             return;
         };
@@ -568,33 +579,7 @@ impl EngineState {
 
         release_in_order(self.take_parts(), |runtime| {
             let watchdog = Watchdog::start(ENGINE_SHUTDOWN_TIMEOUT, move || {
-                let code = crate::signals::received().map_or(
-                    i32::from(exit_code_if_stuck),
-                    crate::signals::exit_status_for,
-                );
-                // The clean-up below takes locks (the logger's among them) that a stuck engine
-                // may hold; whatever happens to it, the process ends shortly.
-                let _backstop = std::thread::Builder::new()
-                    .name("shutdown watchdog backstop".to_owned())
-                    .spawn(move || {
-                        std::thread::sleep(WATCHDOG_CLEAN_UP_GRACE);
-                        // SAFETY: `_exit` ends the process at once; nothing runs after it.
-                        unsafe { libc::_exit(code) }
-                    });
-                eprintln!(
-                    "mercury-browser: Servo did not shut down within {} seconds; exiting without it",
-                    ENGINE_SHUTDOWN_TIMEOUT.as_secs()
-                );
-                // `_exit` skips destructors, which the main thread is in the middle of
-                // running; the temporary profile holds this run's cookies.
-                crate::profile::remove_temporary_profile();
-                log::error!(
-                    "Servo did not shut down within {} seconds; exiting without it",
-                    ENGINE_SHUTDOWN_TIMEOUT.as_secs()
-                );
-                log::logger().flush();
-                // SAFETY: `_exit` ends the process at once; nothing runs after it.
-                unsafe { libc::_exit(code) }
+                crate::shutdown::exit_because_stuck("Servo did not shut down", exit_code_if_stuck)
             });
             // Let content processes release their WebGL contexts before the constellation is
             // told to exit (see `WEBGL_SETTLE_PERIOD`); dropping the last `Servo` handle then

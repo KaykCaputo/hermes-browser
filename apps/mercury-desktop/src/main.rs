@@ -15,12 +15,15 @@ use talaria_core::{BrowserController, TabActivation};
 use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
+mod callback_scope;
 mod callbacks;
 mod cli;
 mod crash_handler;
 mod engine;
 mod keyboard;
 mod keyutils;
+#[cfg(target_os = "macos")]
+mod macos_app_delegate;
 #[cfg(target_os = "macos")]
 mod macos_terminate;
 #[cfg(target_os = "macos")]

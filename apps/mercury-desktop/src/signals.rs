@@ -134,7 +134,12 @@ fn wait_for_signals(read_fd: libc::c_int) {
                 "received signal {signal}; quitting in order (a second one ends the browser at once)"
             );
         }
-        while slint::invoke_from_event_loop(crate::quit::request_quit).is_err() {
+        while slint::invoke_from_event_loop(|| {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
+            crate::quit::request_quit();
+        })
+        .is_err()
+        {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
