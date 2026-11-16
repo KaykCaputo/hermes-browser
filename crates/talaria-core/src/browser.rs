@@ -2,6 +2,7 @@ use crate::{
     ColorScheme, ControlAnswer, ControlId, ControlRect, ControlRequest, DEFAULT_ZOOM_PERCENT,
     ImeInput, KeyboardInput, PageIcon, PointerCursor,
 };
+use crate::{PageRequest, PageRequestAnswer, PageRequestId};
 
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
 const INITIAL_ADDRESS: &str = "";
@@ -77,6 +78,12 @@ pub enum BrowserCommand {
         id: ControlId,
         answer: ControlAnswer,
     },
+    // dialogs
+    /// Answers a page request (see `page_request`); `Discard` gives the engine's default.
+    AnswerPageRequest {
+        id: PageRequestId,
+        answer: PageRequestAnswer,
+    },
 }
 
 impl BrowserCommand {
@@ -100,6 +107,12 @@ impl BrowserCommand {
             self,
             Self::Navigate { .. } | Self::Reload | Self::GoBack | Self::GoForward
         )
+    }
+
+    /// Answers go to the web view that asked even before its first page has committed: a
+    /// sign-in for that page holds the commit until it is answered.
+    pub(crate) const fn is_dispatched_before_engine_ready(&self) -> bool {
+        matches!(self, Self::AnswerPageRequest { .. })
     }
 }
 
@@ -147,6 +160,11 @@ pub enum BrowserEvent {
     ControlHidden {
         id: ControlId,
     },
+    // dialogs
+    /// The page asks the user something; see `page_request`.
+    PageRequested(PageRequest),
+    /// A new document started loading in the tab (not a same-document navigation).
+    PageLoadStarted,
 }
 
 impl BrowserEvent {
@@ -256,6 +274,9 @@ impl BrowserState {
     pub fn apply(&mut self, event: BrowserEvent) {
         match event {
             BrowserEvent::AddressChanged { url } => {
+                // dialogs: Servo writes credentials typed into a sign-in into the request URL,
+                // and so into the page's address; they are never shown or kept.
+                let url = crate::strip_user_info(&url);
                 // Cursor and status text are deliberately not reset here: the engine only
                 // reports changes against its own cached values, so the engine's notifications
                 // must stay the only source of both.
@@ -322,6 +343,8 @@ impl BrowserState {
                     self.input_method = None;
                 }
             }
+            // dialogs: kept by the tab's page requests, not here.
+            BrowserEvent::PageRequested(_) | BrowserEvent::PageLoadStarted => {}
         }
     }
 }

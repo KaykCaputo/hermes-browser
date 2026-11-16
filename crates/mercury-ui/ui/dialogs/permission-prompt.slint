@@ -1,0 +1,88 @@
+// A permission prompt hanging from the address bar: "<site> wants to …" with Block and Allow.
+// The page stays visible and usable beneath it.
+
+import { ChromePalette } from "../theme/chrome-palette.slint";
+import { PageRequestView, RequestButton } from "page-request-parts.slint";
+
+export component PermissionPrompt inherits Rectangle {
+    in property <PageRequestView> request;
+    // Where the address bar starts, relative to this element's parent.
+    in property <length> anchor-x: 0px;
+    // accepted: Allow.
+    callback answered(/* id */ int, /* accepted */ bool);
+
+    function answer(accepted: bool) {
+        root.answered(root.request.id, accepted);
+    }
+
+    // Fills the content area without taking input; only the bubble does. The bubble is not
+    // modal and never takes keyboard focus, so it is answered with the mouse only (as Chrome
+    // does for a bubble without focus): no key the user meant for the page or for the browser,
+    // Escape included, is taken from them.
+    bubble := Rectangle {
+        x: Math.max(8px, Math.min(root.anchor-x, root.width - self.width - 8px));
+        // The arrow overlaps the toolbar's bottom edge, which a page cannot draw over.
+        y: -4px;
+        width: Math.min(root.width - 16px, 380px);
+        height: layout.preferred-height + 8px;
+
+        // The arrow pointing at the address bar.
+        Path {
+            x: 22px;
+            y: 0px;
+            width: 16px;
+            height: 9px;
+            fill: ChromePalette.popup-background;
+            stroke: ChromePalette.popup-border;
+            stroke-width: 1px;
+            commands: "M 0 9 L 8 0 L 16 9";
+        }
+
+        Rectangle {
+            y: 8px;
+            height: parent.height - 8px;
+            background: ChromePalette.popup-background;
+            border-width: 1px;
+            border-color: ChromePalette.popup-border;
+            border-radius: 10px;
+            drop-shadow-blur: 20px;
+            drop-shadow-color: ChromePalette.shadow;
+            drop-shadow-offset-y: 4px;
+
+            TouchArea { }
+
+            layout := VerticalLayout {
+                padding: 16px;
+                spacing: 12px;
+
+                Text {
+                    text: root.request.heading;
+                    color: ChromePalette.text;
+                    font-size: 14px;
+                    font-weight: 600;
+                    wrap: word-wrap;
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+
+                    RequestButton {
+                        label: root.request.decline-label;
+                        clicked => {
+                            root.answer(false);
+                        }
+                    }
+
+                    RequestButton {
+                        label: root.request.accept-label;
+                        primary: true;
+                        clicked => {
+                            root.answer(true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -5,8 +5,7 @@
 //! selection or colour, no files, no menu action). Only an id and plain data go to the UI.
 //!
 //! The kinds handled here are `SelectElement`, `ColorPicker`, `FilePicker`, `ContextMenu` and
-//! `InputMethod`; `EmbedderControls::handles` tells the delegate which, so another module can
-//! take the rest (`SimpleDialog`).
+//! `InputMethod`; the delegate sends `SimpleDialog` to the page requests instead.
 
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -95,13 +94,9 @@ impl EmbedderControls {
         }
     }
 
-    /// Whether `show` takes this kind of control (every kind except simple dialogs).
-    pub(crate) fn handles(control: &EmbedderControl) -> bool {
-        !matches!(control, EmbedderControl::SimpleDialog(_))
-    }
-
-    /// Keeps a control of a kind this handles (see `handles`) and returns the event that tells
-    /// the UI about it. Any other kind is dropped, which gives the engine's default answer.
+    /// Keeps a control of a kind handled here and returns the event that tells the UI about it.
+    /// Simple dialogs belong to the page requests (`BrowserDelegate::show_embedder_control`
+    /// sends them there); one that reaches this is dropped, which gives the engine's default.
     pub(crate) fn show(&self, control: EmbedderControl) -> Option<BrowserEvent> {
         let id = self.ids.next();
         let event = match &control {

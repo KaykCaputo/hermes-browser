@@ -77,6 +77,10 @@ pub(crate) fn connect_native_keyboard_input(
                         window.window().request_redraw();
                     }
                 }
+                // dialogs: a page under a sheet gets no IME input; its composition ends.
+                WindowEvent::Ime(_) if crate::page_requests::sheet_shown(&controller.borrow()) => {
+                    dismiss_composition(&controller, &mut composition_tab_id);
+                }
                 WindowEvent::Ime(ime) if web_view_focused.get() || composition_tab_id.is_some() => {
                     queue_ime_input(&controller, &mut composition_tab_id, ime);
                     window.window().request_redraw();

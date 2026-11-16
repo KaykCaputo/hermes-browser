@@ -139,6 +139,13 @@ pub(crate) fn handle_key(window: &MainWindow, event: &KeyEvent, modifiers: Modif
     if window.get_text_input_focused() || modifiers.super_key() || modifiers.control_key() {
         return false;
     }
+    // A page dialog's sheet wins: its keys are never taken here (`sync` also closes the popup).
+    let dialog_sheet = controls.controller.try_borrow().map_or(true, |controller| {
+        crate::page_requests::sheet_shown(&controller)
+    });
+    if dialog_sheet {
+        return false;
+    }
     controls.key(event)
 }
 
@@ -229,7 +236,27 @@ impl Controls {
         let page = page_rect(window);
         let zoom = state.zoom_percent();
 
+        // A page dialog's sheet takes precedence over these popups; they do not stay open under it.
+        let dialog_sheet = crate::page_requests::sheet_shown(controller);
         let mut current = self.state.borrow_mut();
+        if dialog_sheet
+            && current.shown == key
+            && let Some((tab_id, id)) = key
+            && matches!(
+                current.popup,
+                Popup::Select { .. } | Popup::Color { .. } | Popup::Menu { .. }
+            )
+        {
+            log::debug!(
+                "tab {}: a page dialog closes control {}",
+                tab_id.value(),
+                id.value()
+            );
+            current.popup = Popup::None;
+            slint::Timer::single_shot(Duration::ZERO, move || {
+                with_controls(|controls| controls.reject(tab_id, id));
+            });
+        }
         if current.shown != key {
             current.shown = key;
             if let Some((id, request)) = pending {
@@ -243,15 +270,16 @@ impl Controls {
             current.popup = match pending {
                 None => Popup::None,
                 Some((id, request))
-                    if !admit(
-                        request,
-                        tab_id,
-                        Instant::now(),
-                        file_panel::sheet_attached(),
-                    ) =>
+                    if dialog_sheet
+                        || !admit(
+                            request,
+                            tab_id,
+                            Instant::now(),
+                            file_panel::sheet_attached(),
+                        ) =>
                 {
                     log::debug!(
-                        "tab {}: dropping control {}: no recent user gesture, or a file sheet is up",
+                        "tab {}: dropping control {}: no recent user gesture, or a sheet is up",
                         tab_id.value(),
                         id.value()
                     );

@@ -4,6 +4,7 @@ export { ChromePalette, ChromeTheme } from "theme/chrome-palette.slint";
 // settings-ui
 import { SettingsNotice } from "settings/settings-notice.slint";
 export { SearchEngineRow, SettingsWindow } from "settings/settings-window.slint";
+import { PageRequestSheet, PageRequestStyle, PageRequestView, PermissionPrompt } from "dialogs/page-requests.slint";
 // controls
 import { ColorPicker, ContextMenuPopup, ContextMenuRow, PopupBackdrop, SelectPopup, SelectPopupRow } from "controls/controls.slint";
 
@@ -381,6 +382,14 @@ export component MainWindow inherits Window {
             ),
         );
     }
+
+    // --- dialogs ---
+    // The active tab's oldest unanswered page request (style none when there is none).
+    in property <PageRequestView> page-request;
+    // id, accepted, text (prompt value or user name), password, checked ("Don't allow this page
+    // to show more dialogs" or "... to ask again").
+    callback page-request-answered(int, bool, string, string, bool);
+    // --- end dialogs ---
 
     title: page-title + " — Mercury Browser";
     icon: @image-url("../../../apps/mercury-desktop/resources/mercury-browser.svg");
@@ -799,6 +808,24 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                     overflow: elide;
                     wrap: no-wrap;
+                }
+            }
+
+            // dialogs
+            if root.page-request.style != PageRequestStyle.none && root.page-request.style != PageRequestStyle.permission: PageRequestSheet {
+                request: root.page-request;
+                may-take-focus: !root.text-input-focused;
+                answered(id, accepted, text, password, checked) => {
+                    root.page-request-answered(id, accepted, text, password, checked);
+                }
+            }
+
+            // dialogs
+            if root.page-request.style == PageRequestStyle.permission: PermissionPrompt {
+                request: root.page-request;
+                anchor-x: address-input.absolute-position.x - 14px - web-view-area.absolute-position.x;
+                answered(id, accepted) => {
+                    root.page-request-answered(id, accepted, "", "", false);
                 }
             }
         }
