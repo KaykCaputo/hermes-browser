@@ -84,20 +84,28 @@ pub(crate) fn connect_controls(window: &MainWindow, controller: Rc<RefCell<Brows
             .map(slint_color)
             .collect::<Vec<_>>(),
     )));
-    window
-        .on_controls_dismissed(|| with_controls(|controls| controls.close(ControlAnswer::Dismiss)));
+    window.on_controls_dismissed(|| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
+        with_controls(|controls| controls.close(ControlAnswer::Dismiss));
+    });
     window.on_controls_row_clicked(|row| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let Ok(row) = usize::try_from(row) {
             with_controls(|controls| controls.row_clicked(row));
         }
     });
     window.on_controls_row_hovered(|row| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let Ok(row) = usize::try_from(row) {
             with_controls(|controls| controls.row_hovered(row));
         }
     });
-    window.on_controls_select_done(|| with_controls(Controls::select_done));
+    window.on_controls_select_done(|| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
+        with_controls(Controls::select_done);
+    });
     window.on_controls_color_swatch_picked(|index| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let swatch = usize::try_from(index)
             .ok()
             .and_then(|index| SWATCHES.get(index));
@@ -106,13 +114,21 @@ pub(crate) fn connect_controls(window: &MainWindow, controller: Rc<RefCell<Brows
         }
     });
     window.on_controls_color_area_picked(|hue, lightness| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         with_controls(|controls| controls.colour_picked(from_hue_lightness(hue, 1.0 - lightness)));
     });
-    window.on_controls_color_done(|| with_controls(Controls::colour_done));
+    window.on_controls_color_done(|| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
+        with_controls(Controls::colour_done);
+    });
     // The page area moved or changed size: popups and the input-method area follow. Deferred,
     // because Slint reports the change while it lays out, possibly inside a state update.
     window.on_controls_page_changed(|| {
-        slint::Timer::single_shot(Duration::ZERO, || with_controls(Controls::relayout));
+        let _slint = crate::callback_scope::InSlintCallback::enter();
+        slint::Timer::single_shot(Duration::ZERO, || {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
+            with_controls(Controls::relayout);
+        });
     });
 }
 
@@ -254,6 +270,7 @@ impl Controls {
             );
             current.popup = Popup::None;
             slint::Timer::single_shot(Duration::ZERO, move || {
+                let _slint = crate::callback_scope::InSlintCallback::enter();
                 with_controls(|controls| controls.reject(tab_id, id));
             });
         }
@@ -285,6 +302,7 @@ impl Controls {
                     );
                     // Answered outside this state update.
                     slint::Timer::single_shot(Duration::ZERO, move || {
+                        let _slint = crate::callback_scope::InSlintCallback::enter();
                         with_controls(|controls| controls.reject(tab_id, id));
                     });
                     Popup::None
@@ -495,6 +513,7 @@ impl Controls {
             &origin,
             Box::new(move |paths| {
                 slint::Timer::single_shot(Duration::ZERO, move || {
+                    let _slint = crate::callback_scope::InSlintCallback::enter();
                     with_controls(|controls| controls.files_chosen(tab_id, id, paths));
                 });
             }),
@@ -642,6 +661,7 @@ fn open_popup(
             // Started outside the current state update; AppKit calls back later, on the main
             // thread, once the user has chosen or cancelled.
             slint::Timer::single_shot(Duration::ZERO, move || {
+                let _slint = crate::callback_scope::InSlintCallback::enter();
                 with_controls(|controls| {
                     controls.start_file_panel(tab_id, id, multiple, &extensions);
                 });
