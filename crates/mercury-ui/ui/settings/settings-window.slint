@@ -8,6 +8,7 @@ export struct SearchEngineRow {
     custom: bool,
 }
 
+// A section in the side bar: clicked, or focused with Tab and chosen with Return or Space.
 component SectionButton inherits Rectangle {
     in property <string> label;
     in property <bool> selected;
@@ -15,9 +16,17 @@ component SectionButton inherits Rectangle {
 
     height: 32px;
     border-radius: 6px;
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Palette.accent-background;
     background: root.selected
         ? Palette.accent-background
         : touch.has-hover ? Palette.alternate-background : transparent;
+    accessible-role: tab;
+    accessible-label: root.label;
+    accessible-item-selected: root.selected;
+    accessible-action-default => {
+        root.clicked();
+    }
 
     Text {
         x: 12px;
@@ -33,6 +42,17 @@ component SectionButton inherits Rectangle {
     touch := TouchArea {
         clicked => {
             root.clicked();
+        }
+    }
+
+    focus := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.clicked();
+                return accept;
+            }
+            reject
         }
     }
 }
@@ -56,10 +76,11 @@ component Note inherits Text {
     wrap: word-wrap;
 }
 
-// A validation message under a field.
+// A validation message under a field. Its colour follows the scheme the window actually uses.
 component Problem inherits Text {
+    in property <bool> dark;
     font-size: 12px;
-    color: Palette.color-scheme == ColorScheme.dark ? #ff8a80 : #b3261e;
+    color: root.dark ? #ff9e94 : #b3261e;
     wrap: word-wrap;
 }
 
@@ -82,20 +103,29 @@ component LabelledRow inherits HorizontalLayout {
 }
 
 export component SettingsWindow inherits Window {
-    // The colour scheme the appearance setting asks for; `unknown` follows the system.
+    // The colour scheme the appearance setting asks for; `unknown` follows the system, whose
+    // scheme the browser passes in `system-color-scheme`.
     in property <ColorScheme> forced-color-scheme: ColorScheme.unknown;
+    in property <ColorScheme> system-color-scheme: ColorScheme.unknown;
+    out property <ColorScheme> effective-color-scheme: root.forced-color-scheme != ColorScheme.unknown
+        ? root.forced-color-scheme
+        : root.system-color-scheme;
+    property <bool> dark: root.effective-color-scheme == ColorScheme.dark;
     in-out property <int> section: 0;
 
+    // Every value below is bound both ways to its control, so the browser can always show the
+    // current setting and the control keeps following it after the user has used it.
+
     // General
-    in property <int> startup-index;
-    in property <string> homepage;
-    in property <string> homepage-problem;
+    in-out property <int> startup-index;
+    in-out property <string> homepage;
+    in-out property <string> homepage-problem;
     in property <[string]> engine-choices;
-    in property <int> engine-index;
+    in-out property <int> engine-index;
     in property <[SearchEngineRow]> engines;
     in property <bool> search-suggestions;
     in property <[string]> zoom-choices;
-    in property <int> zoom-index;
+    in-out property <int> zoom-index;
     // The custom search engine form; `editor-id` is empty when adding.
     in property <bool> editor-open;
     in property <string> editor-id;
@@ -103,44 +133,51 @@ export component SettingsWindow inherits Window {
     in-out property <string> editor-keyword;
     in-out property <string> editor-url;
     in property <string> editor-problem;
+    in property <string> editor-warning;
     in property <bool> can-add-engine: true;
 
     // Appearance
-    in property <int> theme-index;
-    in property <bool> show-home-button;
-    in property <bool> show-bookmarks-bar;
+    in-out property <int> theme-index;
+    in-out property <bool> show-home-button;
+    in-out property <bool> show-bookmarks-bar;
 
     // Privacy and security
-    in property <bool> block-ads-and-trackers;
-    in property <bool> block-popups;
+    in-out property <bool> block-ads-and-trackers;
+    in-out property <bool> block-popups;
     in property <bool> https-only;
-    in property <bool> clear-history-on-exit;
-    in property <bool> clear-cookies-on-exit;
-    in property <bool> clear-cache-on-exit;
+    in-out property <bool> clear-history-on-exit;
+    in-out property <bool> clear-cookies-on-exit;
+    in-out property <bool> clear-cache-on-exit;
     // Set by the history work once "Clear browsing data…" exists.
     in property <bool> clear-browsing-data-available: false;
 
     // Downloads
-    in property <string> download-directory;
-    in property <string> download-directory-problem;
-    in property <bool> ask-where-to-save;
+    in-out property <string> download-directory;
+    in-out property <string> download-directory-problem;
+    in-out property <bool> ask-where-to-save;
 
     // Passwords
-    in property <bool> offer-to-save-passwords;
+    in-out property <bool> offer-to-save-passwords;
     in property <[string]> never-save-origins;
 
     // Advanced
-    in property <bool> experimental-web-features;
-    in property <bool> gpu-canvas;
-    in property <string> language;
-    in property <string> language-problem;
+    in-out property <bool> experimental-web-features;
+    in-out property <bool> gpu-canvas;
+    in-out property <string> language;
+    in-out property <string> language-problem;
 
     // Shown at the top while the settings cannot be saved (newer file, or unreadable).
     in property <string> save-problem;
 
     callback toggled(string, bool);
     callback chosen(string, int);
-    callback text-edited(string, string);
+    // A text field's value, given when the user presses Return or leaves the field. The
+    // browser writes back the form it stored, or sets the field's problem.
+    callback text-committed(string, string);
+    // Every text field's current value is to be committed: before the section changes and
+    // before the window closes.
+    callback commit-texts();
+    callback editor-url-edited(string);
     callback add-engine();
     callback edit-engine(string);
     callback remove-engine(string);
@@ -149,6 +186,7 @@ export component SettingsWindow inherits Window {
     callback remove-never-save(int);
     callback clear-browsing-data();
     callback close-settings();
+    callback quit-browser();
 
     title: "Settings";
     icon: @image-url("../../../../apps/mercury-desktop/resources/mercury-browser.svg");
@@ -159,12 +197,12 @@ export component SettingsWindow inherits Window {
     background: Palette.background;
 
     init => {
-        Palette.color-scheme = root.forced-color-scheme;
+        Palette.color-scheme = root.effective-color-scheme;
         // So that Escape and Cmd+W work before any field has been clicked.
         keys.focus();
     }
-    changed forced-color-scheme => {
-        Palette.color-scheme = root.forced-color-scheme;
+    changed effective-color-scheme => {
+        Palette.color-scheme = root.effective-color-scheme;
     }
 
     property <[string]> sections: [
@@ -176,14 +214,26 @@ export component SettingsWindow inherits Window {
         "Advanced",
     ];
 
+    // Without a menu bar of its own, Slint's winit backend installs its default macOS
+    // application menu whenever this window becomes active, and that menu's Quit ends the
+    // process without Mercury's ordered shutdown. An empty, hidden one keeps it out; Mercury's
+    // own menu is reinstalled when this window becomes key.
+    MenuBar {
+        visible: false;
+        Menu { }
+    }
+
     keys := FocusScope {
+        // Slint reports the Command key as `control` on Apple platforms.
         key-pressed(event) => {
-            if event.text == Key.Escape {
+            if event.text == Key.Escape || (event.modifiers.control && event.text == "w") {
+                root.commit-texts();
                 root.close-settings();
                 return accept;
             }
-            if event.modifiers.meta && event.text == "w" {
-                root.close-settings();
+            if event.modifiers.control && event.text == "q" {
+                root.commit-texts();
+                root.quit-browser();
                 return accept;
             }
             reject
@@ -212,6 +262,7 @@ export component SettingsWindow inherits Window {
                         label: name;
                         selected: root.section == index;
                         clicked => {
+                            root.commit-texts();
                             root.section = index;
                         }
                     }
@@ -258,8 +309,9 @@ export component SettingsWindow inherits Window {
                             label: "On start-up, open";
                             ComboBox {
                                 horizontal-stretch: 1;
+                                accessible-label: "On start-up, open";
                                 model: ["A new tab", "The home page", "The tabs from last time"];
-                                current-index: root.startup-index;
+                                current-index <=> root.startup-index;
                                 selected => {
                                     root.chosen("startup", self.current-index);
                                 }
@@ -271,13 +323,20 @@ export component SettingsWindow inherits Window {
                             VerticalLayout {
                                 spacing: 4px;
                                 LineEdit {
-                                    text: root.homepage;
+                                    accessible-label: "Home page";
+                                    text <=> root.homepage;
                                     placeholder-text: "https://example.com/ (empty for none)";
-                                    edited(text) => {
-                                        root.text-edited("homepage", text);
+                                    accepted(text) => {
+                                        root.text-committed("homepage", text);
+                                    }
+                                    changed has-focus => {
+                                        if !self.has-focus {
+                                            root.text-committed("homepage", self.text);
+                                        }
                                     }
                                 }
                                 if root.homepage-problem != "": Problem {
+                                    dark: root.dark;
                                     text: root.homepage-problem;
                                 }
                             }
@@ -287,8 +346,9 @@ export component SettingsWindow inherits Window {
                             label: "Default page zoom";
                             ComboBox {
                                 horizontal-stretch: 1;
+                                accessible-label: "Default page zoom";
                                 model: root.zoom-choices;
-                                current-index: root.zoom-index;
+                                current-index <=> root.zoom-index;
                                 selected => {
                                     root.chosen("default-zoom", self.current-index);
                                 }
@@ -303,8 +363,9 @@ export component SettingsWindow inherits Window {
                             label: "Search engine";
                             ComboBox {
                                 horizontal-stretch: 1;
+                                accessible-label: "Search engine";
                                 model: root.engine-choices;
-                                current-index: root.engine-index;
+                                current-index <=> root.engine-index;
                                 selected => {
                                     root.chosen("search-engine", self.current-index);
                                 }
@@ -345,6 +406,7 @@ export component SettingsWindow inherits Window {
 
                                 if engine.custom: Button {
                                     text: "Edit";
+                                    accessible-label: "Edit " + engine.name;
                                     clicked => {
                                         root.edit-engine(engine.id);
                                     }
@@ -352,6 +414,7 @@ export component SettingsWindow inherits Window {
 
                                 if engine.custom: Button {
                                     text: "Remove";
+                                    accessible-label: "Remove " + engine.name;
                                     clicked => {
                                         root.remove-engine(engine.id);
                                     }
@@ -388,6 +451,7 @@ export component SettingsWindow inherits Window {
                                 LabelledRow {
                                     label: "Name";
                                     LineEdit {
+                                        accessible-label: "Engine name";
                                         text <=> root.editor-name;
                                         placeholder-text: "Example Search";
                                     }
@@ -396,6 +460,7 @@ export component SettingsWindow inherits Window {
                                 LabelledRow {
                                     label: "Keyword";
                                     LineEdit {
+                                        accessible-label: "Engine keyword";
                                         text <=> root.editor-keyword;
                                         placeholder-text: "@example (optional)";
                                     }
@@ -404,12 +469,21 @@ export component SettingsWindow inherits Window {
                                 LabelledRow {
                                     label: "URL with {searchTerms}";
                                     LineEdit {
+                                        accessible-label: "Engine URL";
                                         text <=> root.editor-url;
                                         placeholder-text: "https://example.com/search?q={searchTerms}";
+                                        edited(text) => {
+                                            root.editor-url-edited(text);
+                                        }
                                     }
                                 }
 
+                                if root.editor-warning != "": Note {
+                                    text: root.editor-warning;
+                                }
+
                                 if root.editor-problem != "": Problem {
+                                    dark: root.dark;
                                     text: root.editor-problem;
                                 }
 
@@ -454,8 +528,9 @@ export component SettingsWindow inherits Window {
                             label: "Theme";
                             ComboBox {
                                 horizontal-stretch: 1;
+                                accessible-label: "Theme";
                                 model: ["Follow the system", "Light", "Dark"];
-                                current-index: root.theme-index;
+                                current-index <=> root.theme-index;
                                 selected => {
                                     root.chosen("theme", self.current-index);
                                 }
@@ -468,7 +543,7 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Show the home button";
-                            checked: root.show-home-button;
+                            checked <=> root.show-home-button;
                             toggled => {
                                 root.toggled("show-home-button", self.checked);
                             }
@@ -476,7 +551,7 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Show the bookmarks bar";
-                            checked: root.show-bookmarks-bar;
+                            checked <=> root.show-bookmarks-bar;
                             toggled => {
                                 root.toggled("show-bookmarks-bar", self.checked);
                             }
@@ -493,7 +568,7 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Block ads and trackers";
-                            checked: root.block-ads-and-trackers;
+                            checked <=> root.block-ads-and-trackers;
                             toggled => {
                                 root.toggled("block-ads-and-trackers", self.checked);
                             }
@@ -505,7 +580,7 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Block pop-up windows";
-                            checked: root.block-popups;
+                            checked <=> root.block-popups;
                             toggled => {
                                 root.toggled("block-popups", self.checked);
                             }
@@ -527,7 +602,7 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Browsing history";
-                            checked: root.clear-history-on-exit;
+                            checked <=> root.clear-history-on-exit;
                             toggled => {
                                 root.toggled("clear-history-on-exit", self.checked);
                             }
@@ -535,15 +610,19 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Cookies and site data";
-                            checked: root.clear-cookies-on-exit;
+                            checked <=> root.clear-cookies-on-exit;
                             toggled => {
                                 root.toggled("clear-cookies-on-exit", self.checked);
                             }
                         }
 
+                        Note {
+                            text: "Site data is what sites keep in the browser: local and session storage, IndexedDB databases and Cache Storage. If Mercury Browser does not quit normally, they are cleared the next time it starts.";
+                        }
+
                         CheckBox {
                             text: "Cached files";
-                            checked: root.clear-cache-on-exit;
+                            checked <=> root.clear-cache-on-exit;
                             toggled => {
                                 root.toggled("clear-cache-on-exit", self.checked);
                             }
@@ -570,13 +649,20 @@ export component SettingsWindow inherits Window {
                             VerticalLayout {
                                 spacing: 4px;
                                 LineEdit {
-                                    text: root.download-directory;
+                                    accessible-label: "Save downloads in";
+                                    text <=> root.download-directory;
                                     placeholder-text: "The Downloads folder";
-                                    edited(text) => {
-                                        root.text-edited("download-directory", text);
+                                    accepted(text) => {
+                                        root.text-committed("download-directory", text);
+                                    }
+                                    changed has-focus => {
+                                        if !self.has-focus {
+                                            root.text-committed("download-directory", self.text);
+                                        }
                                     }
                                 }
                                 if root.download-directory-problem != "": Problem {
+                                    dark: root.dark;
                                     text: root.download-directory-problem;
                                 }
                             }
@@ -584,7 +670,7 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Ask where to save each download";
-                            checked: root.ask-where-to-save;
+                            checked <=> root.ask-where-to-save;
                             toggled => {
                                 root.toggled("ask-where-to-save", self.checked);
                             }
@@ -601,7 +687,7 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Offer to save passwords";
-                            checked: root.offer-to-save-passwords;
+                            checked <=> root.offer-to-save-passwords;
                             toggled => {
                                 root.toggled("offer-to-save-passwords", self.checked);
                             }
@@ -634,6 +720,7 @@ export component SettingsWindow inherits Window {
 
                             Button {
                                 text: "Remove";
+                                accessible-label: "Remove " + origin;
                                 clicked => {
                                     root.remove-never-save(index);
                                 }
@@ -647,7 +734,7 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Experimental web features";
-                            checked: root.experimental-web-features;
+                            checked <=> root.experimental-web-features;
                             toggled => {
                                 root.toggled("experimental-web-features", self.checked);
                             }
@@ -655,7 +742,7 @@ export component SettingsWindow inherits Window {
 
                         CheckBox {
                             text: "Draw canvases on the GPU";
-                            checked: root.gpu-canvas;
+                            checked <=> root.gpu-canvas;
                             toggled => {
                                 root.toggled("gpu-canvas", self.checked);
                             }
@@ -670,13 +757,20 @@ export component SettingsWindow inherits Window {
                             VerticalLayout {
                                 spacing: 4px;
                                 LineEdit {
-                                    text: root.language;
+                                    accessible-label: "Language";
+                                    text <=> root.language;
                                     placeholder-text: "Follow the system (for example en-GB)";
-                                    edited(text) => {
-                                        root.text-edited("language", text);
+                                    accepted(text) => {
+                                        root.text-committed("language", text);
+                                    }
+                                    changed has-focus => {
+                                        if !self.has-focus {
+                                            root.text-committed("language", self.text);
+                                        }
                                     }
                                 }
                                 if root.language-problem != "": Problem {
+                                    dark: root.dark;
                                     text: root.language-problem;
                                 }
                             }

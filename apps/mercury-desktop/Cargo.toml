@@ -64,6 +64,8 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
 signal-hook-registry.workspace = true
 
 [dev-dependencies]
+# Slint's own testing backend, the same version as `slint`: drives the settings window in tests.
+i-slint-backend-testing = "=1.17.1"
 tempfile.workspace = true
 
 [build-dependencies]

@@ -5368,6 +5368,7 @@ dependencies = [
  "gl_generator",
  "gleam",
  "glow",
+ "i-slint-backend-testing",
  "image",
  "libc",
  "log",
@@ -5439,7 +5440,6 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
- "talaria-core",
  "tempfile",
  "thiserror 2.0.21",
  "url",
@@ -10932,6 +10932,7 @@ dependencies = [
  "serde_json",
  "servo",
  "talaria-core",
+ "tempfile",
  "url",
 ]
 

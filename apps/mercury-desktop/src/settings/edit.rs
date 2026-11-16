@@ -17,6 +17,37 @@ pub(crate) const STARTUP_CHOICES: [StartupBehavior; 3] = [
 ];
 pub(crate) const THEME_CHOICES: [Theme; 3] = [Theme::System, Theme::Light, Theme::Dark];
 
+/// The text fields of the window, by name.
+pub(crate) const TEXT_FIELDS: [&str; 3] = ["homepage", "download-directory", "language"];
+
+/// What a text field shows for the stored setting.
+pub(crate) fn stored_text(settings: &Settings, name: &str) -> String {
+    match name {
+        "homepage" => settings.homepage.clone(),
+        "download-directory" => settings
+            .downloads
+            .directory
+            .as_ref()
+            .map(|directory| directory.display().to_string())
+            .unwrap_or_default(),
+        "language" => settings.language.clone().unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// A warning for the engine form's template: searches over plain `http` can be read on the way.
+pub(crate) fn template_warning(template: &str) -> Option<String> {
+    template
+        .trim()
+        .to_ascii_lowercase()
+        .starts_with("http:")
+        .then(|| {
+            "This address starts with http: what you search for could be read on the way. \
+             Use https if the engine offers it."
+                .to_owned()
+        })
+}
+
 /// The zoom levels offered: the zoom steps, plus the current default if a hand-edited file
 /// chose one between them.
 pub(crate) fn zoom_choices(current: u16) -> Vec<u16> {
@@ -113,13 +144,17 @@ pub(crate) fn apply_text(settings: &mut Settings, name: &str, text: &str) -> Res
 }
 
 /// The stored form of a typed home page: empty, or what `homepage_url` accepts; an address
-/// typed without a scheme is tried as `https://`, as the address bar does.
+/// typed without a scheme (`example.org`, `localhost:8080`) is tried as `https://`, as the
+/// address bar does.
 fn home_page(text: &str) -> Option<String> {
-    homepage_url(text).or_else(|| {
-        (!text.contains(':'))
-            .then(|| homepage_url(&format!("https://{text}")))
-            .flatten()
-    })
+    let has_scheme = text.contains("://") || text.starts_with("about:");
+    homepage_url(text)
+        .filter(|_| has_scheme || text.is_empty())
+        .or_else(|| {
+            (!has_scheme)
+                .then(|| homepage_url(&format!("https://{text}")))
+                .flatten()
+        })
 }
 
 /// The engine the form describes, checked, or why it cannot be saved. `editing` is the id of
@@ -562,5 +597,53 @@ mod tests {
         remove_engine(&mut settings, "google");
 
         assert_eq!(settings, Settings::default());
+    }
+
+    #[test]
+    fn a_text_field_shows_what_was_stored() {
+        let mut settings = Settings::default();
+        assert_eq!(stored_text(&settings, "homepage"), "");
+        assert_eq!(stored_text(&settings, "download-directory"), "");
+        assert_eq!(stored_text(&settings, "language"), "");
+
+        apply_text(&mut settings, "homepage", "example.org").expect("accepted");
+        apply_text(&mut settings, "download-directory", "/tmp/downloads").expect("accepted");
+        apply_text(&mut settings, "language", " en-GB ").expect("accepted");
+
+        assert_eq!(stored_text(&settings, "homepage"), "https://example.org/");
+        assert_eq!(
+            stored_text(&settings, "download-directory"),
+            "/tmp/downloads"
+        );
+        assert_eq!(stored_text(&settings, "language"), "en-GB");
+    }
+
+    #[test]
+    fn a_host_with_a_port_is_a_home_page() {
+        let mut settings = Settings::default();
+
+        assert_eq!(
+            apply_text(&mut settings, "homepage", "localhost:8080"),
+            Ok(())
+        );
+        assert_eq!(settings.homepage, "https://localhost:8080/");
+        assert_eq!(
+            apply_text(&mut settings, "homepage", "example.org:8443/a"),
+            Ok(())
+        );
+        assert_eq!(settings.homepage, "https://example.org:8443/a");
+        assert_eq!(apply_text(&mut settings, "homepage", "about:blank"), Ok(()));
+        assert_eq!(settings.homepage, "about:blank");
+    }
+
+    #[test]
+    fn a_plain_http_template_is_warned_about() {
+        assert!(template_warning("http://search.test/?q={searchTerms}").is_some());
+        assert!(template_warning("  HTTP://search.test/?q={searchTerms}").is_some());
+        assert_eq!(
+            template_warning("https://search.test/?q={searchTerms}"),
+            None
+        );
+        assert_eq!(template_warning(""), None);
     }
 }

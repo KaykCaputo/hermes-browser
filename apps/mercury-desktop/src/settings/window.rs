@@ -7,6 +7,7 @@ use std::rc::{Rc, Weak};
 use mercury_settings::{Settings, Theme, builtin_engines};
 use mercury_ui::{SearchEngineRow, SettingsWindow};
 use slint::language::ColorScheme as SlintColorScheme;
+use slint::winit_030::WinitWindowAccessor;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
 
 use super::{SettingsHandle, edit};
@@ -40,18 +41,25 @@ pub(crate) fn show(handle: &Rc<SettingsHandle>) {
         .borrow()
         .as_ref()
         .is_some_and(|window| window.window().is_visible());
-    if !visible {
-        slot.close();
-        match SettingsWindow::new() {
-            Ok(window) => {
-                connect(&window, Rc::downgrade(handle));
-                fill_text_fields(&window, &handle.settings());
-                *slot.window.borrow_mut() = Some(window);
-            }
-            Err(error) => {
-                log::error!("could not create the settings window: {error}");
-                return;
-            }
+    if visible {
+        // Already open (Cmd+, again): bring it forward.
+        if let Some(window) = slot.window.borrow().as_ref() {
+            let _focused = window
+                .window()
+                .with_winit_window(|native| native.focus_window());
+        }
+        return;
+    }
+    slot.close();
+    match SettingsWindow::new() {
+        Ok(window) => {
+            connect(&window, Rc::downgrade(handle));
+            fill_text_fields(&window, &handle.settings());
+            *slot.window.borrow_mut() = Some(window);
+        }
+        Err(error) => {
+            log::error!("could not create the settings window: {error}");
+            return;
         }
     }
     refresh(handle);
@@ -66,6 +74,7 @@ pub(crate) fn show(handle: &Rc<SettingsHandle>) {
 /// when the window opens, so that nothing overwrites what the user is typing.
 pub(crate) fn refresh(handle: &SettingsHandle) {
     if let Some(window) = handle.window.window.borrow().as_ref() {
+        window.set_system_color_scheme(handle.system_color_scheme());
         fill(window, &handle.settings(), handle.save_problem());
     }
 }
@@ -138,20 +147,58 @@ pub(crate) fn fill(window: &SettingsWindow, settings: &Settings, save_problem: O
 }
 
 pub(crate) fn fill_text_fields(window: &SettingsWindow, settings: &Settings) {
-    window.set_homepage(settings.homepage.clone().into());
-    window.set_download_directory(
-        settings
-            .downloads
-            .directory
-            .as_ref()
-            .map(|directory| directory.display().to_string())
-            .unwrap_or_default()
-            .into(),
-    );
-    window.set_language(settings.language.clone().unwrap_or_default().into());
+    for name in edit::TEXT_FIELDS {
+        set_text_field(window, name, edit::stored_text(settings, name).into());
+    }
+}
+
+fn set_text_field(window: &SettingsWindow, name: &str, text: SharedString) {
+    match name {
+        "homepage" => window.set_homepage(text),
+        "download-directory" => window.set_download_directory(text),
+        "language" => window.set_language(text),
+        _ => log::warn!("settings window: unknown field {name}"),
+    }
+}
+
+fn set_problem(window: &SettingsWindow, name: &str, problem: SharedString) {
+    match name {
+        "homepage" => window.set_homepage_problem(problem),
+        "download-directory" => window.set_download_directory_problem(problem),
+        "language" => window.set_language_problem(problem),
+        _ => log::warn!("settings window: unknown field {name}"),
+    }
+}
+
+fn text_field(window: &SettingsWindow, name: &str) -> SharedString {
+    match name {
+        "homepage" => window.get_homepage(),
+        "download-directory" => window.get_download_directory(),
+        "language" => window.get_language(),
+        _ => SharedString::new(),
+    }
+}
+
+/// Applies a text field's value. Accepted, the field shows the form that was stored; refused,
+/// it keeps the text and shows why.
+fn commit_text(handle: &SettingsHandle, window: &SettingsWindow, name: &str, text: &str) {
+    let mut result = Ok(());
+    handle.update(|settings| result = edit::apply_text(settings, name, text));
+    match result {
+        Ok(()) => {
+            set_text_field(
+                window,
+                name,
+                edit::stored_text(&handle.settings(), name).into(),
+            );
+            set_problem(window, name, SharedString::new());
+        }
+        Err(problem) => set_problem(window, name, problem.into()),
+    }
 }
 
 fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
+    // menus lane: reinstall Mercury's menu when this window becomes key
     let toggled_handle = handle.clone();
     window.on_toggled(move |name, on| {
         if let Some(handle) = toggled_handle.upgrade() {
@@ -177,18 +224,36 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
 
     let text_handle = handle.clone();
     let text_window = window.as_weak();
-    window.on_text_edited(move |name, text| {
-        let (Some(handle), Some(window)) = (text_handle.upgrade(), text_window.upgrade()) else {
+    window.on_text_committed(move |name, text| {
+        if let (Some(handle), Some(window)) = (text_handle.upgrade(), text_window.upgrade()) {
+            commit_text(&handle, &window, &name, &text);
+        }
+    });
+
+    let commit_handle = handle.clone();
+    let commit_window = window.as_weak();
+    window.on_commit_texts(move || {
+        let (Some(handle), Some(window)) = (commit_handle.upgrade(), commit_window.upgrade())
+        else {
             return;
         };
-        let mut result = Ok(());
-        handle.update(|settings| result = edit::apply_text(settings, &name, &text));
-        let problem = SharedString::from(result.err().unwrap_or_default());
-        match name.as_str() {
-            "homepage" => window.set_homepage_problem(problem),
-            "download-directory" => window.set_download_directory_problem(problem),
-            "language" => window.set_language_problem(problem),
-            _ => log::warn!("settings window: unknown field {name}"),
+        for name in edit::TEXT_FIELDS {
+            let text = text_field(&window, name);
+            commit_text(&handle, &window, name, &text);
+        }
+    });
+
+    let warning_window = window.as_weak();
+    window.on_editor_url_edited(move |text| {
+        if let Some(window) = warning_window.upgrade() {
+            window.set_editor_warning(edit::template_warning(&text).unwrap_or_default().into());
+        }
+    });
+
+    window.on_quit_browser(|| {
+        // What the main window's quit shortcut does (`ShortcutAction::Quit`).
+        if let Err(error) = slint::quit_event_loop() {
+            log::warn!("could not quit: {error}");
         }
     });
 
@@ -312,6 +377,7 @@ fn open_editor(window: &SettingsWindow, id: &str, name: &str, keyword: &str, url
     window.set_editor_keyword(keyword.into());
     window.set_editor_url(url.into());
     window.set_editor_problem(SharedString::new());
+    window.set_editor_warning(edit::template_warning(url).unwrap_or_default().into());
     window.set_editor_open(true);
 }
 
@@ -330,4 +396,146 @@ fn index_of<T: PartialEq>(choices: &[T], value: &T) -> i32 {
 
 fn to_i32(index: usize) -> i32 {
     i32::try_from(index).unwrap_or(i32::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use i_slint_backend_testing::{AccessibleRole, ElementHandle};
+    use mercury_settings::SearchEngine;
+    use slint::platform::PointerEventButton;
+
+    use super::super::tests::init_slint;
+    use super::*;
+
+    fn open(handle: &Rc<SettingsHandle>) -> SettingsWindow {
+        show(handle);
+        let window = handle
+            .window
+            .window
+            .borrow()
+            .as_ref()
+            .expect("the window is open")
+            .clone_strong();
+        window
+            .window()
+            .set_size(slint::LogicalSize::new(900.0, 1400.0));
+        window
+    }
+
+    /// The control labelled `label`; the text beside a control carries the same label.
+    fn element(window: &SettingsWindow, label: &str) -> ElementHandle {
+        ElementHandle::find_by_accessible_label(window, label)
+            .find(|element| element.accessible_role() != Some(AccessibleRole::Text))
+            .unwrap_or_else(|| panic!("no control labelled {label:?}"))
+    }
+
+    #[test]
+    fn a_check_box_follows_the_setting_after_the_user_has_clicked_it() {
+        init_slint();
+        let handle = SettingsHandle::start(None);
+        let window = open(&handle);
+        element(&window, "Privacy and security").invoke_accessible_default_action();
+
+        element(&window, "Block ads and trackers").mock_single_click(PointerEventButton::Left);
+        assert!(!handle.settings().privacy.block_ads_and_trackers);
+        assert_eq!(
+            element(&window, "Block ads and trackers").accessible_checked(),
+            Some(false)
+        );
+
+        handle.update(|settings| settings.privacy.block_ads_and_trackers = true);
+
+        assert_eq!(
+            element(&window, "Block ads and trackers").accessible_checked(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_engine_choice_follows_when_the_chosen_engine_is_removed() {
+        init_slint();
+        let handle = SettingsHandle::start(None);
+        handle.update(|settings| {
+            settings.search.custom_engines.push(SearchEngine {
+                id: "custom-docs".to_owned(),
+                name: "Docs".to_owned(),
+                keyword: String::new(),
+                url_template: "https://docs.test/?q={searchTerms}".to_owned(),
+                suggest_template: None,
+            });
+            settings.search.default_engine = "custom-docs".to_owned();
+        });
+        let window = open(&handle);
+        assert_eq!(
+            element(&window, "Search engine")
+                .accessible_value()
+                .as_deref(),
+            Some("Docs")
+        );
+
+        element(&window, "Remove Docs").mock_single_click(PointerEventButton::Left);
+
+        assert_eq!(handle.settings().search.default_engine, "duckduckgo");
+        assert_eq!(
+            element(&window, "Search engine")
+                .accessible_value()
+                .as_deref(),
+            Some("DuckDuckGo")
+        );
+    }
+
+    #[test]
+    fn a_typed_home_page_survives_a_section_change_in_its_stored_form() {
+        init_slint();
+        let handle = SettingsHandle::start(None);
+        let window = open(&handle);
+
+        element(&window, "Home page").set_accessible_value("example.org");
+        assert_eq!(
+            handle.settings().homepage,
+            "",
+            "nothing is saved while typing"
+        );
+        element(&window, "Appearance").mock_single_click(PointerEventButton::Left);
+        element(&window, "General").mock_single_click(PointerEventButton::Left);
+
+        assert_eq!(handle.settings().homepage, "https://example.org/");
+        assert_eq!(
+            element(&window, "Home page").accessible_value().as_deref(),
+            Some("https://example.org/")
+        );
+        assert_eq!(window.get_homepage_problem(), "");
+    }
+
+    #[test]
+    fn a_refused_home_page_keeps_its_text_and_says_why() {
+        init_slint();
+        let handle = SettingsHandle::start(None);
+        let window = open(&handle);
+
+        element(&window, "Home page").set_accessible_value("ftp://files.test/");
+        element(&window, "Appearance").invoke_accessible_default_action();
+        element(&window, "General").invoke_accessible_default_action();
+
+        assert_eq!(handle.settings().homepage, "");
+        assert_eq!(
+            element(&window, "Home page").accessible_value().as_deref(),
+            Some("ftp://files.test/")
+        );
+        assert_ne!(window.get_homepage_problem(), "");
+    }
+
+    #[test]
+    fn sections_are_tabs_reachable_by_their_names() {
+        init_slint();
+        let handle = SettingsHandle::start(None);
+        let window = open(&handle);
+        let downloads = element(&window, "Downloads");
+
+        assert_eq!(downloads.accessible_role(), Some(AccessibleRole::Tab));
+        downloads.invoke_accessible_default_action();
+
+        assert_eq!(window.get_section(), 3);
+        assert_eq!(downloads.accessible_item_selected(), Some(true));
+    }
 }

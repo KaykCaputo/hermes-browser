@@ -120,7 +120,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         &window,
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
-        runtime_options(&options, &profile),
+        // settings-ui: blocking and what to clear are known before the engine starts.
+        settings::with_privacy(runtime_options(&options, &profile), &settings),
     )?;
     // settings-ui
     settings::connect(&settings, &window, &controller);
@@ -159,7 +160,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     // gone before the window (and the renderer whose device Servo uses) is destroyed.
     drop(screenshot_timer);
     // settings-ui: last settings write and the clear-history-on-exit hook.
-    settings.finish_run();
+    settings.finish_run(std::time::Instant::now() + std::time::Duration::from_secs(2));
     shut_down_engine(exit_code);
     drop(window);
 
@@ -173,6 +174,8 @@ fn runtime_options(options: &LaunchOptions, profile: &ActiveProfile) -> RuntimeO
         gpu_canvas: options.gpu_canvas,
         config_dir: profile.servo_config_dir(),
         experimental_web_features: options.experimental_web_features,
+        // settings-ui: filled in by `settings::with_privacy`.
+        ..RuntimeOptions::default()
     }
 }
 
@@ -347,6 +350,7 @@ mod tests {
                 gpu_canvas: false,
                 config_dir: Some(root.join("servo")),
                 experimental_web_features: false,
+                ..RuntimeOptions::default()
             }
         );
     }

@@ -200,6 +200,39 @@ fn main() -> Result<(), Box<dyn Error>> {
         window.hide()?;
     }
 
+    // "Follow the system" on a dark system: the window is told the system's scheme.
+    let window = sample_settings_window()?;
+    window.set_forced_color_scheme(ColorScheme::Unknown);
+    window.set_system_color_scheme(ColorScheme::Dark);
+    window.show()?;
+    window.set_section(2);
+    render(
+        window.window(),
+        1560,
+        1240,
+        &output.join("settings-system-dark-privacy.png"),
+    )?;
+    window.set_section(0);
+    window.set_editor_open(true);
+    window.set_editor_name("Plain engine".into());
+    window.set_editor_url("http://search.example/find".into());
+    window.set_editor_warning(
+        "This address starts with http: what you search for could be read on the way. Use \
+         https if the engine offers it."
+            .into(),
+    );
+    window.set_editor_problem("The template has no {searchTerms}.".into());
+    window.set_homepage_problem(
+        "Enter an http, https, file or about address, without a user name or password.".into(),
+    );
+    render(
+        window.window(),
+        1560,
+        1900,
+        &output.join("settings-system-dark-general-editor.png"),
+    )?;
+    window.hide()?;
+
     for (theme, name) in [(ChromeTheme::Light, "light"), (ChromeTheme::Dark, "dark")] {
         let window = sample_main_window(theme)?;
         window.show()?;

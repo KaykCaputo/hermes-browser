@@ -26,6 +26,7 @@ use mercury_ui::{ChromePalette, ChromeTheme, MainWindow};
 use slint::winit_030::{WinitWindowAccessor, winit};
 use slint::{ComponentHandle, Timer, TimerMode};
 use talaria_core::BrowserController;
+use talaria_servo::{EngineSwitches, RuntimeOptions};
 
 use crate::cli::LaunchOptions;
 use crate::keyboard::color_scheme_from_winit;
@@ -39,8 +40,9 @@ thread_local! {
     static HANDLE: RefCell<Weak<SettingsHandle>> = const { RefCell::new(Weak::new()) };
 }
 
-/// How often the window theme is retried until the native window exists.
+/// How often the window theme is retried until the native window exists, and for how long.
 const WINDOW_THEME_RETRY: Duration = Duration::from_millis(50);
+const WINDOW_THEME_ATTEMPTS: u32 = 200;
 
 /// The settings of this run. One per process, created in `main` after the profile is locked.
 pub(crate) struct SettingsHandle {
@@ -59,6 +61,12 @@ pub(crate) struct SettingsHandle {
     /// The theme last given to the native window.
     window_theme: Cell<Option<Theme>>,
     window_theme_timer: Timer,
+    /// The engine's switches (content blocking, what to clear at quit); the engine reads them
+    /// when it acts, so setting them never waits for it.
+    switches: RefCell<Option<EngineSwitches>>,
+    /// The browser window: its colour scheme is the system's, for the settings window.
+    main_window: RefCell<slint::Weak<MainWindow>>,
+    finished: Cell<bool>,
 }
 
 impl SettingsHandle {
@@ -96,6 +104,9 @@ impl SettingsHandle {
             window: window::SettingsWindowSlot::default(),
             window_theme: Cell::new(None),
             window_theme_timer: Timer::default(),
+            switches: RefCell::new(None),
+            main_window: RefCell::default(),
+            finished: Cell::new(false),
         });
         HANDLE.with(|current| *current.borrow_mut() = Rc::downgrade(&handle));
         if startup.save_now {
@@ -168,11 +179,22 @@ impl SettingsHandle {
         }
     }
 
+    /// The system's colour scheme, as the browser window sees it.
+    fn system_color_scheme(&self) -> slint::language::ColorScheme {
+        self.main_window
+            .borrow()
+            .upgrade()
+            .map_or(slint::language::ColorScheme::Unknown, |window| {
+                window.get_system_color_scheme()
+            })
+    }
+
     fn save_problem(&self) -> Option<String> {
         self.save_problem.borrow().clone()
     }
 
     fn notify(&self) {
+        window::refresh(self);
         let listeners = self.listeners.borrow().clone();
         for listener in listeners {
             listener();
@@ -226,29 +248,44 @@ impl SettingsHandle {
         self.arm_save_timer();
     }
 
-    /// At quit, after the event loop has ended: waits for the write in flight, writes once
-    /// more if anything is unsaved, and runs the clear-history-on-exit hook. Writing here
-    /// blocks, which is fine: the window is gone.
-    pub(crate) fn finish_run(&self) {
+    /// At quit, after the event loop has ended: waits for the write in flight (until
+    /// `deadline` at most), writes once more if anything is unsaved, and runs the
+    /// clear-history-on-exit hook. Writing here blocks, which is fine: the window is gone.
+    /// Only the first call acts.
+    pub(crate) fn finish_run(&self, deadline: Instant) {
+        if self.finished.replace(true) {
+            return;
+        }
         self.save_timer.stop();
         self.window.close();
         if let Some(worker) = self.worker.borrow_mut().take() {
             let SaveWorker { sender, thread } = worker;
             drop(sender);
-            match thread.join() {
-                Ok(Some(outcome)) if self.scheduler.borrow().is_writing() => {
-                    self.scheduler.borrow_mut().finished(outcome);
-                }
-                Ok(_) => {}
-                Err(_) => log::error!("the settings saving thread panicked"),
+            while !thread.is_finished() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(5));
             }
-            if self.scheduler.borrow().needs_final_write()
-                && let Some(store) = &self.store
-            {
-                match store.save(&self.settings.borrow()) {
-                    Ok(()) => log::info!("settings saved at exit"),
-                    Err(error) => log::warn!("could not save the settings at exit: {error}"),
+            if thread.is_finished() {
+                match thread.join() {
+                    // The thread's report of its last write never reached the event loop.
+                    Ok(Some(outcome)) if self.scheduler.borrow().is_writing() => {
+                        self.scheduler.borrow_mut().finished(outcome);
+                    }
+                    Ok(_) => {}
+                    Err(_) => log::error!("the settings saving thread panicked"),
                 }
+                if self.scheduler.borrow().needs_final_write()
+                    && let Some(store) = &self.store
+                {
+                    match store.save(&self.settings.borrow()) {
+                        Ok(()) => log::info!("settings saved at exit"),
+                        Err(error) => log::warn!("could not save the settings at exit: {error}"),
+                    }
+                }
+            } else {
+                // Never two writes at once: the last changes are lost rather than racing it.
+                log::warn!(
+                    "a settings write did not finish in time; the last changes are not saved"
+                );
             }
         }
         let settings = self.settings.borrow();
@@ -305,6 +342,17 @@ pub(crate) fn main_window_closing() {
     }
 }
 
+/// The engine's options with the privacy settings it needs before it starts: content blocking
+/// and what to clear (also cleared at start, in case the last quit did not get to it).
+pub(crate) fn with_privacy(options: RuntimeOptions, settings: &SettingsHandle) -> RuntimeOptions {
+    let current = settings.settings.borrow();
+    RuntimeOptions {
+        block_ads_and_trackers: current.privacy.block_ads_and_trackers,
+        clear_on_exit: apply::exit_clearing(&current.privacy.clear_on_exit),
+        ..options
+    }
+}
+
 /// The launch options with the settings that apply at start: experimental web features and
 /// the GPU canvas. See `apply::launch_options` for how the command line wins.
 pub(crate) fn launch_options(options: LaunchOptions, settings: &SettingsHandle) -> LaunchOptions {
@@ -336,6 +384,15 @@ pub(crate) fn connect(
     window: &MainWindow,
     controller: &Rc<RefCell<BrowserController>>,
 ) {
+    *settings.main_window.borrow_mut() = window.as_weak();
+    // Taken once, before the event loop runs; from then on settings reach the engine through
+    // the shared switches, never by borrowing it.
+    let mut switches = None;
+    if !crate::engine::with_runtime(|runtime| switches = Some(runtime.switches())) {
+        log::error!("settings: the engine is not running; privacy changes will not reach it");
+    }
+    *settings.switches.borrow_mut() = switches;
+
     let apply = {
         let settings = Rc::downgrade(settings);
         let window = window.as_weak();
@@ -384,23 +441,20 @@ fn apply_everywhere(
     let current = settings.settings();
     apply::apply_to_controller(&mut controller.borrow_mut(), &current);
 
-    let applied = crate::engine::with_runtime(|runtime| {
-        runtime.set_content_blocking(current.privacy.block_ads_and_trackers);
-        runtime.set_clear_on_exit(apply::exit_clearing(&current.privacy.clear_on_exit));
-    });
-    if !applied {
-        log::warn!("the engine was busy; privacy settings apply at the next change");
+    if let Some(switches) = settings.switches.borrow().as_ref() {
+        switches.set_content_blocking(current.privacy.block_ads_and_trackers);
+        switches.set_clear_on_exit(apply::exit_clearing(&current.privacy.clear_on_exit));
     }
 
     window
         .global::<ChromePalette>()
         .set_theme(chrome_theme(current.appearance.theme));
     window.set_show_home_button(current.appearance.show_home_button);
+    window.set_default_zoom_percent(i32::from(current.appearance.default_zoom_percent));
     window.set_search_engine_name(current.search.default_engine().name.into());
     window.set_settings_notice(settings.notice().unwrap_or_default().into());
     settings.apply_window_theme(window, controller, current.appearance.theme);
     sync_ui(window, &controller.borrow());
-    window::refresh(settings);
     window.window().request_redraw();
 }
 
@@ -421,6 +475,16 @@ impl SettingsHandle {
         window: &MainWindow,
         controller: &Rc<RefCell<BrowserController>>,
         theme: Theme,
+    ) {
+        self.apply_window_theme_attempt(window, controller, theme, WINDOW_THEME_ATTEMPTS);
+    }
+
+    fn apply_window_theme_attempt(
+        &self,
+        window: &MainWindow,
+        controller: &Rc<RefCell<BrowserController>>,
+        theme: Theme,
+        attempts_left: u32,
     ) {
         if self.window_theme.get() == Some(theme) {
             return;
@@ -446,6 +510,9 @@ impl SettingsHandle {
                         .set_color_scheme(color_scheme_from_winit(reported));
                 }
             }
+            None if attempts_left == 0 => {
+                log::warn!("settings: the window never appeared; its title bar keeps its theme");
+            }
             None => {
                 let this = self.this.clone();
                 let weak_window = window.as_weak();
@@ -457,11 +524,138 @@ impl SettingsHandle {
                         if let (Some(handle), Some(window)) =
                             (this.upgrade(), weak_window.upgrade())
                         {
-                            handle.apply_window_theme(&window, &controller, theme);
+                            handle.apply_window_theme_attempt(
+                                &window,
+                                &controller,
+                                theme,
+                                attempts_left - 1,
+                            );
                         }
                     },
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use mercury_settings::Theme;
+
+    use super::*;
+
+    thread_local! {
+        static SLINT_READY: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Slint's testing backend for this test thread: no display, no event loop, mock time.
+    pub(crate) fn init_slint() {
+        if !SLINT_READY.with(|ready| ready.replace(true)) {
+            i_slint_backend_testing::init_no_event_loop();
+        }
+    }
+
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(5)
+    }
+
+    fn saved_theme(directory: &Path) -> String {
+        std::fs::read_to_string(directory.join("settings.json")).expect("a settings file")
+    }
+
+    #[test]
+    fn a_newer_file_starts_no_saving_thread() {
+        init_slint();
+        let directory = tempfile::tempdir().expect("a directory");
+        std::fs::write(
+            directory.path().join("settings.json"),
+            r#"{"format_version": 99}"#,
+        )
+        .expect("a file");
+
+        let handle = SettingsHandle::start(Some(directory.path()));
+
+        assert!(handle.worker.borrow().is_none());
+        assert!(handle.notice().is_some());
+        assert!(handle.save_problem().is_some());
+    }
+
+    #[test]
+    fn an_unreadable_file_starts_no_saving_thread() {
+        init_slint();
+        let directory = tempfile::tempdir().expect("a directory");
+        std::fs::create_dir(directory.path().join("settings.json")).expect("a directory");
+
+        let handle = SettingsHandle::start(Some(directory.path()));
+
+        assert!(handle.worker.borrow().is_none());
+        assert!(handle.notice().is_some());
+    }
+
+    #[test]
+    fn a_change_inside_the_quiet_period_is_written_at_quit() {
+        init_slint();
+        let directory = tempfile::tempdir().expect("a directory");
+        let handle = SettingsHandle::start(Some(directory.path()));
+
+        handle.update(|settings| settings.appearance.theme = Theme::Light);
+        handle.finish_run(deadline());
+
+        assert!(saved_theme(directory.path()).contains(r#""theme": "light""#));
+    }
+
+    #[test]
+    fn at_quit_the_write_in_flight_is_waited_for_and_its_result_taken() {
+        init_slint();
+        let directory = tempfile::tempdir().expect("a directory");
+        let handle = SettingsHandle::start(Some(directory.path()));
+        handle.update(|settings| settings.appearance.theme = Theme::Light);
+        // As if the quiet period had passed: the write goes to the saving thread.
+        handle
+            .scheduler
+            .borrow_mut()
+            .changed(Instant::now() - SAVE_QUIET_PERIOD);
+        handle.save_if_due();
+        assert!(handle.scheduler.borrow().is_writing());
+
+        handle.finish_run(deadline());
+
+        // The thread's report never reached an event loop; the join handed it over.
+        assert!(!handle.scheduler.borrow().is_writing());
+        assert!(!handle.scheduler.borrow().needs_final_write());
+        assert!(saved_theme(directory.path()).contains(r#""theme": "light""#));
+    }
+
+    #[test]
+    fn a_change_made_during_the_last_write_is_written_after_it() {
+        init_slint();
+        let directory = tempfile::tempdir().expect("a directory");
+        let handle = SettingsHandle::start(Some(directory.path()));
+        handle.update(|settings| settings.appearance.theme = Theme::Light);
+        handle
+            .scheduler
+            .borrow_mut()
+            .changed(Instant::now() - SAVE_QUIET_PERIOD);
+        handle.save_if_due();
+
+        handle.update(|settings| settings.appearance.theme = Theme::Dark);
+        handle.finish_run(deadline());
+
+        assert!(saved_theme(directory.path()).contains(r#""theme": "dark""#));
+    }
+
+    #[test]
+    fn finishing_twice_acts_once() {
+        init_slint();
+        let directory = tempfile::tempdir().expect("a directory");
+        let handle = SettingsHandle::start(Some(directory.path()));
+        handle.update(|settings| settings.appearance.theme = Theme::Light);
+        handle.finish_run(deadline());
+        std::fs::remove_file(directory.path().join("settings.json")).expect("the file");
+
+        handle.update(|settings| settings.appearance.theme = Theme::Dark);
+        handle.finish_run(deadline());
+
+        assert!(!directory.path().join("settings.json").exists());
     }
 }

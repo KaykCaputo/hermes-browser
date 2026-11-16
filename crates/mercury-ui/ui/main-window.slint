@@ -1,6 +1,9 @@
 import { Palette } from "std-widgets.slint";
-import { ChromePalette, SettingsNotice } from "settings/chrome.slint";
-export { ChromePalette, ChromeTheme, SearchEngineRow, SettingsWindow } from "settings/chrome.slint";
+import { ChromePalette } from "theme/chrome-palette.slint";
+export { ChromePalette, ChromeTheme } from "theme/chrome-palette.slint";
+// settings-ui
+import { SettingsNotice } from "settings/settings-notice.slint";
+export { SearchEngineRow, SettingsWindow } from "settings/settings-window.slint";
 
 export enum WebViewPointerButton {
     left,
@@ -218,6 +221,8 @@ export component MainWindow inherits Window {
     callback web-view-pointer-left();
     // --- settings-ui ---
     in property <bool> show-home-button: false;
+    // The zoom badge shows only when a page's zoom differs from this.
+    in property <int> default-zoom-percent: 100;
     in property <string> search-engine-name: "DuckDuckGo";
     // One message about the settings file (damaged, or from a newer version); empty for none.
     in property <string> settings-notice: "";
@@ -457,7 +462,7 @@ export component MainWindow inherits Window {
                     }
                 }
 
-                if root.zoom-percent != 100: Text {
+                if root.zoom-percent != root.default-zoom-percent: Text {
                     text: root.zoom-percent + "%";
                     color: ChromePalette.button-label;
                     font-size: 12px;
