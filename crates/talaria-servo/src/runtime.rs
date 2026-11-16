@@ -21,7 +21,9 @@ use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
 use crate::screen::ScreenMetrics;
-use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
+use crate::session_data::{
+    AfterEngineCleanup, HandleThenCleanup, clean_up_before_engine_start, end_session_cookies,
+};
 use crate::{ServoWebView, ServoWebViewError};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
@@ -95,8 +97,8 @@ pub struct ServoRuntime {
     /// handle to Servo of its own, so this field must stay before `after_engine_cleanup`.
     user_content: Rc<servo::UserContentManager>,
     /// Declared after `inner` and `user_content`, the two fields that hold a handle to Servo,
-    /// so it is dropped after the last of them. Every web view's delegate holds a clone too;
-    /// see `AfterEngineCleanup`.
+    /// so it is dropped after the last of them. Every web view holds a clone too, released
+    /// after its own handle; see `AfterEngineCleanup`.
     after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }
 
@@ -175,7 +177,6 @@ impl ServoRuntime {
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
-            _after_engine_cleanup: self.after_engine_cleanup.clone(),
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -189,7 +190,12 @@ impl ServoRuntime {
             let _send_result = browser_event_sender.send(TabEvent::new(tab_id, event));
         }
         info!("created Servo WebView for tab {}", tab_id.value());
-        Ok(ServoWebView::new(inner, frame_ready, tab_id, scale_factor))
+        Ok(ServoWebView::new(
+            HandleThenCleanup::new(inner, self.after_engine_cleanup.clone()),
+            frame_ready,
+            tab_id,
+            scale_factor,
+        ))
     }
 
     pub fn spin_event_loop(&self) {
@@ -318,8 +324,6 @@ struct BrowserDelegate {
     load_metrics: RefCell<PageLoadMetrics>,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
-    /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
-    _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }
 
 impl BrowserDelegate {
