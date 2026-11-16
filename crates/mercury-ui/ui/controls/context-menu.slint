@@ -1,4 +1,3 @@
-import { Palette } from "std-widgets.slint";
 import { PopupColors, PopupStyle } from "page-popup.slint";
 
 export struct ContextMenuRow {
@@ -12,11 +11,10 @@ export struct ContextMenuRow {
 export component ContextMenuPopup inherits Rectangle {
     in property <[ContextMenuRow]> rows;
     in property <int> highlighted: -1;
-    in property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     callback row-clicked(int);
     callback row-hovered(int);
 
-    property <PopupColors> colors: PopupStyle.colors(root.dark);
+    property <PopupColors> colors: PopupStyle.colors;
 
     background: root.colors.background;
     border-radius: 8px;

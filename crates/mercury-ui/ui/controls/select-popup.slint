@@ -1,4 +1,4 @@
-import { ListView, Palette } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
 import { PopupColors, PopupStyle, PopupButton } from "page-popup.slint";
 
 export struct SelectPopupRow {
@@ -20,13 +20,12 @@ export component SelectPopup inherits Rectangle {
     in property <bool> multiple: false;
     // The page's origin, shown so the list cannot pass for the browser's own.
     in property <string> origin;
-    in property <bool> dark: Palette.color-scheme == ColorScheme.dark;
     in-out property <length> scroll-y <=> list.viewport-y;
     callback row-clicked(int);
     callback row-hovered(int);
     callback done();
 
-    property <PopupColors> colors: PopupStyle.colors(root.dark);
+    property <PopupColors> colors: PopupStyle.colors;
     property <length> footer-height: root.multiple ? 40px : 0px;
 
     background: root.colors.background;

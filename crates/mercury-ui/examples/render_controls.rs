@@ -8,6 +8,7 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
+use slint::language::ColorScheme;
 use slint::platform::software_renderer::{MinimalSoftwareWindow, PremultipliedRgbaColor};
 use slint::platform::{Platform, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, Model, ModelRc, PhysicalSize, PlatformError, VecModel};
@@ -16,10 +17,17 @@ slint::slint! {
     import { SelectPopup, SelectPopupRow } from "../ui/controls/select-popup.slint";
     import { ColorPicker } from "../ui/controls/color-picker.slint";
     import { ContextMenuPopup, ContextMenuRow } from "../ui/controls/context-menu.slint";
+    import { Palette } from "std-widgets.slint";
+    export { ChromePalette, ChromeTheme } from "../ui/theme/chrome-palette.slint";
 
     // A `<select>` box on the page with its list open below it.
     export component SelectPreview inherits Window {
         in property <bool> dark;
+        // The system's scheme, for the "System" theme.
+        in property <ColorScheme> system-scheme: ColorScheme.unknown;
+        changed system-scheme => {
+            Palette.color-scheme = self.system-scheme;
+        }
         background: root.dark ? #202124 : #f1f3f4;
         in property <[SelectPopupRow]> rows;
         in property <bool> multiple;
@@ -55,12 +63,16 @@ slint::slint! {
             scroll-y <=> root.scroll-y;
             multiple: root.multiple;
             origin: "A page on https://shop.example";
-            dark: root.dark;
         }
     }
 
     export component ColorPreview inherits Window {
         in property <bool> dark;
+        // The system's scheme, for the "System" theme.
+        in property <ColorScheme> system-scheme: ColorScheme.unknown;
+        changed system-scheme => {
+            Palette.color-scheme = self.system-scheme;
+        }
         background: root.dark ? #202124 : #f1f3f4;
         width: 272px;
         height: 330px;
@@ -79,12 +91,16 @@ slint::slint! {
             hex: "#1e88e5";
             hue: 0.5806;
             lightness: 0.5078;
-            dark: root.dark;
         }
     }
 
     export component MenuPreview inherits Window {
         in property <bool> dark;
+        // The system's scheme, for the "System" theme.
+        in property <ColorScheme> system-scheme: ColorScheme.unknown;
+        changed system-scheme => {
+            Palette.color-scheme = self.system-scheme;
+        }
         background: root.dark ? #202124 : #f1f3f4;
         in property <[ContextMenuRow]> rows;
         in property <length> menu-height;
@@ -98,10 +114,28 @@ slint::slint! {
             height: root.menu-height;
             rows: root.rows;
             highlighted: 0;
-            dark: root.dark;
         }
     }
 }
+
+/// Sets the appearance setting and, for "System", the system's scheme.
+trait Themed {
+    fn apply(&self, theme: ChromeTheme, system_scheme: ColorScheme, dark: bool);
+}
+
+macro_rules! themed {
+    ($($component:ty),*) => {$(
+        impl Themed for $component {
+            fn apply(&self, theme: ChromeTheme, system_scheme: ColorScheme, dark: bool) {
+                self.global::<ChromePalette>().set_theme(theme);
+                self.set_system_scheme(system_scheme);
+                self.set_dark(dark);
+            }
+        }
+    )*};
+}
+
+themed!(SelectPreview, ColorPreview, MenuPreview);
 
 struct HeadlessPlatform {
     window: Rc<MinimalSoftwareWindow>,
@@ -131,11 +165,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         scale_factor: SCALE_FACTOR,
     });
 
-    for dark in [false, true] {
-        let theme = if dark { "dark" } else { "light" };
+    for (theme, chrome_theme, system_scheme, dark) in [
+        ("light", ChromeTheme::Light, ColorScheme::Unknown, false),
+        ("dark", ChromeTheme::Dark, ColorScheme::Unknown, true),
+        (
+            "system-light",
+            ChromeTheme::System,
+            ColorScheme::Light,
+            false,
+        ),
+        ("system-dark", ChromeTheme::System, ColorScheme::Dark, true),
+    ] {
+        let themed = |component: &dyn Themed| {
+            component.apply(chrome_theme, system_scheme, dark);
+        };
 
         let select = SelectPreview::new()?;
-        select.set_dark(dark);
+        themed(&select);
         select.set_rows(select_rows());
         render(
             &window,
@@ -156,7 +202,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         // 100,000 options, scrolled to the highlighted one near the middle.
         let long = SelectPreview::new()?;
-        long.set_dark(dark);
+        themed(&long);
         long.set_rows(ModelRc::new(VecModel::from(
             (0..100_000)
                 .map(|index| SelectPopupRow {
@@ -182,7 +228,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         drop(long);
 
         let colour = ColorPreview::new()?;
-        colour.set_dark(dark);
+        themed(&colour);
         render(
             &window,
             &colour,
@@ -194,7 +240,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         for (name, rows) in [("link", link_menu()), ("image", image_menu())] {
             let menu = MenuPreview::new()?;
-            menu.set_dark(dark);
+            themed(&menu);
             menu.set_menu_height(menu_height(&rows));
             menu.set_rows(rows);
             render(
