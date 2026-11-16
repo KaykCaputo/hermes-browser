@@ -20,9 +20,7 @@ use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
-use crate::page_feedback::{
-    DOCUMENT_TITLE_SCRIPT, PageFeedback, reads_title_after_address_change, reads_title_at,
-};
+use crate::page_feedback::{DOCUMENT_TITLE_SCRIPT, PageFeedback, reads_title_at};
 use crate::page_tabs::{AdoptedWebView, NewTabAllocator, PageTabs};
 use crate::screen::ScreenMetrics;
 use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
@@ -186,6 +184,7 @@ impl ServoRuntime {
     ) -> Result<ServoWebView, ServoWebViewError> {
         let initial_url = Url::parse(initial_url)?;
         let frame_ready = FrameReadySignal::default();
+        let page_feedback = PageFeedback::new(tab_id, browser_event_sender.clone());
         let delegate = Rc::new(BrowserDelegate {
             tab_id,
             browser_event_sender: browser_event_sender.clone(),
@@ -194,7 +193,7 @@ impl ServoRuntime {
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
             page_tabs: Rc::downgrade(&self.page_tabs),
-            page_feedback: Rc::default(),
+            page_feedback: Rc::clone(&page_feedback),
             _after_engine_cleanup: self.after_engine_cleanup.clone(),
         });
 
@@ -209,7 +208,13 @@ impl ServoRuntime {
             let _send_result = browser_event_sender.send(TabEvent::new(tab_id, event));
         }
         info!("created Servo WebView for tab {}", tab_id.value());
-        Ok(ServoWebView::new(inner, frame_ready, tab_id, scale_factor))
+        Ok(ServoWebView::new(
+            inner,
+            frame_ready,
+            tab_id,
+            scale_factor,
+            page_feedback,
+        ))
     }
 
     pub fn spin_event_loop(&self) {
@@ -371,14 +376,8 @@ impl BrowserDelegate {
     // tabs
     /// Reads `document.title` and sends it, unless the document or address changed meanwhile.
     fn read_document_title(&self, web_view: &servo::WebView) {
-        let ticket = self.page_feedback.title_ticket();
-        let page_feedback = Rc::clone(&self.page_feedback);
-        let sender = self.browser_event_sender.clone();
-        let tab_id = self.tab_id;
-        web_view.evaluate_javascript(DOCUMENT_TITLE_SCRIPT, move |result| {
-            if let Some(event) = page_feedback.title_answer(ticket, result) {
-                let _send_result = sender.send(TabEvent::new(tab_id, event));
-            }
+        self.page_feedback.request_title(|callback| {
+            web_view.evaluate_javascript(DOCUMENT_TITLE_SCRIPT, callback);
         });
     }
 
@@ -416,11 +415,7 @@ impl servo::WebViewDelegate for BrowserDelegate {
             url: display_url(&url),
         });
         // tabs: a same-document navigation keeps the document's title and icon
-        let status = web_view.load_status();
-        for event in self.page_feedback.address_changed(status) {
-            self.send_browser_event(event);
-        }
-        if reads_title_after_address_change(status) {
+        if self.page_feedback.address_changed(web_view.load_status()) {
             self.read_document_title(&web_view);
         }
     }
@@ -460,7 +455,11 @@ impl servo::WebViewDelegate for BrowserDelegate {
         self.send_browser_event(BrowserEvent::LoadStateChanged {
             state: load_state_from_servo(status),
         });
-        // tabs: Servo only notifies a title that differs from its cached one
+        // tabs: the icon again after a load, and the title, which Servo only notifies when it
+        // differs from its cached one
+        if status == LoadStatus::Complete {
+            self.page_feedback.load_completed();
+        }
         if reads_title_at(status) {
             self.read_document_title(&web_view);
         }
@@ -517,6 +516,7 @@ impl servo::WebViewDelegate for BrowserDelegate {
 
         let (browser_event_sender, event_receiver) = mpsc::channel::<TabEvent>();
         let frame_ready = FrameReadySignal::default();
+        let page_feedback = PageFeedback::new(tab_id, browser_event_sender.clone());
         let delegate = Rc::new(BrowserDelegate {
             tab_id,
             browser_event_sender: browser_event_sender.clone(),
@@ -525,7 +525,7 @@ impl servo::WebViewDelegate for BrowserDelegate {
             content_blocker: Rc::clone(&page_tabs.content_blocker),
             screen_metrics: Rc::clone(&page_tabs.screen_metrics),
             page_tabs: Rc::downgrade(&page_tabs),
-            page_feedback: Rc::default(),
+            page_feedback: Rc::clone(&page_feedback),
             _after_engine_cleanup: page_tabs.after_engine_cleanup.clone(),
         });
         let scale_factor = parent.hidpi_scale_factor();
@@ -547,7 +547,13 @@ impl servo::WebViewDelegate for BrowserDelegate {
             self.tab_id.value(),
             tab_id.value()
         );
-        let web_view = ServoWebView::new(inner, frame_ready, tab_id, scale_factor.get());
+        let web_view = ServoWebView::new(
+            inner,
+            frame_ready,
+            tab_id,
+            scale_factor.get(),
+            page_feedback,
+        );
         page_tabs
             .adopted
             .borrow_mut()

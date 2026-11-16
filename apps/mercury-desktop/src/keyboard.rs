@@ -38,7 +38,11 @@ pub(crate) fn connect_native_keyboard_input(
                 WindowEvent::ModifiersChanged(changed) => {
                     modifiers = changed.state();
                 }
-                WindowEvent::KeyboardInput { event, .. } => {
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic,
+                    ..
+                } => {
                     if handle_browser_shortcut(
                         &window,
                         &controller,
@@ -53,7 +57,12 @@ pub(crate) fn connect_native_keyboard_input(
                     if web_view_focused.get() {
                         let active_tab_id = controller.borrow().active_tab_id();
                         // activation (tabs lane)
-                        if crate::activation::is_activating_key(&event.logical_key, event.state) {
+                        if crate::activation::is_activating_key(
+                            &event.logical_key,
+                            event.state,
+                            event.repeat,
+                            *is_synthetic,
+                        ) {
                             crate::activation::note_user_activation(active_tab_id, Instant::now());
                         }
                         let keyboard_input = keyboard_input_from_winit(

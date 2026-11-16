@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::rc::Rc;
 
 use dpi::PhysicalSize;
 use euclid::{Point2D, Scale};
@@ -16,6 +17,7 @@ use talaria_core::{
 use url::Url;
 
 use crate::frame_ready::FrameReadySignal;
+use crate::page_feedback::{DOCUMENT_TITLE_SCRIPT, PageFeedback};
 use crate::{ServoWebViewError, ViewportSize};
 
 pub struct ServoWebView {
@@ -24,6 +26,7 @@ pub struct ServoWebView {
     tab_id: TabId,
     /// Device pixels per logical pixel; pointer positions arrive in logical pixels.
     scale_factor: Cell<f32>,
+    page_feedback: Rc<PageFeedback>,
 }
 
 impl ServoWebView {
@@ -32,13 +35,24 @@ impl ServoWebView {
         frame_ready: FrameReadySignal,
         tab_id: TabId,
         scale_factor: f32,
+        page_feedback: Rc<PageFeedback>,
     ) -> Self {
         Self {
             inner,
             frame_ready,
             tab_id,
             scale_factor: Cell::new(scale_factor),
+            page_feedback,
         }
+    }
+
+    /// Starts a title read that was owed while another was in flight. Cheap when none is owed;
+    /// call once per engine pump.
+    pub fn refresh_page_feedback(&self) {
+        self.page_feedback.refresh_title(|callback| {
+            self.inner
+                .evaluate_javascript(DOCUMENT_TITLE_SCRIPT, callback);
+        });
     }
 
     pub fn resize(&self, size: ViewportSize) {

@@ -7,12 +7,12 @@ use std::time::Instant;
 use mercury_ui::MainWindow;
 use slint::ComponentHandle;
 use talaria_core::{
-    BrowserController, CloseTabOutcome, ColorScheme, DEFAULT_ZOOM_PERCENT, TabActivation, TabEvent,
-    TabId, WebView as TalariaWebView, display_origin,
+    BrowserController, BrowserEvent, CloseTabOutcome, ColorScheme, DEFAULT_ZOOM_PERCENT, LoadState,
+    TabActivation, TabEvent, TabId, WebView as TalariaWebView, display_origin,
 };
 use talaria_servo::{NewTabAllocator, ServoRuntime, ServoWebView};
 
-use crate::activation::consume_user_activation;
+use crate::activation::{consume_user_activation, forget_tab as forget_user_activation};
 use crate::ui_sync::{keep_address_draft_for, sync_ui};
 
 /// Set to `1` to turn pop-up blocking off for this run, as the "Block pop-ups" setting will.
@@ -100,22 +100,10 @@ impl PopUpPolicy {
         if self.permissions.allows(origin) {
             return PopUpDecision::Background;
         }
-        self.blocked.insert(opener, origin.to_owned());
-        self.ui_changed = true;
+        if self.blocked.insert(opener, origin.to_owned()).as_deref() != Some(origin) {
+            self.ui_changed = true;
+        }
         PopUpDecision::Blocked
-    }
-
-    /// The origin to name in the "Pop-up blocked" indicator for `tab_id`, while its page is
-    /// still at that origin.
-    pub(crate) fn blocked_origin(
-        &self,
-        tab_id: TabId,
-        current_origin: Option<&str>,
-    ) -> Option<&str> {
-        self.blocked
-            .get(&tab_id)
-            .map(String::as_str)
-            .filter(|origin| Some(*origin) == current_origin)
     }
 
     /// "Allow pop-ups from <origin>" was chosen in `tab_id`'s indicator.
@@ -129,14 +117,65 @@ impl PopUpPolicy {
         self.blocked.remove(&tab_id);
     }
 
+    /// The origin to show in `tab_id`'s indicator now that its page is at `current_origin`.
+    /// A tab that moved to another origin loses its indicator for good.
+    pub(crate) fn indicator_for(
+        &mut self,
+        tab_id: TabId,
+        current_origin: Option<&str>,
+    ) -> Option<String> {
+        let origin = self.blocked.get(&tab_id)?;
+        if Some(origin.as_str()) == current_origin {
+            return Some(origin.clone());
+        }
+        self.blocked.remove(&tab_id);
+        None
+    }
+
+    /// `tab_id` was closed.
+    pub(crate) fn forget_tab(&mut self, tab_id: TabId) {
+        self.blocked.remove(&tab_id);
+    }
+
     pub(crate) fn take_ui_changed(&mut self) -> bool {
         std::mem::take(&mut self.ui_changed)
     }
 }
 
+/// Whether pop-ups are blocked this run: always, unless `MERCURY_ALLOW_POP_UPS=1` is set *and*
+/// the run is automated (`--screenshot` or `--background`).
+pub(crate) fn blocks_pop_ups(automated: bool, allow_pop_ups_variable: Option<&str>) -> bool {
+    !(automated && allow_pop_ups_variable == Some("1"))
+}
+
+/// Applies `blocks_pop_ups` to this run's policy; warns when blocking is off.
+pub(crate) fn configure_pop_up_blocking(automated: bool) {
+    let variable = std::env::var(ALLOW_POP_UPS_VARIABLE).ok();
+    let block = blocks_pop_ups(automated, variable.as_deref());
+    if !block {
+        log::warn!("{ALLOW_POP_UPS_VARIABLE}=1: pop-ups are not blocked in this automated run");
+    } else if variable.is_some() {
+        log::warn!(
+            "{ALLOW_POP_UPS_VARIABLE} is ignored outside --screenshot and --background runs"
+        );
+    }
+    POP_UPS.with(|policy| policy.borrow_mut().block_pop_ups = block);
+}
+
+/// Where a tab the policy allowed opens. While the user types in the address field it never
+/// comes to the front, so their draft stays with the tab they were typing in.
+pub(crate) fn placement(decision: PopUpDecision, address_has_focus: bool) -> Option<TabActivation> {
+    match decision {
+        PopUpDecision::Blocked => None,
+        PopUpDecision::Foreground if !address_has_focus => Some(TabActivation::Foreground),
+        PopUpDecision::Foreground | PopUpDecision::Background => Some(TabActivation::Background),
+    }
+}
+
 thread_local! {
+    /// Blocking is on until `configure_pop_up_blocking` says otherwise.
     static POP_UPS: RefCell<PopUpPolicy> = RefCell::new(PopUpPolicy::new(
-        std::env::var(ALLOW_POP_UPS_VARIABLE).as_deref() != Ok("1"),
+        true,
         Box::new(SessionPopUpPermissions::default()),
     ));
 }
@@ -164,10 +203,9 @@ pub(crate) fn blocked_pop_up_origin(tab_id: TabId, url: &str) -> Option<String> 
     let current_origin = display_origin(url);
     POP_UPS.with(|policy| {
         policy
-            .try_borrow()
+            .try_borrow_mut()
             .ok()?
-            .blocked_origin(tab_id, current_origin.as_deref())
-            .map(str::to_owned)
+            .indicator_for(tab_id, current_origin.as_deref())
     })
 }
 
@@ -198,14 +236,19 @@ pub(crate) fn connect_pop_up_indicator(
 
 /// Gives a page-opened web view its tab, if the pop-up policy allows it. Runs inside Servo's
 /// callback, which must answer at once: the opener's script thread waits for it.
-pub(crate) fn new_tab_allocator(controller: &Rc<RefCell<BrowserController>>) -> NewTabAllocator {
+/// `address_has_focus` reports whether the user is typing in the address field.
+pub(crate) fn new_tab_allocator(
+    controller: &Rc<RefCell<BrowserController>>,
+    address_has_focus: impl Fn() -> bool + 'static,
+) -> NewTabAllocator {
     let controller = Rc::downgrade(controller);
-    Rc::new(move |opener| allocate_page_tab(&controller, opener))
+    Rc::new(move |opener| allocate_page_tab(&controller, opener, address_has_focus()))
 }
 
 fn allocate_page_tab(
     controller: &Weak<RefCell<BrowserController>>,
     opener: TabId,
+    address_has_focus: bool,
 ) -> Option<TabId> {
     let controller = controller.upgrade()?;
     let Ok(mut controller) = controller.try_borrow_mut() else {
@@ -219,18 +262,48 @@ fn allocate_page_tab(
         .tabs()
         .find(|tab| tab.id() == opener)
         .and_then(|tab| display_origin(tab.state().url()));
-    match pages_may_open_tabs(opener, opener_origin.as_deref(), Instant::now()) {
-        PopUpDecision::Blocked => {
-            log::info!("tab {}: blocked a pop-up", opener.value());
-            None
-        }
-        PopUpDecision::Background => controller.adopt_tab(opener, TabActivation::Background),
-        PopUpDecision::Foreground => {
-            let tab_id = controller.adopt_tab(opener, TabActivation::Foreground)?;
-            keep_address_draft_for(tab_id);
-            Some(tab_id)
-        }
+    let decision = pages_may_open_tabs(opener, opener_origin.as_deref(), Instant::now());
+    let Some(activation) = placement(decision, address_has_focus) else {
+        log::info!("tab {}: blocked a pop-up", opener.value());
+        return None;
+    };
+    let tab_id = controller.adopt_tab(opener, activation)?;
+    if activation == TabActivation::Foreground {
+        keep_address_draft_for(tab_id);
     }
+    Some(tab_id)
+}
+
+/// Called for each engine event before it is applied to the tab. When the tab starts loading
+/// a new document, the activation from the last one (often the click on the link) is dropped,
+/// so the new page's scripts cannot use it.
+pub(crate) fn before_tab_event(
+    controller: &BrowserController,
+    tab_id: TabId,
+    event: &BrowserEvent,
+) {
+    let BrowserEvent::LoadStateChanged {
+        state: LoadState::Loading,
+    } = event
+    else {
+        return;
+    };
+    let was_loading = controller
+        .tabs()
+        .find(|tab| tab.id() == tab_id)
+        .is_some_and(|tab| matches!(tab.state().load_state(), LoadState::Loading));
+    if !was_loading {
+        forget_user_activation(tab_id);
+    }
+}
+
+/// `tab_id` was closed: its blocked-pop-up indicator goes too.
+pub(crate) fn forget_tab(tab_id: TabId) {
+    POP_UPS.with(|policy| {
+        if let Ok(mut policy) = policy.try_borrow_mut() {
+            policy.forget_tab(tab_id);
+        }
+    });
 }
 
 /// What `adopt_page_web_views` changed.
@@ -294,8 +367,6 @@ pub(crate) fn close_page_tab(controller: &mut BrowserController, tab_id: TabId) 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
-
-    use talaria_core::BrowserEvent;
 
     use super::*;
     use crate::activation::{ACTIVATION_WINDOW, Activations};
@@ -393,11 +464,11 @@ mod tests {
             decide(&mut policy, &mut activations, OPENER, now),
             PopUpDecision::Blocked
         );
-        assert_eq!(policy.blocked_origin(OPENER, ORIGIN), ORIGIN);
+        assert_eq!(policy.indicator_for(OPENER, ORIGIN).as_deref(), ORIGIN);
 
         policy.allow_blocked(OPENER);
 
-        assert_eq!(policy.blocked_origin(OPENER, ORIGIN), None);
+        assert_eq!(policy.indicator_for(OPENER, ORIGIN).as_deref(), None);
         assert_eq!(
             decide(&mut policy, &mut activations, OPENER, now),
             PopUpDecision::Background
@@ -425,16 +496,84 @@ mod tests {
         assert!(policy.take_ui_changed());
         assert!(!policy.take_ui_changed());
 
-        assert_eq!(policy.blocked_origin(OPENER, ORIGIN), ORIGIN);
-        assert_eq!(policy.blocked_origin(TabId::new(2), ORIGIN), None);
-        assert_eq!(policy.blocked_origin(OPENER, Some("https://b.test")), None);
+        assert_eq!(policy.indicator_for(OPENER, ORIGIN).as_deref(), ORIGIN);
+        assert_eq!(policy.indicator_for(TabId::new(2), ORIGIN).as_deref(), None);
 
         policy.dismiss_blocked(OPENER);
-        assert_eq!(policy.blocked_origin(OPENER, ORIGIN), None);
+        assert_eq!(policy.indicator_for(OPENER, ORIGIN).as_deref(), None);
         assert_eq!(
             decide(&mut policy, &mut activations, OPENER, now),
             PopUpDecision::Blocked
         );
+    }
+
+    #[test]
+    fn repeated_blocked_attempts_only_redraw_when_the_origin_shown_changes() {
+        let mut policy = policy();
+        assert_eq!(
+            policy.decide(OPENER, ORIGIN, || false),
+            PopUpDecision::Blocked
+        );
+        assert!(policy.take_ui_changed());
+
+        for _ in 0..10 {
+            assert_eq!(
+                policy.decide(OPENER, ORIGIN, || false),
+                PopUpDecision::Blocked
+            );
+        }
+        assert!(!policy.take_ui_changed());
+
+        let other = Some("https://b.test");
+        assert_eq!(
+            policy.decide(OPENER, other, || false),
+            PopUpDecision::Blocked
+        );
+        assert!(policy.take_ui_changed());
+    }
+
+    #[test]
+    fn closing_or_leaving_the_origin_drops_the_indicator() {
+        let mut policy = policy();
+        let _ = policy.decide(OPENER, ORIGIN, || false);
+        let _ = policy.decide(TabId::new(2), ORIGIN, || false);
+
+        assert_eq!(
+            policy.indicator_for(OPENER, ORIGIN),
+            ORIGIN.map(str::to_owned)
+        );
+        // The tab navigated elsewhere: gone, also after coming back.
+        assert_eq!(policy.indicator_for(OPENER, Some("https://b.test")), None);
+        assert_eq!(policy.indicator_for(OPENER, ORIGIN), None);
+
+        policy.forget_tab(TabId::new(2));
+        assert_eq!(policy.indicator_for(TabId::new(2), ORIGIN), None);
+    }
+
+    #[test]
+    fn a_pop_up_opens_behind_while_the_address_field_has_focus() {
+        assert_eq!(
+            placement(PopUpDecision::Foreground, false),
+            Some(TabActivation::Foreground)
+        );
+        assert_eq!(
+            placement(PopUpDecision::Foreground, true),
+            Some(TabActivation::Background)
+        );
+        assert_eq!(
+            placement(PopUpDecision::Background, false),
+            Some(TabActivation::Background)
+        );
+        assert_eq!(placement(PopUpDecision::Blocked, true), None);
+    }
+
+    #[test]
+    fn pop_ups_are_allowed_only_in_automated_runs_with_the_variable_set() {
+        assert!(blocks_pop_ups(false, None));
+        assert!(blocks_pop_ups(false, Some("1")));
+        assert!(blocks_pop_ups(true, None));
+        assert!(blocks_pop_ups(true, Some("0")));
+        assert!(!blocks_pop_ups(true, Some("1")));
     }
 
     #[test]
@@ -445,7 +584,7 @@ mod tests {
             policy.decide(OPENER, None, || false),
             PopUpDecision::Blocked
         );
-        assert_eq!(policy.blocked_origin(OPENER, None), None);
+        assert_eq!(policy.indicator_for(OPENER, None).as_deref(), None);
     }
 
     #[test]
@@ -468,6 +607,7 @@ mod tests {
 
     #[test]
     fn the_decision_point_uses_up_the_tabs_user_activation() {
+        POP_UPS.with(|current| *current.borrow_mut() = policy());
         let tab_id = TabId::new(77);
         let now = Instant::now();
         crate::activation::note_user_activation(tab_id, now);
@@ -518,7 +658,7 @@ mod tests {
     fn the_allocator_refuses_while_the_browser_state_is_borrowed() {
         let controller = Rc::new(RefCell::new(BrowserController::default()));
         let opener = controller.borrow().active_tab_id();
-        let allocator = new_tab_allocator(&controller);
+        let allocator = new_tab_allocator(&controller, || false);
 
         let _borrowed = controller.borrow();
         assert_eq!(allocator(opener), None);
@@ -528,7 +668,7 @@ mod tests {
     fn the_allocator_refuses_once_the_browser_state_is_gone() {
         let controller = Rc::new(RefCell::new(BrowserController::default()));
         let opener = controller.borrow().active_tab_id();
-        let allocator = new_tab_allocator(&controller);
+        let allocator = new_tab_allocator(&controller, || false);
         drop(controller);
 
         assert_eq!(allocator(opener), None);

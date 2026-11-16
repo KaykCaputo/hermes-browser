@@ -131,6 +131,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     );
     // tabs: the "Pop-up blocked" indicator
     page_tabs::connect_pop_up_indicator(&window, &controller);
+    // tabs: MERCURY_ALLOW_POP_UPS only counts in automated runs
+    page_tabs::configure_pop_up_blocking(options.is_automated());
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
 
     let screenshot_result = Rc::new(Cell::new(ScreenshotResult::Pending));

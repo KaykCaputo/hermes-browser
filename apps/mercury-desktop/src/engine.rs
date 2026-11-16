@@ -87,7 +87,12 @@ pub(crate) fn connect_servo_runtime(
     });
 
     // tabs opened by pages
-    let new_tab_allocator = crate::page_tabs::new_tab_allocator(&controller);
+    let allocator_window = window.as_weak();
+    let new_tab_allocator = crate::page_tabs::new_tab_allocator(&controller, move || {
+        allocator_window
+            .upgrade()
+            .is_some_and(|window| window.get_address_has_focus())
+    });
     let engine = Rc::new(Engine {
         window: window.as_weak(),
         state: RefCell::new(Some(EngineState {
@@ -343,6 +348,10 @@ impl EngineState {
         for receiver in self.event_receivers.values() {
             state_changed |= apply_pending_browser_events(&self.controller, receiver);
         }
+        // tabs: title reads owed while another was in flight
+        for web_view in self.web_views.values() {
+            web_view.refresh_page_feedback();
+        }
         let active_became_ready = !ready_before && {
             let controller = self.controller.borrow();
             is_engine_ready(&controller, controller.active_tab_id())
@@ -377,6 +386,7 @@ impl EngineState {
             .filter(|tab_id| !tab_ids.contains(tab_id))
         {
             crate::activation::forget_tab(*closed);
+            crate::page_tabs::forget_tab(*closed);
         }
         self.web_views.retain(|tab_id, _| tab_ids.contains(tab_id));
         self.event_receivers
@@ -664,6 +674,8 @@ pub(crate) fn apply_pending_browser_events(
             state_changed |= crate::page_tabs::close_page_tab(&mut controller, tab_id);
             continue;
         }
+        // activation (tabs lane): a new document does not inherit the last one's activation
+        crate::page_tabs::before_tab_event(&controller, tab_id, &event);
         let was_engine_ready = is_engine_ready(&controller, tab_id);
         state_changed |= controller.handle_event(tab_id, event);
         if !was_engine_ready && is_engine_ready(&controller, tab_id) {
@@ -925,6 +937,40 @@ mod tests {
             .map(|tab| tab.state().page_title())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["First", "Second"]);
+    }
+
+    #[test]
+    fn an_activation_does_not_carry_over_to_the_next_document() {
+        let controller = RefCell::new(BrowserController::default());
+        let tab_id = controller.borrow().active_tab_id();
+        mark_engine_ready(&controller, tab_id);
+        let (sender, receiver) = mpsc::channel();
+        let send = |event| {
+            sender
+                .send(TabEvent::new(tab_id, event))
+                .expect("the event receiver should be connected");
+        };
+        let loaded = BrowserEvent::LoadStateChanged {
+            state: LoadState::Loaded,
+        };
+        let loading = BrowserEvent::LoadStateChanged {
+            state: LoadState::Loading,
+        };
+        send(loaded.clone());
+        apply_pending_browser_events(&controller, &receiver);
+        let now = std::time::Instant::now();
+
+        // A click on a link: the activation is noted, then the next document starts loading.
+        crate::activation::note_user_activation(tab_id, now);
+        send(loading.clone());
+        apply_pending_browser_events(&controller, &receiver);
+        assert!(!crate::activation::consume_user_activation(tab_id, now));
+
+        // An activation during a load (a second `Loading` from the head being parsed) stays.
+        crate::activation::note_user_activation(tab_id, now);
+        send(loading);
+        apply_pending_browser_events(&controller, &receiver);
+        assert!(crate::activation::consume_user_activation(tab_id, now));
     }
 
     #[test]
