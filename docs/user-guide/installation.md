@@ -42,11 +42,11 @@ Only do either of these for a copy you downloaded from the project's own release
 
 ### Uninstall
 
-Quit Mercury Browser and move `/Applications/Mercury Browser.app` to the Trash.
+Quit Mercury Browser and move `/Applications/Mercury Browser.app` to the Trash. Mercury's media cache, if you want it gone too, is `~/Library/Caches/io.github.thepigdestroyer.mercury-browser`.
 
 ### Build the app yourself
 
-With the Xcode command-line tools and Rust installed, `make app-macos` builds `dist/Mercury Browser.app` from source and `make package-macos` also makes the disk image. An app you build yourself is not marked as downloaded, so Gatekeeper does not block it. See [Releases](../developer-guide/releases.md#package-for-macos).
+With the Xcode command-line tools and Rust installed, run `make gstreamer-macos` once (it downloads GStreamer, about 0.9 GB, and unpacks it into your user cache without `sudo`; see [Development setup](../developer-guide/setup.md#macos-media-set-up-gstreamer)). Then `make app-macos` builds `dist/Mercury Browser.app` from source, with audio and video, and `make package-macos` also makes the disk image. An app you build yourself is not marked as downloaded, so Gatekeeper does not block it. See [Releases](../developer-guide/releases.md#package-for-macos).
 
 ## Linux
 
