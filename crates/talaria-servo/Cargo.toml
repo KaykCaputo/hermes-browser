@@ -32,3 +32,6 @@ servo = { workspace = true, features = ["media-gstreamer"] }
 
 [build-dependencies]
 adblock.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

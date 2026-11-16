@@ -19,6 +19,7 @@ glow.workspace = true
 image.workspace = true
 libc.workspace = true
 log.workspace = true
+mercury-settings = { path = "../../crates/mercury-settings" }
 mercury-ui = { path = "../../crates/mercury-ui" }
 servo.workspace = true
 slint.workspace = true
@@ -61,6 +62,11 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
 # The crash handler is compiled on macOS and Linux only, as in servoshell.
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 signal-hook-registry.workspace = true
+
+[dev-dependencies]
+i-slint-backend-testing.workspace = true
+mercury-ui = { path = "../../crates/mercury-ui", features = ["test-support"] }
+tempfile.workspace = true
 
 [build-dependencies]
 gl_generator = "0.14"

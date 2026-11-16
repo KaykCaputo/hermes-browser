@@ -1,3 +1,6 @@
+mod common;
+
+use common::test_search;
 use talaria_core::{
     AddressResolutionError, BrowserCommand, BrowserController, BrowserEvent, BrowserState,
     ColorScheme, LoadState, PointerButton, PointerButtonAction, TabActivation, TabCommand, TabId,
@@ -117,20 +120,21 @@ fn queued_navigation_resolves_hostname_and_updates_state() {
 }
 
 #[test]
-fn queued_navigation_resolves_search_query_with_duckduckgo() {
+fn queued_navigation_resolves_search_query_with_the_search_builder() {
     let mut controller = controller_with_ready_tab();
+    controller.set_search_url_builder(test_search());
 
     let result = controller.queue_navigation("ownership in rust");
 
     assert!(result.is_ok());
     assert_eq!(
         controller.state().url(),
-        "https://duckduckgo.com/?q=ownership+in+rust"
+        "https://search.test/?q=ownership+in+rust"
     );
     assert_eq!(
         command(controller.next_command()),
         Some(BrowserCommand::Navigate {
-            url: "https://duckduckgo.com/?q=ownership+in+rust".to_owned(),
+            url: "https://search.test/?q=ownership+in+rust".to_owned(),
         })
     );
     assert_eq!(command(controller.next_command()), None);
@@ -352,6 +356,7 @@ fn open_tab_with_address_sets_initial_url_and_loading_state() {
 #[test]
 fn open_tab_with_search_terms_uses_the_search_url() {
     let mut controller = BrowserController::default();
+    controller.set_search_url_builder(test_search());
 
     let tab_id = controller
         .open_tab_with(Some("ownership in rust"), TabActivation::Foreground)
@@ -360,7 +365,7 @@ fn open_tab_with_search_terms_uses_the_search_url() {
     let initial_url = controller
         .take_initial_url(tab_id)
         .expect("the tab should have an initial URL");
-    assert!(initial_url.starts_with("https://duckduckgo.com/?q="));
+    assert!(initial_url.starts_with("https://search.test/?q="));
     assert_eq!(controller.state().url(), initial_url);
 }
 

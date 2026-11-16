@@ -66,6 +66,9 @@ slint = { version = "~1.17.1", default-features = false, features = [
     "unstable-winit-030",
 ] }
 slint-build = "~1.17.1"
+# Slint's own testing backend (tests only). Its version must be exactly the `slint` version above:
+# it shares Slint's internal crates. Move both together.
+i-slint-backend-testing = "=1.17.1"
 signal-hook-registry = "1.4.8"
 surfman = "0.14"
 tempfile = "3.27"
