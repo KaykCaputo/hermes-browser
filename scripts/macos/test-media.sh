@@ -272,6 +272,84 @@ else
     check "and --write then changes nothing" "1|$notices_before" "${result%%|*}|$(shasum -a 256 THIRD-PARTY-NOTICES.md)"
 fi
 
+# ── What a run leaves on disk ─────────────────────────────────────────────
+# The media page is played from the build tree and from the bundle with HOME and TMPDIR
+# pointed at scratch directories (and GLib's own variables unset). GStreamer's download
+# buffers must appear in Mercury's private run directory during the run, and afterwards
+# nothing may exist under the scratch home outside Mercury's cache directory, the buffer
+# area must be empty, and the temporary directory (where the run's temporary profile lives)
+# must be empty too. Screenshot mode: nothing takes focus, everything is muted.
+CACHE_NAME="Library/Caches/io.github.thepigdestroyer.mercury-browser"
+SERVER_PID=""
+start_server() {
+    # Emptied before the server starts: the shell only truncates the file in the child, so
+    # an old port could otherwise be read before then.
+    : >"$TMP/serve.port"
+    python3 scripts/serve-tests.py >"$TMP/serve.port" &
+    SERVER_PID=$!
+    local tries=0
+    while [ ! -s "$TMP/serve.port" ] && [ "$tries" -lt 50 ]; do
+        sleep 0.1
+        tries=$((tries + 1))
+    done
+    PORT="$(head -n 1 "$TMP/serve.port")"
+    case "$PORT" in
+        '' | *[!0-9]*) printf 'FAIL scripts/serve-tests.py printed no port\n'; exit 1 ;;
+    esac
+}
+
+run_leaves_nothing() {
+    local label="$1" binary="$2" scratch home area watcher code=0 left buffers_seen
+    scratch="$TMP/run-$label"
+    home="$scratch/home"
+    area="$home/$CACHE_NAME/media-buffers"
+    # GLib's default user directories exist in a real home. They must exist here too: the
+    # download buffer element does not create a missing directory (it then plays without
+    # buffers), so an empty home would hide a leak into ~/.cache.
+    mkdir -p "$home/.cache" "$home/.local/share" "$home/.config" "$scratch/tmp"
+    (
+        # The area does not exist until the browser starts; find then fails, and under
+        # `set -e` that would end this watcher.
+        while :; do
+            find "$area" -type f -name '<unknown>-*' 2>/dev/null || :
+            sleep 0.3
+        done
+    ) >"$scratch/buffers-seen" &
+    watcher=$!
+    env -u XDG_CACHE_HOME -u XDG_DATA_HOME -u XDG_CONFIG_HOME -u XDG_RUNTIME_DIR \
+        HOME="$home" TMPDIR="$scratch/tmp/" RUST_LOG=error \
+        "$binary" --screenshot "$scratch/media.png" --window-size 1100x1300 \
+        --screenshot-delay 15000 "http://127.0.0.1:$PORT/pages/media.html" \
+        >"$scratch/run.log" 2>&1 || code=$?
+    kill "$watcher" 2>/dev/null || true
+    wait "$watcher" 2>/dev/null || true
+    buffers_seen="$(sort -u "$scratch/buffers-seen" | wc -l | tr -d ' ')"
+    check "$label: the run exits normally" "0" "$code"
+    check "$label: download buffers were written into the private run directory" "yes" \
+        "$([ "$buffers_seen" -gt 0 ] && echo yes || echo "no ($buffers_seen)")"
+    left="$(cd "$home" && find . -mindepth 1 | sed 's|^\./||' |
+        grep -v -x -e '\.cache' -e '\.local' -e '\.local/share' -e '\.config' \
+            -e 'Library' -e 'Library/Caches' -e "$CACHE_NAME" -e "$CACHE_NAME/.*" || true)"
+    check "$label: nothing under the home directory outside Mercury's cache" "" "$left"
+    check "$label: the buffer area is empty after a normal quit" "" \
+        "$(find "$area" -mindepth 1 2>/dev/null | sed "s|$area/||")"
+    check "$label: the temporary directory is empty (temporary profile removed)" "" \
+        "$(find "$scratch/tmp" -mindepth 1 | sed "s|$scratch/tmp/||")"
+}
+
+if [ -z "$PREFIX" ] || [ ! -f "$EXE" ] || [ ! -d "$REPO/target/release/lib" ]; then
+    skip "run leaves nothing behind, build tree (needs make build-release)"
+else
+    start_server
+    run_leaves_nothing build-tree "$EXE"
+    if [ -x "$REPO/dist/Mercury Browser.app/Contents/MacOS/mercury-browser" ]; then
+        run_leaves_nothing bundle "$REPO/dist/Mercury Browser.app/Contents/MacOS/mercury-browser"
+    else
+        skip "run leaves nothing behind, bundle (needs make app-macos)"
+    fi
+    kill "$SERVER_PID" 2>/dev/null || true
+fi
+
 if [ "$failures" -gt 0 ]; then
     printf '%s check(s) failed\n' "$failures"
     exit 1
