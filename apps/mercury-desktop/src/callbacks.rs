@@ -15,6 +15,7 @@ pub(crate) fn connect_ui_callbacks(
     controller: Rc<RefCell<BrowserController>>,
     web_view_focused: Rc<Cell<bool>>,
 ) {
+    crate::page_requests::connect_page_request_callbacks(window, Rc::clone(&controller)); // dialogs
     let navigate_controller = Rc::clone(&controller);
     let navigate_window = window.as_weak();
     window.on_navigate(move |address| {

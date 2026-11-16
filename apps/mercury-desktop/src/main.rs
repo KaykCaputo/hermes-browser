@@ -30,6 +30,7 @@ mod macos_terminate;
 mod media_buffers;
 #[cfg(target_os = "macos")]
 mod media_isolation;
+mod page_requests; // dialogs
 mod panic_hook;
 #[cfg(target_os = "macos")]
 mod platform_macos;
@@ -39,6 +40,7 @@ mod quit;
 mod rendering;
 mod screen_metrics;
 mod screenshot;
+mod settings;
 mod shortcuts;
 mod shutdown;
 mod signals;
@@ -108,6 +110,10 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     };
     // From here on a terminate, interrupt or hang-up signal quits in order.
     signals::install();
+    // settings-ui: loaded under the profile's lock; GPU canvas and experimental features apply now.
+    let settings =
+        settings::SettingsHandle::start(profile.paths.as_ref().map(|p| p.root.as_path()));
+    let options = settings::launch_options(options, &settings);
     select_hardware_accelerated_backend(options.is_automated())?;
     #[cfg(target_os = "macos")]
     macos_terminate::end_the_run_in_order_on_terminate_requests();
@@ -119,6 +125,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
             .set_size(LogicalSize::new(width as f32, height as f32));
     }
     let controller = Rc::new(RefCell::new(BrowserController::default()));
+    // settings-ui: search engine, zoom and colour scheme before any address is resolved.
+    settings::prepare_controller(&settings, &mut controller.borrow_mut(), &options.urls);
     open_start_up_tabs(&mut controller.borrow_mut(), &options.urls);
     let web_view_focused = Rc::new(Cell::new(false));
 
@@ -126,8 +134,11 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         &window,
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
-        runtime_options(&options, &profile),
+        // settings-ui: blocking and what to clear are known before the engine starts.
+        settings::with_privacy(runtime_options(&options, &profile), &settings),
     )?;
+    // settings-ui
+    settings::connect(&settings, &window, &controller);
     sync_ui(&window, &controller.borrow());
     connect_ui_callbacks(
         &window,
@@ -165,6 +176,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         profile,
         #[cfg(target_os = "macos")]
         media_buffers,
+        settings,
     });
     let run_result = shown.and_then(|()| slint::run_event_loop());
 
@@ -187,6 +199,8 @@ fn runtime_options(options: &LaunchOptions, profile: &ActiveProfile) -> RuntimeO
         gpu_canvas: options.gpu_canvas,
         config_dir: profile.servo_config_dir(),
         experimental_web_features: options.experimental_web_features,
+        // settings-ui: filled in by `settings::with_privacy`.
+        ..RuntimeOptions::default()
     }
 }
 
@@ -361,6 +375,7 @@ mod tests {
                 gpu_canvas: false,
                 config_dir: Some(root.join("servo")),
                 experimental_web_features: false,
+                ..RuntimeOptions::default()
             }
         );
     }

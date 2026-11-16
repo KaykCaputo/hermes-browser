@@ -2,7 +2,6 @@ use mercury_settings::{
     DEFAULT_ENGINE_ID, MAX_TEMPLATE_BYTES, SearchEngine, SearchSettings, SettingsError,
     builtin_engines,
 };
-use talaria_core::NavigationTarget;
 use url::Url;
 
 fn engine(id: &str, keyword: &str, template: &str) -> SearchEngine {
@@ -134,6 +133,14 @@ fn every_built_in_engine_is_valid_with_a_unique_id_and_keyword() {
     assert_eq!(keywords.len(), engines.len());
 }
 
+/// How the address bar built a search before the settings existed (talaria-core at
+/// `546ed1e`, `duckduckgo_search_url`), kept here as the reference the default engine must match.
+fn address_bar_before_settings(query: &str) -> Url {
+    let mut url = Url::parse("https://duckduckgo.com/").expect("a URL");
+    url.query_pairs_mut().append_pair("q", query);
+    url
+}
+
 #[test]
 fn duckduckgo_builds_exactly_what_the_address_bar_builds_today() {
     let duckduckgo = SearchSettings::default().default_engine();
@@ -141,9 +148,7 @@ fn duckduckgo_builds_exactly_what_the_address_bar_builds_today() {
 
     for query in awkward_queries() {
         let ours = duckduckgo.search_url(&query).expect("a search URL");
-        let today = NavigationTarget::SearchQuery(query.clone())
-            .into_url()
-            .expect("talaria-core builds a URL");
+        let today = address_bar_before_settings(&query);
         assert_eq!(ours, today, "{query:?}");
         assert_eq!(ours.as_str(), today.as_str(), "{query:?}");
     }

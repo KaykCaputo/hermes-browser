@@ -130,6 +130,22 @@ pub(crate) fn connect_servo_runtime(
         })
 }
 
+// settings-ui: lets the settings reach the engine's switches (content blocking, clearing at exit).
+/// Runs `work` with the engine's runtime; false if the engine is gone or busy.
+pub(crate) fn with_runtime(work: impl FnOnce(&ServoRuntime)) -> bool {
+    let Some(engine) = ENGINE.with(|current| current.borrow().upgrade()) else {
+        return false;
+    };
+    let Ok(state) = engine.state.try_borrow() else {
+        return false;
+    };
+    let Some(runtime) = state.as_ref().and_then(|state| state.runtime.as_ref()) else {
+        return false;
+    };
+    work(runtime);
+    true
+}
+
 /// Shuts the engine down in order. Call once, after the event loop has ended and before the
 /// window is dropped: otherwise the engine is dropped with the rendering notifier, from inside
 /// the renderer's own destruction, after the device Servo renders through has gone.
@@ -745,6 +761,7 @@ mod tests {
     use talaria_core::{
         ColorScheme, ImeInput, KeyboardInput, PointerButton, PointerButtonAction, TabCommand,
     };
+    use talaria_core::{PageRequestAnswer, PageRequestId};
 
     use super::*;
 
@@ -812,6 +829,14 @@ mod tests {
             Ok(())
         }
         fn pointer_left(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        // dialogs
+        fn answer_page_request(
+            &mut self,
+            _id: PageRequestId,
+            _answer: PageRequestAnswer,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
     }

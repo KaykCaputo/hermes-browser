@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Permission test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  body { padding: 24px; font: 22px/1.5 sans-serif; color: #000000; }
+  h1 { margin: 0 0 12px; font-size: 32px; }
+</style>
+</head>
+<body>
+  <h1>Permission test page</h1>
+  <p>The page beneath the browser's sheet. Its text must stay readable and unchanged.</p>
+  <p id="result">Not answered yet.</p>
+<script>
+  // Runs after the load event, so the page has finished loading when the request appears.
+  window.addEventListener("load", () => setTimeout(() => {
+    // Persistent storage asks the browser; needs a secure context (https or loopback).
+    navigator.storage.persist().then(granted =>
+      document.getElementById("result").textContent = "persist() resolved " + granted + ".");
+  }, 0));
+</script>
+</body>
+</html>

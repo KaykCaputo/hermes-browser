@@ -38,6 +38,8 @@ pub(crate) struct RunEnd {
     pub(crate) profile: ActiveProfile,
     #[cfg(target_os = "macos")]
     pub(crate) media_buffers: Option<crate::media_buffers::MediaBuffers>,
+    /// Saved, and its clear-history-on-exit hook run, by `finish_settings`.
+    pub(crate) settings: Rc<crate::settings::SettingsHandle>,
 }
 
 /// Whether the post-run sequence has started.
@@ -169,6 +171,7 @@ struct Steps {
     profile: Option<ActiveProfile>,
     #[cfg(target_os = "macos")]
     media_buffers: Option<crate::media_buffers::MediaBuffers>,
+    settings: Rc<crate::settings::SettingsHandle>,
 }
 
 impl Steps {
@@ -180,6 +183,7 @@ impl Steps {
             profile,
             #[cfg(target_os = "macos")]
             media_buffers,
+            settings,
         } = run_end;
         Self {
             event_loop_failed,
@@ -189,6 +193,7 @@ impl Steps {
             profile: Some(profile),
             #[cfg(target_os = "macos")]
             media_buffers,
+            settings,
         }
     }
 }
@@ -222,9 +227,9 @@ impl EndOfRun for Steps {
     }
 
     fn finish_settings(&mut self, deadline: Instant) {
-        // Slot (settings): add the settings object as a field of `RunEnd` and `Steps`, then
-        // self.settings.finish_run(deadline);
-        let _ = deadline;
+        // Closes the settings window (keeping typed text), waits for the write in flight,
+        // writes once more if needed, and runs the clear-history-on-exit hook.
+        self.settings.finish_run(deadline);
     }
 
     // ---- End of the slots. ----------------------------------------------------------------
