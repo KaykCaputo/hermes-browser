@@ -92,6 +92,16 @@ impl BrowserCommand {
             Self::Navigate { .. } | Self::Reload | Self::GoBack | Self::GoForward
         )
     }
+
+    /// How a navigation this command starts was reached, when the command alone says so.
+    /// `Navigate` does not: `queue_navigation` and its callers name the origin.
+    pub(crate) const fn navigation_origin(&self) -> Option<crate::NavigationOrigin> {
+        match self {
+            Self::Reload => Some(crate::NavigationOrigin::Reload),
+            Self::GoBack | Self::GoForward => Some(crate::NavigationOrigin::History),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

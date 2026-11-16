@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use crate::address::{AddressResolutionError, resolve_address};
 use crate::browser::LoadState;
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
+use crate::visits::{NavigationOrigin, VisitTracker, VisitUpdate};
 use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, Tab, TabActivation, TabCommand, TabId};
 
 #[derive(Debug)]
@@ -12,6 +13,7 @@ pub struct BrowserController {
     next_tab_id: u64,
     command_queue: VecDeque<TabCommand>,
     color_scheme: ColorScheme,
+    visits: VisitTracker,
 }
 
 impl BrowserController {
@@ -24,6 +26,7 @@ impl BrowserController {
             next_tab_id: 2,
             command_queue: VecDeque::new(),
             color_scheme: ColorScheme::default(),
+            visits: VisitTracker::default(),
         }
     }
 
@@ -48,6 +51,7 @@ impl BrowserController {
                 queued.tab_id() != tab_id || !queued.command().targets_the_current_page()
             });
         }
+        self.visits.set_origin(tab_id, NavigationOrigin::Typed);
         Ok(())
     }
 
@@ -212,6 +216,7 @@ impl BrowserController {
 
         let was_active = self.active_tab_id == tab_id;
         self.tabs.remove(index);
+        self.visits.forget_tab(tab_id);
         self.command_queue
             .retain(|queued| queued.tab_id() != tab_id);
 
@@ -244,6 +249,9 @@ impl BrowserController {
 
         if !tab.is_engine_ready() && command.is_discarded_before_engine_ready() {
             return true;
+        }
+        if let Some(origin) = command.navigation_origin() {
+            self.visits.set_origin(tab_id, origin);
         }
 
         if let Some(last_command) = self.command_queue.back_mut() {
@@ -334,6 +342,9 @@ impl BrowserController {
     }
 
     pub fn handle_event(&mut self, tab_id: TabId, event: BrowserEvent) -> bool {
+        if self.tabs.iter().any(|tab| tab.id() == tab_id) {
+            self.visits.observe(tab_id, &event);
+        }
         let Some(tab) = self.tab_mut(tab_id) else {
             return false;
         };
@@ -343,6 +354,30 @@ impl BrowserController {
         }
         tab.state_mut().apply(event);
         true
+    }
+
+    /// Names how the tab's next committed navigation was reached, overriding what the command
+    /// that started it implied (for example `Bookmark` after `queue_navigation`). Returns false
+    /// if the tab does not exist.
+    pub fn set_navigation_origin(&mut self, tab_id: TabId, origin: NavigationOrigin) -> bool {
+        if !self.tabs.iter().any(|tab| tab.id() == tab_id) {
+            return false;
+        }
+        self.visits.set_origin(tab_id, origin);
+        true
+    }
+
+    /// Titles that only the engine's own error pages carry; a visit whose first title is one
+    /// of them is taken back.
+    pub fn set_error_page_titles(&mut self, titles: impl IntoIterator<Item = String>) {
+        self.visits
+            .set_error_page_titles(titles.into_iter().collect());
+    }
+
+    /// The history updates since the last call, in order. See the `visits` module for the
+    /// rules; the caller stamps them with the time and hands them to the history store.
+    pub fn take_visit_updates(&mut self) -> Vec<VisitUpdate> {
+        self.visits.take_updates()
     }
 
     fn open_blank_tab(&mut self, activation: TabActivation) -> TabId {
