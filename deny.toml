@@ -159,3 +159,10 @@ allow = ["LicenseRef-Slint-Royalty-free-2.0"]
 [[licenses.exceptions]]
 crate = "i-slint-renderer-skia"
 allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+
+# Dev-only: the software renderer that `crates/mercury-ui/tests/downloads_render.rs` uses to
+# render the downloads components headlessly (feature `renderer-software` on mercury-ui's
+# dev-dependency). It is not part of the application.
+[[licenses.exceptions]]
+crate = "i-slint-renderer-software"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]

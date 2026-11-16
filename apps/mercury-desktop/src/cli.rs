@@ -10,6 +10,9 @@ pub(crate) struct LaunchOptions {
     pub gpu_canvas: bool,
     pub profile_dir: Option<PathBuf>,
     pub experimental_web_features: bool,
+    /// Diagnostics of the downloads work: `--download` and `--download-dir`.
+    pub download_url: Option<String>,
+    pub download_dir: Option<PathBuf>,
 }
 
 impl Default for LaunchOptions {
@@ -22,6 +25,8 @@ impl Default for LaunchOptions {
             gpu_canvas: true,
             profile_dir: None,
             experimental_web_features: true,
+            download_url: None,
+            download_dir: None,
         }
     }
 }
@@ -65,6 +70,8 @@ Options:
                                    WebGPU, which are always off)
   --profile-dir <directory>        Keep cookies and site data in this directory
                                    (screenshot and background runs otherwise use a temporary one)
+  --download <URL>                 Diagnostic: download this address once the browser is up
+  --download-dir <directory>       Diagnostic: save downloads in this directory in this run
   --help                           Print this help and exit
   --version                        Print the version and exit
 
@@ -79,7 +86,8 @@ Exit status:
 /// silently altered by the conversion to `String`. Returns the usage error to print, if any.
 pub(crate) fn reject_non_utf8_paths(arguments: &[std::ffi::OsString]) -> Option<CliOutcome> {
     let pair = arguments.windows(2).find(|pair| {
-        (pair[0] == "--profile-dir" || pair[0] == "--screenshot") && pair[1].to_str().is_none()
+        (pair[0] == "--profile-dir" || pair[0] == "--screenshot" || pair[0] == "--download-dir")
+            && pair[1].to_str().is_none()
     })?;
     Some(CliOutcome::PrintAndExit {
         text: format!(
@@ -111,6 +119,8 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
     let mut gpu_canvas = true;
     let mut profile_dir = None;
     let mut experimental_web_features = true;
+    let mut download_url = None;
+    let mut download_dir = None;
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -152,6 +162,13 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
                 let value = option_value(&mut arguments, "--profile-dir", "<directory>")?;
                 profile_dir = Some(PathBuf::from(value));
             }
+            "--download" => {
+                download_url = Some(option_value(&mut arguments, "--download", "<URL>")?);
+            }
+            "--download-dir" => {
+                let value = option_value(&mut arguments, "--download-dir", "<directory>")?;
+                download_dir = Some(PathBuf::from(value));
+            }
             _ if argument.starts_with("-psn_") => {}
             _ if argument.starts_with('-') => {
                 return Err(format!("unknown option '{argument}'"));
@@ -177,6 +194,8 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
         gpu_canvas,
         profile_dir,
         experimental_web_features,
+        download_url,
+        download_dir,
     }))
 }
 
@@ -259,6 +278,8 @@ mod tests {
                 gpu_canvas: true,
                 profile_dir: None,
                 experimental_web_features: true,
+                download_url: None,
+                download_dir: None,
             })
         );
     }
@@ -553,5 +574,30 @@ mod tests {
                 ..LaunchOptions::default()
             })
         );
+    }
+
+    // downloads-ui lane
+    #[test]
+    fn download_diagnostics_are_parsed() {
+        let CliOutcome::Run(options) = parse(&[
+            "--download",
+            "http://127.0.0.1:8000/a.zip",
+            "--download-dir",
+            "/scratch/downloads",
+            "http://127.0.0.1:8000/",
+        ]) else {
+            panic!("the download diagnostics should be accepted");
+        };
+        assert_eq!(
+            options.download_url.as_deref(),
+            Some("http://127.0.0.1:8000/a.zip")
+        );
+        assert_eq!(
+            options.download_dir.as_deref(),
+            Some(std::path::Path::new("/scratch/downloads"))
+        );
+        assert_eq!(options.urls, ["http://127.0.0.1:8000/"]);
+        assert_eq!(exit_code(&parse(&["--download"])), Some(2));
+        assert_eq!(exit_code(&parse(&["--download-dir"])), Some(2));
     }
 }

@@ -140,6 +140,15 @@ pub(crate) fn shut_down_engine(exit_code_if_stuck: u8) {
     state.shut_down(window.as_ref(), exit_code_if_stuck);
 }
 
+/// Runs `work` with the engine, if it is running and not busy (downloads lane: cookies and the
+/// user agent for a download). `None` before it starts, after it shut down, or while a pump has
+/// it borrowed.
+pub(crate) fn with_runtime<R>(work: impl FnOnce(&ServoRuntime) -> R) -> Option<R> {
+    let engine = ENGINE.with(|current| current.borrow().upgrade())?;
+    let state = engine.state.try_borrow().ok()?;
+    state.as_ref().map(|state| work(&state.runtime))
+}
+
 fn pump_after_wake() {
     let Some(engine) = ENGINE.with(|current| current.borrow().upgrade()) else {
         return;

@@ -11,3 +11,9 @@ slint.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
+
+# Headless rendering of the downloads components in `tests/downloads_render.rs`. Dev-only, so the
+# application's Slint features are unchanged.
+[dev-dependencies]
+image.workspace = true
+slint = { workspace = true, features = ["renderer-software"] }

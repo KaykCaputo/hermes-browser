@@ -1,4 +1,6 @@
 import { Palette } from "std-widgets.slint";
+import { DownloadsButton, DownloadsPopover, DownloadsPanel, QuitDownloadsPrompt, DownloadsPalette, DownloadRow, DownloadAction } from "downloads/downloads.slint"; // downloads-ui lane
+export { DownloadsPalette, DownloadRow, DownloadAction }
 
 export enum WebViewPointerButton {
     left,
@@ -214,6 +216,33 @@ export component MainWindow inherits Window {
     callback web-view-scrolled(float, float, float, float);
     callback web-view-focus-changed(bool);
     callback web-view-pointer-left();
+
+    // --- downloads-ui ---
+    in property <bool> downloads-button-visible: false;
+    in property <bool> downloads-active: false;
+    // 0 to 1; above 1 when no size is known.
+    in property <float> downloads-progress: 0;
+    in property <bool> downloads-popover-open: false;
+    in property <[DownloadRow]> downloads-recent;
+    in property <bool> downloads-panel-open: false;
+    in property <[DownloadRow]> downloads-all;
+    in property <bool> downloads-can-show-more: false;
+    in property <string> downloads-show-label: "Show in Finder";
+    in property <bool> quit-prompt-open: false;
+    in property <string> quit-prompt-title;
+    in property <string> quit-prompt-body;
+    in property <string> quit-prompt-confirm-label;
+    in property <string> quit-prompt-keep-label;
+    callback downloads-toggle-popover();
+    callback downloads-close-popover();
+    callback downloads-action(string, DownloadAction);
+    callback downloads-clear-list();
+    callback downloads-show-all();
+    callback downloads-show-more();
+    callback downloads-close-panel();
+    callback quit-prompt-confirm();
+    callback quit-prompt-keep();
+    // --- end downloads-ui ---
 
     pure function mouse-cursor-for(cursor: WebViewCursor) -> MouseCursor {
         if cursor == WebViewCursor.none {
@@ -442,6 +471,16 @@ export component MainWindow inherits Window {
                     color: #9aa6b5;
                     font-size: 12px;
                     vertical-alignment: center;
+                }
+
+                // downloads-ui lane
+                if root.downloads-button-visible: DownloadsButton {
+                    active: root.downloads-active;
+                    progress: root.downloads-progress;
+                    open: root.downloads-popover-open;
+                    clicked => {
+                        root.downloads-toggle-popover();
+                    }
                 }
 
                 ChromeButton {
@@ -721,6 +760,67 @@ export component MainWindow inherits Window {
                     wrap: no-wrap;
                 }
             }
+
+            // downloads-ui lane
+            if root.downloads-panel-open: DownloadsPanel {
+                width: parent.width;
+                height: parent.height;
+                rows: root.downloads-all;
+                show-label: root.downloads-show-label;
+                can-show-more: root.downloads-can-show-more;
+                action(guid, action) => {
+                    root.downloads-action(guid, action);
+                }
+                clear-list => {
+                    root.downloads-clear-list();
+                }
+                show-more => {
+                    root.downloads-show-more();
+                }
+                close => {
+                    root.downloads-close-panel();
+                }
+            }
+        }
+    }
+
+    // downloads-ui lane: a click outside the popover closes it.
+    if root.downloads-popover-open: TouchArea {
+        clicked => {
+            root.downloads-close-popover();
+        }
+    }
+
+    // downloads-ui lane
+    if root.downloads-popover-open: DownloadsPopover {
+        x: root.width - self.width - 14px;
+        y: (root.chrome-hidden ? 0px : 108px) - 4px;
+        rows: root.downloads-recent;
+        show-label: root.downloads-show-label;
+        action(guid, action) => {
+            root.downloads-action(guid, action);
+        }
+        clear-list => {
+            root.downloads-clear-list();
+        }
+        show-all => {
+            root.downloads-show-all();
+        }
+    }
+
+    // downloads-ui lane
+    if root.quit-prompt-open: QuitDownloadsPrompt {
+        width: root.width;
+        height: root.height;
+        title: root.quit-prompt-title;
+        body: root.quit-prompt-body;
+        confirm-label: root.quit-prompt-confirm-label;
+        keep-label: root.quit-prompt-keep-label;
+        confirm => {
+            root.quit-prompt-confirm();
+        }
+        keep => {
+            root.quit-prompt-keep();
         }
     }
 }

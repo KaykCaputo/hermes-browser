@@ -12,8 +12,6 @@
 //! GUID; clearing notifies without one. Progress and validators notify nothing: they do not
 //! change the list, and live progress is `mercury-downloads`' in-memory state.
 
-#![cfg_attr(not(test), expect(dead_code, reason = "called by the downloads work"))]
-
 use mercury_store::{DownloadRecord, DownloadRecordId, DownloadState, NewDownload, StoreError};
 
 use super::{Area, Change, Database, ProfileData, ProfileDataError};

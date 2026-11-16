@@ -1,0 +1,500 @@
+// The downloads list: the toolbar button with its progress ring, the popover of recent
+// downloads, the panel with every download, and the question before quitting with downloads
+// running.
+
+// Every colour of these components, in one place until the chrome palette is merged; then each
+// becomes a `ChromePalette` role. `dark` follows the chrome, which is dark today.
+export global DownloadsPalette {
+    in-out property <bool> dark: true;
+    out property <color> surface: dark ? #161e28 : #f8f9fb;
+    out property <color> surface-raised: dark ? #1d2733 : #f3f5f8;
+    out property <color> border: dark ? #2b3644 : #d5dbe3;
+    out property <color> text: dark ? #edf4fa : #17202b;
+    out property <color> muted: dark ? #8c99a9 : #5d6a7a;
+    out property <color> accent: dark ? #62bfff : #1d6fd6;
+    out property <color> accent-text: dark ? #09131c : #ffffff;
+    out property <color> danger: dark ? #ff8a80 : #c62828;
+    out property <color> track: dark ? #2b3644 : #dde3ea;
+    out property <color> hover: dark ? #222d39 : #e7ecf2;
+    out property <color> scrim: dark ? #000000a0 : #00000060;
+    out property <color> button-idle: dark ? #9aa6b5 : #4a5868;
+}
+
+export struct DownloadRow {
+    guid: string,
+    name: string,
+    status: string,
+    // 0 to 1; below 0 no bar; above 1 a bar of unknown length.
+    progress: float,
+    failed: bool,
+    can-open: bool,
+    can-show: bool,
+    can-cancel: bool,
+    can-resume: bool,
+    can-retry: bool,
+    can-remove: bool,
+}
+
+export enum DownloadAction {
+    open,
+    show,
+    cancel,
+    resume,
+    retry,
+    remove,
+}
+
+component TextButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary: false;
+    callback clicked;
+
+    height: 26px;
+    width: label-text.preferred-width + 16px;
+    border-radius: 6px;
+    background: root.primary
+        ? (touch.pressed ? DownloadsPalette.accent.darker(20%) : DownloadsPalette.accent)
+        : (touch.has-hover ? DownloadsPalette.hover : transparent);
+
+    label-text := Text {
+        text: root.label;
+        color: root.primary ? DownloadsPalette.accent-text : DownloadsPalette.accent;
+        font-size: 12px;
+        font-weight: 550;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// A ring that fills clockwise from the top.
+component ProgressRing inherits Rectangle {
+    in property <float> progress;
+    in property <color> ring-color;
+    in property <color> track-color;
+    property <float> shown: root.progress > 1 ? 0.25 : Math.max(0.02, Math.min(0.999, root.progress));
+    property <float> end-x: 12 + 9 * Math.sin(root.shown * 360deg);
+    property <float> end-y: 12 - 9 * Math.cos(root.shown * 360deg);
+
+    width: 24px;
+    height: 24px;
+
+    Path {
+        width: 24px;
+        height: 24px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: root.track-color;
+        stroke-width: 2.5px;
+        commands: "M 12 3 A 9 9 0 1 1 11.99 3";
+    }
+
+    Path {
+        width: 24px;
+        height: 24px;
+        viewbox-width: 24;
+        viewbox-height: 24;
+        stroke: root.ring-color;
+        stroke-width: 2.5px;
+        commands: "M 12 3 A 9 9 0 " + (root.shown > 0.5 ? "1" : "0") + " 1 " + root.end-x + " " + root.end-y;
+    }
+}
+
+// The toolbar button. Shown once something was downloaded in this run.
+export component DownloadsButton inherits Rectangle {
+    in property <bool> active;
+    in property <float> progress;
+    in property <bool> open;
+    callback clicked;
+
+    width: 36px;
+    height: 34px;
+    border-radius: 7px;
+    background: touch.pressed || root.open
+        ? DownloadsPalette.hover
+        : touch.has-hover ? DownloadsPalette.hover.transparentize(40%) : transparent;
+
+    if root.active: ProgressRing {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        progress: root.progress;
+        ring-color: DownloadsPalette.accent;
+        track-color: DownloadsPalette.track;
+    }
+
+    Text {
+        text: "↓";
+        color: touch.has-hover || root.active ? DownloadsPalette.accent : DownloadsPalette.button-idle;
+        font-size: root.active ? 13px : 17px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+component DownloadItem inherits Rectangle {
+    in property <DownloadRow> entry;
+    in property <string> show-label;
+    callback action(string, DownloadAction);
+
+    height: 64px;
+    background: hover-area.has-hover ? DownloadsPalette.surface-raised : transparent;
+    border-radius: 8px;
+
+    hover-area := TouchArea { }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 8px;
+        spacing: 10px;
+
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            spacing: 3px;
+
+            Text {
+                text: root.entry.name;
+                color: DownloadsPalette.text;
+                font-size: 13px;
+                font-weight: 600;
+                overflow: elide;
+            }
+
+            Text {
+                text: root.entry.status;
+                color: root.entry.failed ? DownloadsPalette.danger : DownloadsPalette.muted;
+                font-size: 11px;
+                overflow: elide;
+            }
+
+            if root.entry.progress >= 0: Rectangle {
+                height: 3px;
+                border-radius: 1.5px;
+                background: DownloadsPalette.track;
+
+                Rectangle {
+                    x: 0px;
+                    width: root.entry.progress > 1 ? parent.width * 30% : parent.width * Math.min(1, root.entry.progress);
+                    height: parent.height;
+                    border-radius: 1.5px;
+                    background: DownloadsPalette.accent;
+                }
+            }
+        }
+
+        HorizontalLayout {
+            alignment: end;
+            spacing: 2px;
+            padding-top: 19px;
+            padding-bottom: 19px;
+
+            if root.entry.can-open: TextButton {
+                label: "Open";
+                clicked => {
+                    root.action(root.entry.guid, DownloadAction.open);
+                }
+            }
+            if root.entry.can-resume: TextButton {
+                label: "Resume";
+                clicked => {
+                    root.action(root.entry.guid, DownloadAction.resume);
+                }
+            }
+            if root.entry.can-retry: TextButton {
+                label: "Retry";
+                clicked => {
+                    root.action(root.entry.guid, DownloadAction.retry);
+                }
+            }
+            if root.entry.can-show: TextButton {
+                label: root.show-label;
+                clicked => {
+                    root.action(root.entry.guid, DownloadAction.show);
+                }
+            }
+            if root.entry.can-cancel: TextButton {
+                label: "Cancel";
+                clicked => {
+                    root.action(root.entry.guid, DownloadAction.cancel);
+                }
+            }
+            if root.entry.can-remove: TextButton {
+                label: "Remove";
+                clicked => {
+                    root.action(root.entry.guid, DownloadAction.remove);
+                }
+            }
+        }
+    }
+}
+
+// The recent downloads, under the toolbar button.
+export component DownloadsPopover inherits Rectangle {
+    in property <[DownloadRow]> rows;
+    in property <string> show-label;
+    callback action(string, DownloadAction);
+    callback clear-list;
+    callback show-all;
+
+    width: 460px;
+    height: header.height + Math.max(1, root.rows.length) * 64px + footer.height + 16px;
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: DownloadsPalette.border;
+    background: DownloadsPalette.surface;
+    drop-shadow-blur: 18px;
+    drop-shadow-color: #00000060;
+    drop-shadow-offset-y: 4px;
+
+    // Clicks on the popover never reach what is under it.
+    TouchArea { }
+
+    VerticalLayout {
+        padding: 8px;
+        spacing: 0px;
+
+        header := HorizontalLayout {
+            height: 36px;
+            padding-left: 12px;
+            padding-right: 4px;
+
+            Text {
+                horizontal-stretch: 1;
+                text: "Downloads";
+                color: DownloadsPalette.text;
+                font-size: 14px;
+                font-weight: 650;
+                vertical-alignment: center;
+            }
+
+            VerticalLayout {
+                alignment: center;
+                TextButton {
+                    label: "Clear list";
+                    clicked => {
+                        root.clear-list();
+                    }
+                }
+            }
+        }
+
+        if root.rows.length == 0: Text {
+            height: 64px;
+            text: "No downloads";
+            color: DownloadsPalette.muted;
+            font-size: 12px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        for row in root.rows: DownloadItem {
+            entry: row;
+            show-label: root.show-label;
+            action(guid, action) => {
+                root.action(guid, action);
+            }
+        }
+
+        footer := HorizontalLayout {
+            height: 36px;
+            alignment: center;
+
+            VerticalLayout {
+                alignment: center;
+                TextButton {
+                    label: "Show all downloads";
+                    clicked => {
+                        root.show-all();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Every download, newest first, over the page area.
+export component DownloadsPanel inherits Rectangle {
+    in property <[DownloadRow]> rows;
+    in property <string> show-label;
+    in property <bool> can-show-more;
+    callback action(string, DownloadAction);
+    callback clear-list;
+    callback show-more;
+    callback close;
+
+    background: DownloadsPalette.surface;
+
+    // Clicks on the panel never reach the page under it.
+    TouchArea { }
+
+    VerticalLayout {
+        padding-left: 32px;
+        padding-right: 32px;
+        padding-top: 20px;
+        padding-bottom: 20px;
+        spacing: 12px;
+
+        HorizontalLayout {
+            height: 36px;
+            spacing: 8px;
+
+            Text {
+                horizontal-stretch: 1;
+                text: "Downloads";
+                color: DownloadsPalette.text;
+                font-size: 20px;
+                font-weight: 650;
+                vertical-alignment: center;
+            }
+
+            VerticalLayout {
+                alignment: center;
+                TextButton {
+                    label: "Clear list";
+                    clicked => {
+                        root.clear-list();
+                    }
+                }
+            }
+
+            VerticalLayout {
+                alignment: center;
+                TextButton {
+                    label: "Close";
+                    primary: true;
+                    clicked => {
+                        root.close();
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: DownloadsPalette.border;
+        }
+
+        if root.rows.length == 0: Text {
+            vertical-stretch: 1;
+            text: "No downloads";
+            color: DownloadsPalette.muted;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+
+        if root.rows.length > 0: Flickable {
+            vertical-stretch: 1;
+            viewport-height: list.preferred-height;
+
+            list := VerticalLayout {
+                spacing: 2px;
+                alignment: start;
+
+                for row in root.rows: DownloadItem {
+                    entry: row;
+                    show-label: root.show-label;
+                    action(guid, action) => {
+                        root.action(guid, action);
+                    }
+                }
+
+                if root.can-show-more: HorizontalLayout {
+                    height: 44px;
+                    alignment: center;
+
+                    VerticalLayout {
+                        alignment: center;
+                        TextButton {
+                            label: "Show more";
+                            clicked => {
+                                root.show-more();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// "Cancel N downloads and quit?", over the whole window.
+export component QuitDownloadsPrompt inherits Rectangle {
+    in property <string> title;
+    in property <string> body;
+    in property <string> confirm-label;
+    in property <string> keep-label;
+    callback confirm;
+    callback keep;
+
+    background: DownloadsPalette.scrim;
+
+    // A click outside the card is not an answer.
+    TouchArea { }
+
+    card := Rectangle {
+        width: Math.min(420px, parent.width - 48px);
+        height: card-layout.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: Math.max(24px, (parent.height - self.height) / 2 - 40px);
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: DownloadsPalette.border;
+        background: DownloadsPalette.surface;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: #00000080;
+
+        card-layout := VerticalLayout {
+            padding: 22px;
+            spacing: 12px;
+
+            Text {
+                text: root.title;
+                color: DownloadsPalette.text;
+                font-size: 16px;
+                font-weight: 650;
+                wrap: word-wrap;
+            }
+
+            Text {
+                text: root.body;
+                color: DownloadsPalette.muted;
+                font-size: 13px;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                spacing: 8px;
+                padding-top: 6px;
+
+                TextButton {
+                    label: root.confirm-label;
+                    clicked => {
+                        root.confirm();
+                    }
+                }
+
+                TextButton {
+                    label: root.keep-label;
+                    primary: true;
+                    clicked => {
+                        root.keep();
+                    }
+                }
+            }
+        }
+    }
+}

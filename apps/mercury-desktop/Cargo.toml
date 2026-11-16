@@ -20,6 +20,8 @@ glow.workspace = true
 image.workspace = true
 libc.workspace = true
 log.workspace = true
+mercury-downloads = { path = "../../crates/mercury-downloads" }
+mercury-settings = { path = "../../crates/mercury-settings" }
 mercury-store = { path = "../../crates/mercury-store" }
 mercury-ui = { path = "../../crates/mercury-ui" }
 rusqlite.workspace = true
@@ -29,6 +31,7 @@ surfman.workspace = true
 talaria-core = { path = "../../crates/talaria-core" }
 talaria-servo = { path = "../../crates/talaria-servo" }
 thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

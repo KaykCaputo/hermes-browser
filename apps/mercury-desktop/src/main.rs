@@ -18,6 +18,7 @@ use ui_sync::sync_ui;
 mod callbacks;
 mod cli;
 mod crash_handler;
+mod downloads; // downloads-ui lane
 mod engine;
 mod keyboard;
 mod keyutils;
@@ -124,6 +125,14 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&web_view_focused),
     );
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
+    downloads::start(
+        &window,
+        Rc::clone(&controller),
+        downloads::DownloadOptions {
+            folder: options.download_dir.clone(),
+            url: options.download_url.clone(),
+        },
+    ); // downloads-ui lane
 
     let screenshot_result = Rc::new(Cell::new(ScreenshotResult::Pending));
     let screenshot_timer = options.screenshot.map(|screenshot| {
@@ -151,6 +160,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     // Nothing may capture, pump or render while the engine shuts down, and the engine must be
     // gone before the window (and the renderer whose device Servo uses) is destroyed.
     drop(screenshot_timer);
+    downloads::shut_down(std::time::Instant::now() + std::time::Duration::from_secs(3)); // downloads-ui lane
     profile_data::shut_down(std::time::Instant::now() + profile_data::SHUTDOWN_TIMEOUT); // history lane
     shut_down_engine(exit_code);
     drop(window);

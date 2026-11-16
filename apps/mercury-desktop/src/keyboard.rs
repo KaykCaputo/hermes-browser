@@ -38,6 +38,9 @@ pub(crate) fn connect_native_keyboard_input(
                     modifiers = changed.state();
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
+                    if crate::downloads::handle_key(event) {
+                        return EventResult::PreventDefault; // downloads-ui lane
+                    }
                     if handle_browser_shortcut(
                         &window,
                         &controller,
