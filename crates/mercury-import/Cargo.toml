@@ -1,5 +1,6 @@
 [package]
 name = "mercury-import"
+publish = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true

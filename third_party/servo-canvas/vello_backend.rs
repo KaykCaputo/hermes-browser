@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use euclid::default::{Point2D, Rect, Size2D, Transform2D};
 use fonts::FontIdentifier;
@@ -34,6 +35,7 @@ use vello::wgpu::{
     TexelCopyTextureInfoBase, Texture, TextureDescriptor, TextureDimension, TextureFormat,
     TextureUsages, TextureView, TextureViewDescriptor,
 };
+use vello::wgpu::ErrorFilter;
 use vello::{kurbo, peniko};
 use webrender_api::{ImageDescriptor, ImageDescriptorFlags};
 
@@ -45,13 +47,30 @@ thread_local! {
     static SHARED_FONT_CACHE: RefCell<HashMap<FontIdentifier, peniko::FontData>> = RefCell::default();
 }
 
+/// Mercury: set when the GPU canvas could not start; later canvases go
+/// straight to the CPU backend for the rest of the process.
+static GPU_CANVAS_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+/// Mercury: set once a failed render has been logged.
+static RENDER_FAILURE_LOGGED: AtomicBool = AtomicBool::new(false);
+/// Mercury: set by wgpu when the shared device is lost.
+static GPU_DEVICE_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Mercury: the GPU device, queue and vello renderer shared by all canvases on
+/// the Canvas thread. vello's renderer keeps about 175 MB of GPU buffers, so
+/// one per canvas exhausts memory on pages with many canvases.
+type SharedGpu = (Device, Queue, Rc<RefCell<vello::Renderer>>);
+
+thread_local! {
+    static SHARED_GPU: RefCell<Option<SharedGpu>> = const { RefCell::new(None) };
+}
+
 pub(crate) struct VelloDrawTarget {
     device: Device,
     queue: Queue,
     renderer: Rc<RefCell<vello::Renderer>>,
     scene: vello::Scene,
     size: Size2D<u32>,
-    clips: Vec<Path>,
+    clips: Vec<(Path, peniko::Fill)>, // Mercury: with the clip's fill rule
     state: State,
     render_texture: Texture,
     render_texture_view: TextureView,
@@ -161,9 +180,9 @@ impl VelloDrawTarget {
         }
         f(self);
         // push all clip layers back
-        for path in &self.clips {
+        for (path, fill) in &self.clips {
             self.scene
-                .push_clip_layer(peniko::Fill::NonZero, kurbo::Affine::IDENTITY, &path.0);
+                .push_clip_layer(*fill, kurbo::Affine::IDENTITY, &path.0);
         }
     }
 
@@ -174,7 +193,7 @@ impl VelloDrawTarget {
         }
         let viewport: Rect<f64> = Rect::from_size(self.get_size().cast());
         let Some(clip) = self.clips.iter().try_fold(viewport, |acc, e| {
-            acc.intersection(&e.0.bounding_box().into())
+            acc.intersection(&e.0.0.bounding_box().into())
         }) else {
             // clip makes no visible side effects
             return false;
@@ -196,12 +215,99 @@ impl VelloDrawTarget {
             },
         }
     }
-}
 
-impl GenericDrawTarget for VelloDrawTarget {
-    type SourceSurface = Vec<u8>; // TODO: this should be texture
+    /// Mercury: returns `None` when the GPU canvas cannot start, so that the
+    /// caller draws this canvas on the CPU. If the device or the shared
+    /// renderer cannot be created (or the device was lost), the reason is
+    /// logged once and the GPU is not tried again in this process; if only
+    /// this canvas's own renderer cannot be created, only this canvas moves.
+    pub(crate) fn try_new(size: Size2D<u32>) -> Option<Self> {
+        if GPU_CANVAS_UNAVAILABLE.load(Ordering::Relaxed) || !Self::usable_for(size.cast()) {
+            return None;
+        }
+        let (device, queue, renderer) = match SHARED_GPU.with_borrow(Clone::clone) {
+            Some(shared) => shared,
+            None => match Self::create_device_and_renderer() {
+                Ok(shared) => {
+                    SHARED_GPU.set(Some(shared.clone()));
+                    shared
+                },
+                Err(reason) => {
+                    GPU_CANVAS_UNAVAILABLE.store(true, Ordering::Relaxed);
+                    log::warn!("GPU 2D canvas unavailable ({reason}); drawing 2D canvases on the CPU");
+                    return None;
+                },
+            },
+        };
+        Self::with_renderer_for(device, queue, &renderer, None, size)
+    }
 
-    fn new(size: Size2D<u32>) -> Self {
+    /// Mercury: a GPU canvas resized to `size`, or `None` if it must move to
+    /// the CPU backend.
+    pub(crate) fn try_similar(&self, size: Size2D<u64>) -> Option<Self> {
+        if !Self::usable_for(size) {
+            return None;
+        }
+        let shared = SHARED_GPU.with_borrow(|shared| shared.as_ref().map(|(_, _, r)| r.clone()));
+        let shared = shared.unwrap_or_else(|| self.renderer.clone());
+        // A canvas that already has a renderer of its own keeps it.
+        let own = (!Rc::ptr_eq(&self.renderer, &shared)).then_some(&self.renderer);
+        Self::with_renderer_for(self.device.clone(), self.queue.clone(), &shared, own, size.cast())
+    }
+
+    /// Mercury: whether a canvas of this size can be drawn on the GPU at all.
+    /// vello requests wgpu's default limits, so a canvas larger than the
+    /// default texture size cannot get a texture; vello 0.11 renders only 256
+    /// bins of 256x256 pixels correctly (it warns "Trying to paint too large
+    /// image", linebender/vello#680); after a device loss nothing can.
+    fn usable_for(size: Size2D<u64>) -> bool {
+        let max = vello::wgpu::Limits::default().max_texture_dimension_2d as u64;
+        let bins = size.width.div_ceil(256) * size.height.div_ceil(256);
+        if size.width > max || size.height > max || bins > 256 {
+            log::debug!("{size:?} canvas exceeds the GPU canvas limits; drawing it on the CPU");
+            return false;
+        }
+        if GPU_DEVICE_LOST.load(Ordering::Relaxed) {
+            // Canvases already on the lost device stay blank; new and resized ones use the CPU.
+            SHARED_GPU.set(None);
+            if !GPU_CANVAS_UNAVAILABLE.swap(true, Ordering::Relaxed) {
+                log::warn!("GPU 2D canvas unavailable (GPU device lost); drawing 2D canvases on the CPU");
+            }
+            return false;
+        }
+        true
+    }
+
+    /// Mercury: each canvas's previous frame lives in its renderer's image
+    /// atlas (at most 8192x8192), next to the images drawn into it. A canvas
+    /// larger than 2048x2048 in area (a sixteenth of the atlas) gets a renderer
+    /// of its own so that it cannot crowd other canvases out of a shared atlas
+    /// (see MERCURY.md for the measurements behind this rule).
+    fn with_renderer_for(
+        device: Device,
+        queue: Queue,
+        shared: &Rc<RefCell<vello::Renderer>>,
+        own: Option<&Rc<RefCell<vello::Renderer>>>,
+        size: Size2D<u32>,
+    ) -> Option<Self> {
+        let fits_shared = size.width as u64 * size.height as u64 <= 2048 * 2048;
+        let renderer = if fits_shared {
+            shared.clone()
+        } else if let Some(own) = own {
+            own.clone()
+        } else {
+            match Self::create_renderer(&device) {
+                Ok(renderer) => Rc::new(RefCell::new(renderer)),
+                Err(reason) => {
+                    log::warn!("GPU renderer for a {size:?} canvas failed ({reason}); drawing it on the CPU");
+                    return None;
+                },
+            }
+        };
+        Some(Self::new_with_renderer(device, queue, renderer, size))
+    }
+
+    fn create_device_and_renderer() -> Result<SharedGpu, String> {
         // TODO: we should read prefs instead of env
 
         // we forbid GL because it clashes with servo's GL usage
@@ -219,24 +325,51 @@ impl GenericDrawTarget for VelloDrawTarget {
             instance,
             devices: Vec::new(),
         };
-        let device_id = pollster::block_on(context.device(None)).unwrap();
+        let Some(device_id) = pollster::block_on(context.device(None)) else {
+            return Err("no GPU adapter or device".to_owned());
+        };
         let device_handle = &mut context.devices[device_id];
         let device = device_handle.device.clone();
         let queue = device_handle.queue.clone();
+        device.on_uncaptured_error(Arc::new(|error| {
+            // Mercury: after a device loss every frame raises errors; stay quiet.
+            if !GPU_DEVICE_LOST.load(Ordering::Relaxed) {
+                log::error!("VELLO WGPU ERROR: {error}");
+            }
+        }));
+        device.set_device_lost_callback(|reason, message| {
+            log::warn!("VELLO WGPU DEVICE LOST {reason:?} {message}");
+            GPU_DEVICE_LOST.store(true, Ordering::Relaxed);
+        });
+        let renderer = Self::create_renderer(&device)?;
+        Ok((device, queue, Rc::new(RefCell::new(renderer))))
+    }
+
+    fn create_renderer(device: &Device) -> Result<vello::Renderer, String> {
+        let error_scope = device.push_error_scope(ErrorFilter::Validation);
         let renderer = vello::Renderer::new(
-            &device,
+            device,
             vello::RendererOptions {
                 use_cpu: false,
                 num_init_threads: NonZeroUsize::new(1),
                 antialiasing_support: vello::AaSupport::area_only(),
                 pipeline_cache: None,
             },
-        )
-        .unwrap();
-        device.on_uncaptured_error(Arc::new(|error| {
-            log::error!("VELLO WGPU ERROR: {error}");
-        }));
-        Self::new_with_renderer(device, queue, Rc::new(RefCell::new(renderer)), size)
+        );
+        match (renderer, pollster::block_on(error_scope.pop())) {
+            (Ok(renderer), None) => Ok(renderer),
+            (Err(error), _) => Err(format!("renderer creation failed: {error}")),
+            (Ok(_), Some(error)) => Err(format!("renderer creation failed: {error}")),
+        }
+    }
+}
+
+impl GenericDrawTarget for VelloDrawTarget {
+    type SourceSurface = Vec<u8>; // TODO: this should be texture
+
+    /// Mercury: canvases are created through `try_new`; nothing calls this.
+    fn new(size: Size2D<u32>) -> Self {
+        Self::try_new(size).expect("GPU 2D canvas unavailable")
     }
 
     fn canvas_store_sizes(
@@ -250,7 +383,8 @@ impl GenericDrawTarget for VelloDrawTarget {
     fn clear_rect(&mut self, rect: &Rect<f32>, transform: Transform2D<f64>) {
         // vello scene only ever grows,
         // so we use every opportunity to shrink it
-        if self.is_viewport_cleared(rect, transform) {
+        // Mercury: not while a clip is active; the shortcut would drop it.
+        if self.clips.is_empty() && self.is_viewport_cleared(rect, transform) {
             self.scene.reset();
             self.clips.clear(); // no clips are affecting rendering
             self.state = State::Drawing;
@@ -485,12 +619,13 @@ impl GenericDrawTarget for VelloDrawTarget {
         }
     }
 
-    fn push_clip(&mut self, path: &Path, _fill_rule: FillRule, transform: Transform2D<f64>) {
+    fn push_clip(&mut self, path: &Path, fill_rule: FillRule, transform: Transform2D<f64>) {
+        let fill = fill_rule.convert();
         self.scene
-            .push_clip_layer(peniko::Fill::NonZero, transform.cast().into(), &path.0);
+            .push_clip_layer(fill, transform.cast().into(), &path.0);
         let mut path = path.clone();
         path.transform(transform.cast());
-        self.clips.push(path);
+        self.clips.push((path, fill));
     }
 
     fn push_clip_rect(&mut self, rect: &Rect<i32>) {
@@ -678,44 +813,63 @@ fn convert_to_brush(
 }
 
 impl VelloDrawTarget {
-    fn render_to_texture(&mut self) {
+    fn render_to_texture(&mut self) -> bool {
         if matches!(
             self.state,
             State::RenderedToTexture | State::RenderedToBuffer
         ) {
-            return;
+            return true;
         }
 
-        self.renderer
-            .borrow_mut()
-            .render_to_texture(
-                &self.device,
-                &self.queue,
-                &self.scene,
-                &self.render_texture_view,
+        // Mercury: vello applies a clip's shape only when its layer is closed
+        // (until then it clips to the shape's bounding box), so close the
+        // open clip layers for the render; `ignore_clips` reopens them.
+        let mut result = Ok(());
+        self.ignore_clips(|self_| {
+            result = self_.renderer.borrow_mut().render_to_texture(
+                &self_.device,
+                &self_.queue,
+                &self_.scene,
+                &self_.render_texture_view,
                 &vello::RenderParams {
                     base_color: peniko::color::AlphaColor::TRANSPARENT,
-                    width: self.size.width,
-                    height: self.size.height,
+                    width: self_.size.width,
+                    height: self_.size.height,
                     antialiasing_method: vello::AaConfig::Area,
                 },
-            )
-            .unwrap();
+            );
+        });
+        // Mercury: on failure keep the scene for the next render and leave
+        // the last rendered frame in place.
+        if let Err(error) = result {
+            if !RENDER_FAILURE_LOGGED.swap(true, Ordering::Relaxed) {
+                log::warn!("VELLO RENDER ERROR {error}");
+            }
+            return false;
+        }
+        // Mercury: the texture changed, so vello must copy it into its image
+        // atlas again the next time a scene draws `render_image`.
+        self.renderer
+            .borrow_mut()
+            .mark_override_image_dirty(&self.render_image.image);
         self.state = State::RenderedToTexture;
         // prune scene
         self.scene.reset();
         // push all clip layers back
-        for path in &self.clips {
+        for (path, fill) in &self.clips {
             self.scene
-                .push_clip_layer(peniko::Fill::NonZero, kurbo::Affine::IDENTITY, &path.0);
+                .push_clip_layer(*fill, kurbo::Affine::IDENTITY, &path.0);
         }
+        true
     }
 
     fn render_to_buffer(&mut self) {
         if matches!(self.state, State::RenderedToBuffer) {
             return;
         }
-        self.render_to_texture();
+        if !self.render_to_texture() {
+            return;
+        }
 
         let size = extend3d(self.size);
         // TODO(perf): do a render pass that will multiply with alpha on GPU
@@ -749,9 +903,17 @@ impl VelloDrawTarget {
             if let Err(error) =
                 vello::util::block_on_wgpu(&self.device, receiver.receive()).unwrap()
             {
-                log::warn!("VELLO WGPU MAP ASYNC ERROR {error}");
+                // Mercury: once per process; after a device loss every frame fails.
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    log::warn!("VELLO WGPU MAP ASYNC ERROR {error}");
+                }
+                // Mercury: wgpu 30 counts the buffer as mapped from the
+                // `map_async` call on; unmap so the next read-back can map it.
+                self.rendered_buffer.unmap();
                 return f(None);
             }
+            // Mercury: wgpu 30 returns a `Result` here.
             match buf_slice.get_mapped_range() {
                 Ok(data) => f(Some(&data)),
                 Err(error) => {

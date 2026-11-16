@@ -42,10 +42,13 @@
       { label: "blue", style: "rgb(0, 0, 255)", x: 130, rgba: [0, 0, 255, 255] },
       { label: "mixed", style: "rgb(18, 52, 86)", x: 190, rgba: [18, 52, 86, 255] },
       { label: "half-alpha", style: "rgba(255, 0, 0, 0.5)", x: 250, rgba: [255, 0, 0, 128] },
+      // Unsaturated channels: a read-back that un-premultiplies twice gives [0,203,255,128].
+      { label: "half-alpha-blue", style: "rgba(0, 102, 204, 0.5)", x: 530, y: 200,
+        rgba: [0, 102, 204, 128] },
     ];
     for (const swatch of swatches) {
       context.fillStyle = swatch.style;
-      context.fillRect(swatch.x, 10, 50, 50);
+      context.fillRect(swatch.x, swatch.y ?? 10, 50, 50);
     }
 
     // A second canvas, drawn onto the first with drawImage.
@@ -87,7 +90,8 @@
 
     // getImageData read-backs.
     for (const swatch of swatches) {
-      report("getImageData " + swatch.label, pixel(context, swatch.x + 25, 35), swatch.rgba);
+      report("getImageData " + swatch.label, pixel(context, swatch.x + 25, (swatch.y ?? 10) + 25),
+        swatch.rgba);
     }
     report("getImageData untouched", pixel(context, 5, 255), [0, 0, 0, 0]);
     report("drawImage edge", pixel(context, 315, 15), [255, 0, 255, 255]);

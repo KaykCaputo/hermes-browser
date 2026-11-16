@@ -2,6 +2,8 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use euclid::default::{Point2D, Rect, Size2D, Transform2D};
 use malloc_size_of::MallocSizeOfOps;
 use paint_api::CrossProcessPaintApi;
@@ -12,6 +14,18 @@ use servo_canvas_traits::canvas::*;
 use webrender_api::ImageKey;
 
 use crate::backend::GenericDrawTarget;
+
+/// Mercury: neither backend implements `draw_surface_with_shadow`, and the
+/// shadow path below draws the shape only into the shadow's temporary target,
+/// so `fillRect`, `strokeRect` and `drawImage` with a shadow drew nothing at
+/// all. Always take the normal path: the shape is drawn, without its shadow.
+fn draws_shadow(shadow_options: &ShadowOptions) -> bool {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if shadow_options.need_to_draw_shadow() && !LOGGED.swap(true, Ordering::Relaxed) {
+        log::warn!("canvas shadows are not supported; drawing shapes without them");
+    }
+    false
+}
 
 // Asserts on WR texture cache update for zero sized image with raw data.
 // https://github.com/servo/webrender/blob/main/webrender/src/texture_cache.rs#L1475
@@ -39,6 +53,20 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
             paint_api,
             image_key: None,
         }
+    }
+
+    /// Mercury: like `new`, for a draw target that may fail to start.
+    #[cfg(feature = "vello")]
+    pub(crate) fn try_new(
+        size: Size2D<u64>,
+        paint_api: CrossProcessPaintApi,
+        new_draw_target: impl FnOnce(Size2D<u32>) -> Option<DrawTarget>,
+    ) -> Option<CanvasData<DrawTarget>> {
+        Some(CanvasData {
+            draw_target: new_draw_target(size.max(MIN_WR_IMAGE_SIZE).cast())?,
+            paint_api,
+            image_key: None,
+        })
     }
 
     pub(crate) fn set_image_key(&mut self, image_key: ImageKey) {
@@ -106,7 +134,7 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
             );
         };
 
-        if shadow_options.need_to_draw_shadow() {
+        if draws_shadow(&shadow_options) {
             let rect = Rect::new(
                 Point2D::new(dest_rect.origin.x as f32, dest_rect.origin.y as f32),
                 Size2D::new(dest_rect.size.width as f32, dest_rect.size.height as f32),
@@ -185,7 +213,7 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
             return; // Paint nothing if gradient size is zero.
         }
 
-        if shadow_options.need_to_draw_shadow() {
+        if draws_shadow(&shadow_options) {
             self.draw_with_shadow(
                 rect,
                 shadow_options,
@@ -227,7 +255,7 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
             return; // Paint nothing if gradient size is zero.
         }
 
-        if shadow_options.need_to_draw_shadow() {
+        if draws_shadow(&shadow_options) {
             self.draw_with_shadow(
                 rect,
                 shadow_options,
@@ -335,6 +363,38 @@ impl<DrawTarget: GenericDrawTarget> CanvasData<DrawTarget> {
             .create_similar_draw_target(&Size2D::new(size.width, size.height).cast());
 
         self.update_image_rendering(None);
+    }
+
+    /// Mercury: like `recreate`, but the new draw target may fail to start; if
+    /// it does, nothing changes and the size it was asked for is returned.
+    #[cfg(feature = "vello")]
+    pub(crate) fn try_recreate(
+        &mut self,
+        size: Option<Size2D<u64>>,
+        new_draw_target: impl FnOnce(&DrawTarget, Size2D<u64>) -> Option<DrawTarget>,
+    ) -> Result<(), Size2D<u64>> {
+        let size = size
+            .unwrap_or_else(|| self.draw_target.get_size().to_u64())
+            .max(MIN_WR_IMAGE_SIZE);
+        self.draw_target = new_draw_target(&self.draw_target, size).ok_or(size)?;
+        self.update_image_rendering(None);
+        Ok(())
+    }
+
+    /// Mercury: like `recreate`, but moves the canvas to another backend,
+    /// keeping its WebRender image key.
+    #[cfg(feature = "vello")]
+    pub(crate) fn recreate_as<Other: GenericDrawTarget>(
+        &mut self,
+        size: Size2D<u64>,
+    ) -> CanvasData<Other> {
+        let mut canvas_data = CanvasData {
+            draw_target: Other::new(size.max(MIN_WR_IMAGE_SIZE).cast()),
+            paint_api: self.paint_api.clone(),
+            image_key: self.image_key.take(),
+        };
+        canvas_data.update_image_rendering(None);
+        canvas_data
     }
 
     /// Update image in WebRender
