@@ -14,6 +14,9 @@ DIST_DIR ?= dist
 PROJECT_VERSION ?= 0.2.0
 LINUX_PACKAGE_NAME := mercury-browser-v$(PROJECT_VERSION)-linux-x86_64
 LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
+CI_TOOLS_DIR ?= target/ci-tools
+# The pinned CI tools from `make ci-tools` are found before any other copy.
+CI_TOOLS_PATH = PATH="$(abspath $(CI_TOOLS_DIR))/bin:$$PATH"
 
 # macOS builds use a private, unpacked copy of the official GStreamer framework
 # (scripts/macos/gstreamer.sh; `make gstreamer-macos` prepares it). Recipes that
@@ -51,6 +54,10 @@ endif
 	lint \
 	test \
 	qa \
+	qa-fast \
+	ci-tools \
+	lint-scripts \
+	deny \
 	build \
 	build-release \
 	package-linux \
@@ -83,6 +90,10 @@ help:
 		'lint' 'Run Clippy and reject every warning.' \
 		'test' 'Run all workspace tests.' \
 		'qa' 'Run formatting, linting, and tests.' \
+		'qa-fast' 'Check formatting, lint and test the crates that need no engine.' \
+		'ci-tools' 'Download the pinned shellcheck, actionlint and cargo-deny.' \
+		'lint-scripts' 'Lint scripts/ (shellcheck, py_compile) and the workflows (actionlint).' \
+		'deny' 'Check dependencies against the policy in deny.toml.' \
 		'build' 'Build the complete workspace in debug mode.' \
 		'build-release' 'Build the complete workspace in release mode.' \
 		'package-linux' 'Build and package the Linux x86-64 release.' \
@@ -207,6 +218,51 @@ qa:
 	"$(MAKE)" fmt-check
 	"$(MAKE)" lint
 	"$(MAKE)" test
+
+qa-fast:
+	"$(MAKE)" fmt-check
+	@packages="$$(scripts/ci/light-crates.sh)" || exit 1; \
+	printf 'engine-free crates: %s\n' "$$packages"; \
+	"$(CARGO)" clippy --locked --release $$packages --all-targets -- -D warnings && \
+	"$(CARGO)" test --locked --release $$packages
+
+ci-tools:
+	scripts/ci/install-tools.sh --dir "$(CI_TOOLS_DIR)"
+
+lint-scripts:
+	@$(CI_TOOLS_PATH); export PATH; \
+	missing=; \
+	for tool in shellcheck actionlint; do \
+		command -v "$$tool" >/dev/null 2>&1 || missing="$$missing $$tool"; \
+	done; \
+	if [ -n "$$missing" ]; then \
+		printf 'error: not found:%s\n' "$$missing" >&2; \
+		printf '%s\n' \
+			'Run "make ci-tools" to download the pinned versions into $(CI_TOOLS_DIR)/bin' \
+			'(their checksums are verified), or install shellcheck and actionlint yourself' \
+			'at the versions in scripts/ci/install-tools.sh.' >&2; \
+		exit 1; \
+	fi; \
+	printf 'shellcheck %s (%s), actionlint %s (%s)\n' \
+		"$$(shellcheck --version | sed -n 's/^version: //p')" "$$(command -v shellcheck)" \
+		"$$(actionlint -version | sed -n 1p)" "$$(command -v actionlint)"; \
+	find scripts -type f -name '*.sh' -print0 | xargs -0 shellcheck -x && \
+	find scripts -type f -name '*.py' -print0 | \
+		PYTHONPYCACHEPREFIX="$(abspath target)/pycache" xargs -0 "$(PYTHON)" -m py_compile && \
+	actionlint && \
+	printf '%s\n' 'scripts and workflows: no findings'
+
+deny:
+	@$(CI_TOOLS_PATH); export PATH; \
+	if ! command -v cargo-deny >/dev/null 2>&1; then \
+		printf '%s\n' \
+			'error: cargo-deny not found.' \
+			'Run "make ci-tools" to download the pinned version into $(CI_TOOLS_DIR)/bin' \
+			'(its checksum is verified), or install cargo-deny yourself at the version in' \
+			'scripts/ci/install-tools.sh.' >&2; \
+		exit 1; \
+	fi; \
+	cargo-deny --locked check --show-stats
 
 build:
 	$(GSTREAMER_ENV) "$(CARGO)" build --workspace

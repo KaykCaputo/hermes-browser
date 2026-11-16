@@ -1,0 +1,15 @@
+# Keeps the actions in .github/workflows current. Every action there is pinned
+# to a full commit SHA with its version in a trailing comment; Dependabot
+# updates both together, in one weekly pull request.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
