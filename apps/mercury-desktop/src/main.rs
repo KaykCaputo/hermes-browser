@@ -25,6 +25,7 @@ mod panic_hook;
 #[cfg(target_os = "macos")]
 mod platform_macos;
 mod profile;
+mod profile_data;
 mod rendering;
 mod screen_metrics;
 mod screenshot;
@@ -90,6 +91,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     }
     let controller = Rc::new(RefCell::new(BrowserController::default()));
     open_start_up_tabs(&mut controller.borrow_mut(), &options.urls);
+    profile_data::start(&profile, &mut controller.borrow_mut()); // history lane
     let web_view_focused = Rc::new(Cell::new(false));
 
     connect_servo_runtime(
@@ -132,6 +134,7 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     // Nothing may capture, pump or render while the engine shuts down, and the engine must be
     // gone before the window (and the renderer whose device Servo uses) is destroyed.
     drop(screenshot_timer);
+    profile_data::shut_down(); // history lane
     shut_down_engine(exit_code);
     drop(window);
 

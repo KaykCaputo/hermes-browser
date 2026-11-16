@@ -325,6 +325,7 @@ impl EngineState {
         for receiver in self.event_receivers.values() {
             state_changed |= apply_pending_browser_events(&self.controller, receiver);
         }
+        crate::profile_data::record_visits(&mut self.controller.borrow_mut()); // history lane
         let active_became_ready = !ready_before && {
             let controller = self.controller.borrow();
             is_engine_ready(&controller, controller.active_tab_id())
