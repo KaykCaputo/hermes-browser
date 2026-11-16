@@ -8,5 +8,10 @@ build = "build.rs"
 [dependencies]
 slint.workspace = true
 
+# Only for `examples/render_settings.rs`, which renders the settings window without a display.
+[dev-dependencies]
+image.workspace = true
+slint = { workspace = true, features = ["renderer-software"] }
+
 [build-dependencies]
 slint-build.workspace = true

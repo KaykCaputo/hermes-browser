@@ -1,0 +1,102 @@
+import { Palette } from "std-widgets.slint";
+
+// The appearance setting, as the browser's own chrome applies it.
+export enum ChromeTheme {
+    system,
+    light,
+    dark,
+}
+
+// The browser chrome's colours. The dark values are the chrome's original ones; with `system`
+// the chrome follows the window's colour scheme, and stays dark when that is unknown.
+export global ChromePalette {
+    in property <ChromeTheme> theme: ChromeTheme.system;
+    out property <bool> dark: root.theme == ChromeTheme.system
+        ? Palette.color-scheme != ColorScheme.light
+        : root.theme == ChromeTheme.dark;
+
+    out property <color> window-background: root.dark ? #0b0f14 : #e9edf2;
+    out property <color> toolbar-background: root.dark ? #11171f : #f7f8fa;
+    out property <color> toolbar-divider: root.dark ? #202832 : #d6dce3;
+    out property <color> content-background: root.dark ? #0c1117 : #f4f6f8;
+    out property <color> field-background: root.dark ? #1a222c : #ffffff;
+    out property <color> field-border: root.dark ? #29323d : #c5ccd5;
+    out property <color> search-field-background: root.dark ? #171f29 : #ffffff;
+    out property <color> search-field-border: root.dark ? #29333e : #c5ccd5;
+    out property <color> text: root.dark ? #edf4fa : #141a21;
+    out property <color> text-secondary: root.dark ? #8c99a9 : #5a6573;
+    out property <color> text-muted: root.dark ? #727f8f : #6a7480;
+    out property <color> placeholder: root.dark ? #717e8e : #7d8794;
+    out property <color> accent: root.dark ? #62bfff : #1683d8;
+    out property <color> button-label: root.dark ? #9aa6b5 : #4d5866;
+    out property <color> button-label-hover: root.dark ? #71c5ff : #0b6fc0;
+    out property <color> button-hover: root.dark ? #19222c : #e2e7ed;
+    out property <color> button-pressed: root.dark ? #222d39 : #d3dae2;
+    out property <color> tab-active: root.dark ? #161e28 : #ffffff;
+    out property <color> tab-hover: root.dark ? #111820 : #dde3ea;
+    out property <color> tab-title-inactive: root.dark ? #8b98a8 : #5a6573;
+    out property <color> tab-close-hover: root.dark ? #222c37 : #d8dee6;
+    out property <color> tab-close-pressed: root.dark ? #2b3744 : #c8d0da;
+    out property <color> tab-close-label: root.dark ? #7f8c9c : #6a7480;
+    out property <color> status-background: root.dark ? #1a222c : #ffffff;
+    out property <color> status-border: root.dark ? #29323d : #c5ccd5;
+    out property <color> status-text: root.dark ? #c9d3de : #2d3540;
+    out property <color> notice-background: root.dark ? #2a2212 : #fff4d6;
+    out property <color> notice-border: root.dark ? #5c4a1f : #e8cf87;
+}
+
+// A message about the settings file under the toolbar, with a button to dismiss it.
+export component SettingsNotice inherits Rectangle {
+    in property <string> text;
+    callback dismissed;
+
+    height: 40px;
+    background: ChromePalette.notice-background;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 10px;
+        spacing: 12px;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: ChromePalette.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        Rectangle {
+            width: 76px;
+            y: 6px;
+            height: 28px;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: ChromePalette.notice-border;
+            background: dismiss-touch.has-hover ? ChromePalette.button-hover : transparent;
+
+            Text {
+                text: "Dismiss";
+                color: ChromePalette.text;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            dismiss-touch := TouchArea {
+                clicked => {
+                    root.dismissed();
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: ChromePalette.notice-border;
+    }
+}
+
+export { SearchEngineRow, SettingsWindow } from "settings-window.slint";

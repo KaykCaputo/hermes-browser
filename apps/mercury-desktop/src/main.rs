@@ -28,6 +28,7 @@ mod profile;
 mod rendering;
 mod screen_metrics;
 mod screenshot;
+mod settings;
 mod shortcuts;
 mod shutdown;
 mod ui_sync;
@@ -80,6 +81,10 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
             return Ok(ExitCode::from(EXIT_PROFILE_IN_USE));
         }
     };
+    // settings-ui: loaded under the profile's lock; GPU canvas and experimental features apply now.
+    let settings =
+        settings::SettingsHandle::start(profile.paths.as_ref().map(|p| p.root.as_path()));
+    let options = settings::launch_options(options, &settings);
     select_hardware_accelerated_backend(options.is_automated())?;
 
     let window = MainWindow::new()?;
@@ -89,6 +94,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
             .set_size(LogicalSize::new(width as f32, height as f32));
     }
     let controller = Rc::new(RefCell::new(BrowserController::default()));
+    // settings-ui: search engine, zoom and colour scheme before any address is resolved.
+    settings::prepare_controller(&settings, &mut controller.borrow_mut(), &options.urls);
     open_start_up_tabs(&mut controller.borrow_mut(), &options.urls);
     let web_view_focused = Rc::new(Cell::new(false));
 
@@ -98,6 +105,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&web_view_focused),
         runtime_options(&options, &profile),
     )?;
+    // settings-ui
+    settings::connect(&settings, &window, &controller);
     sync_ui(&window, &controller.borrow());
     connect_ui_callbacks(
         &window,
@@ -132,6 +141,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     // Nothing may capture, pump or render while the engine shuts down, and the engine must be
     // gone before the window (and the renderer whose device Servo uses) is destroyed.
     drop(screenshot_timer);
+    // settings-ui: last settings write and the clear-history-on-exit hook.
+    settings.finish_run();
     shut_down_engine(exit_code);
     drop(window);
 
