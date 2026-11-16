@@ -28,6 +28,11 @@ pub(crate) enum ExitBy {
     CloseRequest,
     /// `slint::quit_event_loop()`, as the quit shortcut calls it.
     Quit,
+    /// macOS: `-[NSApplication terminate:]`, as a Quit menu item sends it.
+    Terminate,
+    /// macOS: a quit Apple event to this process whose reason is `kAEReallyLogOut`, as an
+    /// application gets when the user logs out.
+    LogOut,
 }
 
 impl Default for LaunchOptions {
@@ -64,7 +69,11 @@ pub(crate) enum CliOutcome {
     PrintAndExit { text: String, code: i32 },
 }
 
-const EXIT_BY_VALUES: &str = "close-request|quit";
+const EXIT_BY_VALUES: &str = if cfg!(target_os = "macos") {
+    "close-request|quit|terminate|logout"
+} else {
+    "close-request|quit"
+};
 
 const DEFAULT_SCREENSHOT_DELAY: Duration = Duration::from_millis(1000);
 
@@ -92,9 +101,13 @@ Options:
 Diagnostics:
   --exit-after <milliseconds>      Request a quit from inside the browser this long after
                                    start-up (a screenshot run then exits 1: no screenshot)
-  --exit-by close-request|quit     How --exit-after quits: through the window's close
-                                   request, as the close button does, or as the quit
-                                   shortcut does (default quit)
+  --exit-by close-request|quit|terminate|logout
+                                   How --exit-after quits: through the window's close
+                                   request, as the close button does; as the quit
+                                   shortcut does (default quit); on macOS only, through
+                                   the system's terminate request, as a Quit menu item
+                                   sends it (terminate), or through the quit Apple event
+                                   of a log-out, sent to this process only (logout)
 
 Exit status:
   0  Success
@@ -196,6 +209,8 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
                 exit_by = Some(match value.as_str() {
                     "close-request" => ExitBy::CloseRequest,
                     "quit" => ExitBy::Quit,
+                    "terminate" if cfg!(target_os = "macos") => ExitBy::Terminate,
+                    "logout" if cfg!(target_os = "macos") => ExitBy::LogOut,
                     _ => {
                         return Err(format!(
                             "invalid --exit-by '{value}': expected {EXIT_BY_VALUES}"
@@ -635,6 +650,24 @@ mod tests {
     }
 
     #[test]
+    fn exit_by_terminate_and_logout_are_accepted_on_macos_only() {
+        for (value, expected) in [("terminate", ExitBy::Terminate), ("logout", ExitBy::LogOut)] {
+            let outcome = parse(&["--exit-after", "0", "--exit-by", value]);
+            if cfg!(target_os = "macos") {
+                let CliOutcome::Run(options) = outcome else {
+                    panic!("--exit-by {value} should run the browser on macOS");
+                };
+                assert_eq!(
+                    options.exit_request.map(|request| request.by),
+                    Some(expected)
+                );
+            } else {
+                assert_eq!(exit_code(&outcome), Some(2), "{value}");
+            }
+        }
+    }
+
+    #[test]
     fn exit_after_works_with_a_screenshot() {
         let CliOutcome::Run(options) = parse(&[
             "--screenshot",
@@ -696,7 +729,7 @@ mod tests {
             .map(|(_, rest)| rest)
             .expect("a diagnostics heading");
         assert!(diagnostics.contains("--exit-after <milliseconds>"));
-        assert!(diagnostics.contains("--exit-by close-request|quit"));
+        assert!(diagnostics.contains("--exit-by close-request|quit|terminate|logout"));
     }
 
     #[test]

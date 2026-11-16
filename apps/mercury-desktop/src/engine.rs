@@ -30,6 +30,8 @@ pub(crate) const MAX_COMMANDS_PER_FRAME: usize = 128;
 /// How long the window may go without its first render before one is forced offscreen.
 const GRAPHICS_BOOTSTRAP_DELAY: Duration = Duration::from_millis(300);
 const GRAPHICS_BOOTSTRAP_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+/// How long the shutdown watchdog's own clean-up may take before the process ends regardless.
+const WATCHDOG_CLEAN_UP_GRACE: Duration = Duration::from_secs(1);
 
 thread_local! {
     /// Lets Servo's waker, whose callback must be `Send`, reach the engine on the main thread.
@@ -566,18 +568,31 @@ impl EngineState {
 
         release_in_order(self.take_parts(), |runtime| {
             let watchdog = Watchdog::start(ENGINE_SHUTDOWN_TIMEOUT, move || {
+                let code = crate::signals::received().map_or(
+                    i32::from(exit_code_if_stuck),
+                    crate::signals::exit_status_for,
+                );
+                // The clean-up below takes locks (the logger's among them) that a stuck engine
+                // may hold; whatever happens to it, the process ends shortly.
+                let _backstop = std::thread::Builder::new()
+                    .name("shutdown watchdog backstop".to_owned())
+                    .spawn(move || {
+                        std::thread::sleep(WATCHDOG_CLEAN_UP_GRACE);
+                        // SAFETY: `_exit` ends the process at once; nothing runs after it.
+                        unsafe { libc::_exit(code) }
+                    });
+                eprintln!(
+                    "mercury-browser: Servo did not shut down within {} seconds; exiting without it",
+                    ENGINE_SHUTDOWN_TIMEOUT.as_secs()
+                );
+                // `_exit` skips destructors, which the main thread is in the middle of
+                // running; the temporary profile holds this run's cookies.
+                crate::profile::remove_temporary_profile();
                 log::error!(
                     "Servo did not shut down within {} seconds; exiting without it",
                     ENGINE_SHUTDOWN_TIMEOUT.as_secs()
                 );
                 log::logger().flush();
-                // `_exit` skips destructors, which the main thread is in the middle of
-                // running; the temporary profile holds this run's cookies.
-                crate::profile::remove_temporary_profile();
-                let code = crate::signals::received().map_or(
-                    i32::from(exit_code_if_stuck),
-                    crate::signals::exit_status_for,
-                );
                 // SAFETY: `_exit` ends the process at once; nothing runs after it.
                 unsafe { libc::_exit(code) }
             });

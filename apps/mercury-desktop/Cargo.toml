@@ -37,7 +37,9 @@ ash.workspace = true
 objc2 = "0.6.3"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
+    "NSApplication",
     "NSGraphics",
+    "NSResponder",
     "NSScreen",
 ] }
 objc2-foundation = { workspace = true, features = [

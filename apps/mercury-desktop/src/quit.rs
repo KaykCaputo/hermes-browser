@@ -36,11 +36,21 @@ pub(crate) fn start_exit_request(window: &MainWindow, request: ExitRequest) -> T
             match request.by {
                 ExitBy::CloseRequest => "close request",
                 ExitBy::Quit => "quit",
+                ExitBy::Terminate => "terminate request",
+                ExitBy::LogOut => "log-out quit event",
             },
             unix_time_ms()
         );
         match request.by {
             ExitBy::Quit => request_quit(),
+            #[cfg(target_os = "macos")]
+            ExitBy::Terminate => crate::macos_terminate::send_terminate(),
+            #[cfg(target_os = "macos")]
+            ExitBy::LogOut => crate::macos_terminate::send_log_out_quit_event(),
+            #[cfg(not(target_os = "macos"))]
+            ExitBy::Terminate | ExitBy::LogOut => {
+                log::warn!("diagnostics: this exit request needs macOS")
+            }
             ExitBy::CloseRequest => {
                 let Some(window) = weak_window.upgrade() else {
                     return;
