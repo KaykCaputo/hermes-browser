@@ -94,6 +94,8 @@ pub struct ServoRuntime {
     /// The user-origin style sheet every web view shares. Servo's `UserContentManager` holds a
     /// handle to Servo of its own, so this field must stay before `after_engine_cleanup`.
     user_content: Rc<servo::UserContentManager>,
+    /// The `User-Agent` pages are loaded with; downloads send the same. (downloads)
+    user_agent: String,
     /// Declared after `inner` and `user_content`, the two fields that hold a handle to Servo,
     /// so it is dropped after the last of them. Every web view's delegate holds a clone too;
     /// see `AfterEngineCleanup`.
@@ -114,9 +116,11 @@ impl ServoRuntime {
         let options = mercury_options(runtime_options.config_dir.clone());
         let multiprocess_enabled = options.multiprocess;
         let sandbox_enabled = options.sandbox;
+        let preferences = mercury_preferences(&runtime_options);
+        let user_agent = preferences.user_agent.clone(); // downloads
         let inner = ServoBuilder::default()
             .opts(options)
-            .preferences(mercury_preferences(&runtime_options))
+            .preferences(preferences)
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
@@ -149,6 +153,7 @@ impl ServoRuntime {
             content_blocker,
             screen_metrics: Rc::default(),
             user_content,
+            user_agent,
             after_engine_cleanup,
         }
     }
@@ -195,6 +200,19 @@ impl ServoRuntime {
     pub fn spin_event_loop(&self) {
         self.redraw_waker.acknowledge();
         self.inner.spin_event_loop();
+    }
+
+    // downloads
+    /// The `User-Agent` the engine sends.
+    pub fn user_agent(&self) -> &str {
+        &self.user_agent
+    }
+
+    /// The cookies the engine would send with an HTTP request to `url`, as name and value
+    /// pairs (`HttpOnly` ones included). Asks the network thread and waits for the answer;
+    /// empty if it does not answer.
+    pub fn cookies_for_url(&self, url: &Url) -> Vec<(String, String)> {
+        crate::downloads::cookies_for_url(&self.inner, url)
     }
 }
 
