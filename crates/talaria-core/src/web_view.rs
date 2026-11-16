@@ -1,5 +1,6 @@
 use crate::browser::{BrowserCommand, PointerButton, PointerButtonAction};
 use crate::{ColorScheme, ImeInput, KeyboardInput};
+use crate::{PageRequestAnswer, PageRequestId};
 
 pub trait WebView {
     type Error;
@@ -25,6 +26,12 @@ pub trait WebView {
     fn set_color_scheme(&mut self, scheme: ColorScheme) -> Result<(), Self::Error>;
     fn exit_fullscreen(&mut self) -> Result<(), Self::Error>;
     fn pointer_left(&mut self) -> Result<(), Self::Error>;
+    // dialogs
+    fn answer_page_request(
+        &mut self,
+        id: PageRequestId,
+        answer: PageRequestAnswer,
+    ) -> Result<(), Self::Error>;
 }
 
 pub fn dispatch_command<W>(web_view: &mut W, command: BrowserCommand) -> Result<(), W::Error>
@@ -57,5 +64,8 @@ where
         BrowserCommand::SetColorScheme(scheme) => web_view.set_color_scheme(scheme),
         BrowserCommand::ExitFullscreen => web_view.exit_fullscreen(),
         BrowserCommand::PointerLeft => web_view.pointer_left(),
+        BrowserCommand::AnswerPageRequest { id, answer } => {
+            web_view.answer_page_request(id, answer)
+        }
     }
 }

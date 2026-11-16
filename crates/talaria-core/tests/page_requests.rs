@@ -1,0 +1,840 @@
+use std::time::Duration;
+
+use talaria_core::{
+    BrowserCommand, BrowserController, BrowserEvent, HttpCredentials, KeyLocation, KeyState,
+    KeyboardInput, KeyboardModifiers, LoadState, PagePermission, PageRequest, PageRequestAnswer,
+    PageRequestId, PageRequestKind, PageRequestReply, PermissionDecision, PermissionDecisions,
+    PointerButton, PointerButtonAction, SessionPermissionDecisions, TabCommand, TabId,
+};
+
+const PAGE: &str = "https://example.com/form";
+
+fn ready_controller() -> (BrowserController, TabId) {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+    commit_page(&mut controller, tab_id, PAGE);
+    (controller, tab_id)
+}
+
+fn commit_page(controller: &mut BrowserController, tab_id: TabId, url: &str) {
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::AddressChanged {
+            url: url.to_owned(),
+        },
+    );
+}
+
+fn request(id: u64, kind: PageRequestKind, at_ms: u64) -> PageRequest {
+    PageRequest {
+        id: PageRequestId::new(id),
+        url: PAGE.to_owned(),
+        kind,
+        received_at: Duration::from_millis(at_ms),
+    }
+}
+
+fn alert(id: u64, at_ms: u64) -> PageRequest {
+    request(
+        id,
+        PageRequestKind::Alert {
+            message: format!("alert {id}"),
+        },
+        at_ms,
+    )
+}
+
+fn receive(controller: &mut BrowserController, tab_id: TabId, request: PageRequest) {
+    assert!(controller.handle_event(tab_id, BrowserEvent::PageRequested(request)));
+}
+
+fn answer(id: u64, answer: PageRequestAnswer) -> BrowserCommand {
+    BrowserCommand::AnswerPageRequest {
+        id: PageRequestId::new(id),
+        answer,
+    }
+}
+
+fn drain(controller: &mut BrowserController) -> Vec<TabCommand> {
+    std::iter::from_fn(|| controller.next_command()).collect()
+}
+
+fn pending_id(controller: &BrowserController, tab_id: TabId) -> Option<u64> {
+    controller
+        .pending_page_request(tab_id)
+        .map(|pending| pending.id().value())
+}
+
+fn reply(answer: PageRequestAnswer) -> PageRequestReply {
+    PageRequestReply::new(answer)
+}
+
+#[test]
+fn requests_are_shown_one_at_a_time_in_arrival_order() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+    receive(&mut controller, tab_id, alert(2, 10));
+
+    assert_eq!(pending_id(&controller, tab_id), Some(1));
+    assert!(controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept),
+        Duration::from_millis(20),
+    ));
+    assert_eq!(pending_id(&controller, tab_id), Some(2));
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(1, PageRequestAnswer::Accept)
+        )]
+    );
+}
+
+#[test]
+fn a_request_is_answered_exactly_once() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+
+    assert!(controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept),
+        Duration::ZERO,
+    ));
+    assert!(!controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Decline),
+        Duration::ZERO,
+    ));
+    assert_eq!(drain(&mut controller).len(), 1);
+}
+
+#[test]
+fn an_answer_goes_to_the_tab_that_asked() {
+    let (mut controller, first_tab) = ready_controller();
+    let second_tab = controller.open_tab();
+    commit_page(&mut controller, second_tab, PAGE);
+    receive(&mut controller, first_tab, alert(1, 0));
+    receive(&mut controller, second_tab, alert(2, 0));
+
+    assert!(!controller.answer_page_request(
+        second_tab,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept),
+        Duration::ZERO,
+    ));
+    assert!(controller.answer_page_request(
+        first_tab,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept),
+        Duration::ZERO,
+    ));
+
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            first_tab,
+            answer(1, PageRequestAnswer::Accept)
+        )]
+    );
+    assert_eq!(pending_id(&controller, second_tab), Some(2));
+}
+
+#[test]
+fn requests_of_a_background_tab_wait_for_that_tab() {
+    let (mut controller, first_tab) = ready_controller();
+    let second_tab = controller.open_tab();
+    commit_page(&mut controller, second_tab, PAGE);
+    assert_eq!(controller.active_tab_id(), second_tab);
+
+    receive(&mut controller, first_tab, alert(1, 0));
+
+    assert_eq!(pending_id(&controller, second_tab), None);
+    assert_eq!(pending_id(&controller, first_tab), Some(1));
+    assert!(drain(&mut controller).is_empty());
+}
+
+#[test]
+fn navigating_reloading_or_traversing_drops_the_tabs_requests_first() {
+    for command in [
+        BrowserCommand::Reload,
+        BrowserCommand::GoBack,
+        BrowserCommand::GoForward,
+        BrowserCommand::Navigate {
+            url: "https://other.test/".to_owned(),
+        },
+    ] {
+        let (mut controller, tab_id) = ready_controller();
+        receive(&mut controller, tab_id, alert(1, 0));
+        receive(
+            &mut controller,
+            tab_id,
+            request(2, PageRequestKind::Authentication { for_proxy: false }, 0),
+        );
+
+        controller.queue_command(command.clone());
+
+        assert_eq!(pending_id(&controller, tab_id), None);
+        assert_eq!(
+            drain(&mut controller),
+            vec![
+                TabCommand::new(tab_id, answer(1, PageRequestAnswer::Discard)),
+                TabCommand::new(tab_id, answer(2, PageRequestAnswer::Discard)),
+                TabCommand::new(tab_id, command),
+            ]
+        );
+    }
+}
+
+#[test]
+fn the_address_bar_navigation_drops_the_tabs_requests() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+
+    controller
+        .queue_navigation("other.test")
+        .expect("the address resolves");
+
+    assert_eq!(pending_id(&controller, tab_id), None);
+    assert_eq!(
+        drain(&mut controller)[0],
+        TabCommand::new(tab_id, answer(1, PageRequestAnswer::Discard))
+    );
+}
+
+#[test]
+fn a_new_document_drops_the_requests_of_the_previous_one() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(
+        &mut controller,
+        tab_id,
+        request(1, PageRequestKind::Authentication { for_proxy: false }, 0),
+    );
+
+    controller.handle_event(tab_id, BrowserEvent::PageLoadStarted);
+
+    assert_eq!(pending_id(&controller, tab_id), None);
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(1, PageRequestAnswer::Discard)
+        )]
+    );
+}
+
+#[test]
+fn a_crash_drops_the_tabs_requests() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+
+    controller.handle_event(
+        tab_id,
+        BrowserEvent::LoadStateChanged {
+            state: LoadState::Failed {
+                message: "crashed".to_owned(),
+            },
+        },
+    );
+
+    assert_eq!(pending_id(&controller, tab_id), None);
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(1, PageRequestAnswer::Discard)
+        )]
+    );
+}
+
+#[test]
+fn closing_a_tab_forgets_its_requests_and_their_queued_answers() {
+    let (mut controller, first_tab) = ready_controller();
+    let second_tab = controller.open_tab();
+    receive(&mut controller, first_tab, alert(1, 0));
+    receive(&mut controller, first_tab, alert(2, 0));
+    assert!(controller.answer_page_request(
+        first_tab,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept),
+        Duration::ZERO,
+    ));
+
+    assert!(controller.close_tab(first_tab));
+
+    // The engine drops the closed tab's web view, which drops request 2 with its default.
+    assert_eq!(pending_id(&controller, first_tab), None);
+    assert!(drain(&mut controller).is_empty());
+    assert_eq!(controller.active_tab_id(), second_tab);
+}
+
+/// A tab whose web view is loading its first page, which has not committed yet.
+fn loading_first_page() -> (BrowserController, TabId) {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+    controller
+        .set_initial_address(tab_id, "a.test")
+        .expect("the address resolves");
+    assert!(controller.take_initial_url(tab_id).is_some());
+    (controller, tab_id)
+}
+
+#[test]
+fn a_sign_in_for_a_first_page_that_has_not_committed_is_answered_at_once() {
+    let (mut controller, tab_id) = loading_first_page();
+    receive(
+        &mut controller,
+        tab_id,
+        request(1, PageRequestKind::Authentication { for_proxy: false }, 0),
+    );
+
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Decline),
+        Duration::ZERO,
+    );
+
+    // The page cannot commit before the engine has the answer, so it must not wait for that.
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(1, PageRequestAnswer::Decline)
+        )]
+    );
+}
+
+#[test]
+fn a_replaced_web_view_starts_without_the_old_ones_requests() {
+    let (mut controller, tab_id) = loading_first_page();
+    receive(
+        &mut controller,
+        tab_id,
+        request(1, PageRequestKind::Authentication { for_proxy: false }, 0),
+    );
+
+    // The engine cannot navigate a page that never committed, so it replaces the web view,
+    // which drops the old one's requests with their defaults.
+    controller
+        .queue_navigation("b.test")
+        .expect("the address resolves");
+
+    assert_eq!(pending_id(&controller, tab_id), None);
+    assert!(drain(&mut controller).is_empty());
+}
+
+#[test]
+fn the_first_dialog_does_not_offer_to_block_further_dialogs() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+
+    let pending = controller
+        .pending_page_request(tab_id)
+        .expect("the alert is pending");
+    assert!(!pending.offers_to_block_dialogs());
+}
+
+#[test]
+fn a_dialog_soon_after_the_previous_one_offers_to_block_further_dialogs() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept),
+        Duration::from_secs(10),
+    );
+    receive(&mut controller, tab_id, alert(2, 12_999));
+
+    assert!(
+        controller
+            .pending_page_request(tab_id)
+            .expect("the second alert is pending")
+            .offers_to_block_dialogs()
+    );
+}
+
+#[test]
+fn a_dialog_long_after_the_previous_one_does_not_offer_to_block() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept),
+        Duration::from_secs(10),
+    );
+    receive(&mut controller, tab_id, alert(2, 13_000));
+
+    assert!(
+        !controller
+            .pending_page_request(tab_id)
+            .expect("the second alert is pending")
+            .offers_to_block_dialogs()
+    );
+}
+
+#[test]
+fn a_dialog_with_more_waiting_behind_it_offers_to_block() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+    receive(&mut controller, tab_id, alert(2, 0));
+
+    assert!(
+        controller
+            .pending_page_request(tab_id)
+            .expect("the first alert is pending")
+            .offers_to_block_dialogs()
+    );
+}
+
+#[test]
+fn blocking_dialogs_answers_the_pages_later_dialogs_with_their_defaults() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+    receive(&mut controller, tab_id, alert(2, 0));
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept).blocking_further_dialogs(),
+        Duration::from_millis(5),
+    );
+    receive(
+        &mut controller,
+        tab_id,
+        request(
+            3,
+            PageRequestKind::Confirm {
+                message: "again?".to_owned(),
+            },
+            6,
+        ),
+    );
+    receive(
+        &mut controller,
+        tab_id,
+        request(4, PageRequestKind::LeavePage, 7),
+    );
+
+    assert_eq!(pending_id(&controller, tab_id), None);
+    assert_eq!(
+        drain(&mut controller),
+        vec![
+            TabCommand::new(tab_id, answer(2, PageRequestAnswer::Discard)),
+            TabCommand::new(tab_id, answer(1, PageRequestAnswer::Accept)),
+            TabCommand::new(tab_id, answer(3, PageRequestAnswer::Discard)),
+            TabCommand::new(tab_id, answer(4, PageRequestAnswer::Discard)),
+        ]
+    );
+}
+
+#[test]
+fn blocking_dialogs_does_not_block_permission_or_sign_in_requests() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept).blocking_further_dialogs(),
+        Duration::ZERO,
+    );
+    receive(
+        &mut controller,
+        tab_id,
+        request(2, PageRequestKind::Authentication { for_proxy: false }, 1),
+    );
+
+    assert_eq!(pending_id(&controller, tab_id), Some(2));
+}
+
+#[test]
+fn dialogs_are_allowed_again_after_the_page_navigates() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(&mut controller, tab_id, alert(1, 0));
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept).blocking_further_dialogs(),
+        Duration::ZERO,
+    );
+
+    controller.handle_event(tab_id, BrowserEvent::PageLoadStarted);
+    receive(&mut controller, tab_id, alert(2, 100_000));
+
+    let pending = controller
+        .pending_page_request(tab_id)
+        .expect("the new page may show dialogs");
+    assert_eq!(pending.id().value(), 2);
+    assert!(!pending.offers_to_block_dialogs());
+}
+
+fn key_down() -> KeyboardInput {
+    KeyboardInput {
+        state: KeyState::Down,
+        key: "a".to_owned(),
+        code: "KeyA".to_owned(),
+        location: KeyLocation::Standard,
+        modifiers: KeyboardModifiers::default(),
+        repeat: false,
+        is_composing: false,
+    }
+}
+
+#[test]
+fn leaving_a_page_the_user_never_interacted_with_is_allowed_without_asking() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(
+        &mut controller,
+        tab_id,
+        request(1, PageRequestKind::LeavePage, 0),
+    );
+
+    assert_eq!(pending_id(&controller, tab_id), None);
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(1, PageRequestAnswer::Accept)
+        )]
+    );
+}
+
+#[test]
+fn leaving_a_page_after_a_click_or_a_key_press_asks() {
+    for interaction in [
+        BrowserCommand::PointerButton {
+            action: PointerButtonAction::Down,
+            button: PointerButton::Left,
+            x: 1.0,
+            y: 1.0,
+        },
+        BrowserCommand::KeyboardInput(key_down()),
+    ] {
+        let (mut controller, tab_id) = ready_controller();
+        controller.queue_command(interaction);
+        drain(&mut controller);
+
+        receive(
+            &mut controller,
+            tab_id,
+            request(1, PageRequestKind::LeavePage, 0),
+        );
+
+        assert_eq!(pending_id(&controller, tab_id), Some(1));
+        assert!(drain(&mut controller).is_empty());
+    }
+}
+
+#[test]
+fn moving_or_scrolling_is_not_an_interaction_and_a_new_document_forgets_one() {
+    let (mut controller, tab_id) = ready_controller();
+    controller.queue_command(BrowserCommand::PointerMoved { x: 1.0, y: 1.0 });
+    controller.queue_command(BrowserCommand::Scrolled {
+        delta_x: 0.0,
+        delta_y: 4.0,
+        x: 1.0,
+        y: 1.0,
+    });
+    receive(
+        &mut controller,
+        tab_id,
+        request(1, PageRequestKind::LeavePage, 0),
+    );
+    assert_eq!(pending_id(&controller, tab_id), None);
+
+    controller.queue_command(BrowserCommand::KeyboardInput(key_down()));
+    controller.handle_event(tab_id, BrowserEvent::PageLoadStarted);
+    receive(
+        &mut controller,
+        tab_id,
+        request(2, PageRequestKind::LeavePage, 0),
+    );
+    assert_eq!(pending_id(&controller, tab_id), None);
+}
+
+fn permission(id: u64, url: &str, permission: PagePermission) -> PageRequest {
+    PageRequest {
+        id: PageRequestId::new(id),
+        url: url.to_owned(),
+        kind: PageRequestKind::Permission(permission),
+        received_at: Duration::ZERO,
+    }
+}
+
+#[test]
+fn notifications_are_denied_without_asking() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(
+        &mut controller,
+        tab_id,
+        permission(1, PAGE, PagePermission::Notifications),
+    );
+
+    assert_eq!(pending_id(&controller, tab_id), None);
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(1, PageRequestAnswer::Decline)
+        )]
+    );
+}
+
+#[test]
+fn a_remembered_permission_decision_answers_later_requests_from_the_site() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(
+        &mut controller,
+        tab_id,
+        permission(1, PAGE, PagePermission::PersistentStorage),
+    );
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept).remembering_for_site(),
+        Duration::ZERO,
+    );
+    drain(&mut controller);
+
+    receive(
+        &mut controller,
+        tab_id,
+        permission(
+            2,
+            "https://example.com/other",
+            PagePermission::PersistentStorage,
+        ),
+    );
+    receive(
+        &mut controller,
+        tab_id,
+        permission(3, "https://other.test/", PagePermission::PersistentStorage),
+    );
+    receive(
+        &mut controller,
+        tab_id,
+        permission(4, PAGE, PagePermission::Geolocation),
+    );
+
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(2, PageRequestAnswer::Accept)
+        )]
+    );
+    assert_eq!(pending_id(&controller, tab_id), Some(3));
+}
+
+#[test]
+fn an_unremembered_permission_decision_asks_again() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(
+        &mut controller,
+        tab_id,
+        permission(1, PAGE, PagePermission::PersistentStorage),
+    );
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Decline),
+        Duration::ZERO,
+    );
+    receive(
+        &mut controller,
+        tab_id,
+        permission(2, PAGE, PagePermission::PersistentStorage),
+    );
+
+    assert_eq!(pending_id(&controller, tab_id), Some(2));
+}
+
+#[test]
+fn remembering_a_decision_answers_the_same_request_waiting_in_other_tabs() {
+    let (mut controller, first_tab) = ready_controller();
+    let second_tab = controller.open_tab();
+    commit_page(&mut controller, second_tab, PAGE);
+    receive(
+        &mut controller,
+        first_tab,
+        permission(1, PAGE, PagePermission::PersistentStorage),
+    );
+    receive(
+        &mut controller,
+        second_tab,
+        permission(2, PAGE, PagePermission::PersistentStorage),
+    );
+
+    controller.answer_page_request(
+        first_tab,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Decline).remembering_for_site(),
+        Duration::ZERO,
+    );
+
+    assert_eq!(pending_id(&controller, second_tab), None);
+    assert_eq!(
+        drain(&mut controller),
+        vec![
+            TabCommand::new(first_tab, answer(1, PageRequestAnswer::Decline)),
+            TabCommand::new(second_tab, answer(2, PageRequestAnswer::Decline)),
+        ]
+    );
+}
+
+#[test]
+fn decisions_for_pages_without_an_origin_are_not_remembered() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+    commit_page(&mut controller, tab_id, "file:///tmp/page.html");
+    receive(
+        &mut controller,
+        tab_id,
+        permission(
+            1,
+            "file:///tmp/page.html",
+            PagePermission::PersistentStorage,
+        ),
+    );
+    controller.answer_page_request(
+        tab_id,
+        PageRequestId::new(1),
+        reply(PageRequestAnswer::Accept).remembering_for_site(),
+        Duration::ZERO,
+    );
+    receive(
+        &mut controller,
+        tab_id,
+        permission(
+            2,
+            "file:///tmp/page.html",
+            PagePermission::PersistentStorage,
+        ),
+    );
+
+    assert_eq!(pending_id(&controller, tab_id), Some(2));
+}
+
+#[derive(Debug)]
+struct AlwaysBlock;
+
+impl PermissionDecisions for AlwaysBlock {
+    fn decision(&self, _origin: &str, _permission: PagePermission) -> Option<PermissionDecision> {
+        Some(PermissionDecision::Block)
+    }
+
+    fn remember(&mut self, _origin: &str, _permission: PagePermission, _: PermissionDecision) {}
+}
+
+#[test]
+fn the_permission_store_can_be_replaced() {
+    let (mut controller, tab_id) = ready_controller();
+    controller.set_permission_decisions(Box::new(AlwaysBlock));
+    receive(
+        &mut controller,
+        tab_id,
+        permission(1, PAGE, PagePermission::PersistentStorage),
+    );
+
+    assert_eq!(
+        drain(&mut controller),
+        vec![TabCommand::new(
+            tab_id,
+            answer(1, PageRequestAnswer::Decline)
+        )]
+    );
+}
+
+#[test]
+fn the_session_store_keeps_decisions_per_origin_and_permission() {
+    let mut store = SessionPermissionDecisions::default();
+    store.remember(
+        "https://a.test",
+        PagePermission::Geolocation,
+        PermissionDecision::Allow,
+    );
+    store.remember(
+        "https://a.test",
+        PagePermission::Geolocation,
+        PermissionDecision::Block,
+    );
+
+    assert_eq!(
+        store.decision("https://a.test", PagePermission::Geolocation),
+        Some(PermissionDecision::Block)
+    );
+    assert_eq!(
+        store.decision("https://a.test", PagePermission::Camera),
+        None
+    );
+    assert_eq!(
+        store.decision("https://b.test", PagePermission::Geolocation),
+        None
+    );
+}
+
+#[test]
+fn messages_are_shown_without_control_or_direction_override_characters() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(
+        &mut controller,
+        tab_id,
+        request(
+            1,
+            PageRequestKind::Prompt {
+                message: "Pay\u{202E}moc.elgoog\u{202C}\r\nnow\u{0007}\ttoday".to_owned(),
+                default_value: "line\none\u{2066}".to_owned(),
+            },
+            0,
+        ),
+    );
+
+    let pending = controller
+        .pending_page_request(tab_id)
+        .expect("the prompt is pending");
+    assert_eq!(
+        pending.kind(),
+        &PageRequestKind::Prompt {
+            message: "Paymoc.elgoog\nnow today".to_owned(),
+            default_value: "line one".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn the_pending_request_names_the_origin_it_came_from() {
+    let (mut controller, tab_id) = ready_controller();
+    receive(
+        &mut controller,
+        tab_id,
+        PageRequest {
+            id: PageRequestId::new(1),
+            url: "http://127.0.0.1:8123/private/".to_owned(),
+            kind: PageRequestKind::Authentication { for_proxy: false },
+            received_at: Duration::ZERO,
+        },
+    );
+
+    let pending = controller
+        .pending_page_request(tab_id)
+        .expect("the sign-in request is pending");
+    assert_eq!(pending.origin().label(), "127.0.0.1:8123");
+    assert!(!pending.origin().is_secure());
+}
+
+#[test]
+fn credentials_never_appear_in_debug_output() {
+    let credentials = HttpCredentials::new("alice".to_owned(), "hunter2".to_owned());
+    let command = BrowserCommand::AnswerPageRequest {
+        id: PageRequestId::new(1),
+        answer: PageRequestAnswer::Credentials(credentials.clone()),
+    };
+
+    assert_eq!(credentials.username(), "alice");
+    assert_eq!(credentials.password(), "hunter2");
+    assert!(!format!("{command:?}").contains("hunter2"));
+}

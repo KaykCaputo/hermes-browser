@@ -1,4 +1,5 @@
 import { Palette } from "std-widgets.slint";
+import { PageRequestSheet, PageRequestStyle, PageRequestView, PermissionPrompt } from "dialogs/page-requests.slint";
 
 export enum WebViewPointerButton {
     left,
@@ -317,6 +318,14 @@ export component MainWindow inherits Window {
             ),
         );
     }
+
+    // --- dialogs ---
+    // The active tab's oldest unanswered page request (style none when there is none).
+    in property <PageRequestView> page-request;
+    // id, accepted, text (prompt value or user name), password, checked (block dialogs or
+    // remember for the site).
+    callback page-request-answered(int, bool, string, string, bool);
+    // --- end dialogs ---
 
     title: page-title + " — Mercury Browser";
     icon: @image-url("../../../apps/mercury-desktop/resources/mercury-browser.svg");
@@ -719,6 +728,25 @@ export component MainWindow inherits Window {
                     vertical-alignment: center;
                     overflow: elide;
                     wrap: no-wrap;
+                }
+            }
+
+            // dialogs
+            if root.page-request.style != PageRequestStyle.none && root.page-request.style != PageRequestStyle.permission: PageRequestSheet {
+                request: root.page-request;
+                may-take-focus: !root.text-input-focused;
+                answered(id, accepted, text, password, checked) => {
+                    root.page-request-answered(id, accepted, text, password, checked);
+                }
+            }
+
+            // dialogs
+            if root.page-request.style == PageRequestStyle.permission: PermissionPrompt {
+                request: root.page-request;
+                may-take-focus: !root.text-input-focused;
+                anchor-x: address-input.absolute-position.x - 14px - web-view-area.absolute-position.x;
+                answered(id, accepted, checked) => {
+                    root.page-request-answered(id, accepted, "", "", checked);
                 }
             }
         }

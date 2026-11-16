@@ -10,3 +10,9 @@ slint.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true
+
+# Headless rendering of the dialog components in `tests/page_request_render.rs`. Dev-only, so the
+# application's Slint features are unchanged.
+[dev-dependencies]
+image.workspace = true
+slint = { workspace = true, features = ["renderer-software"] }

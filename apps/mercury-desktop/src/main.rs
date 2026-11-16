@@ -21,6 +21,7 @@ mod crash_handler;
 mod engine;
 mod keyboard;
 mod keyutils;
+mod page_requests; // dialogs
 mod panic_hook;
 #[cfg(target_os = "macos")]
 mod platform_macos;

@@ -14,12 +14,16 @@ use servo::{
     WebViewBuilder,
 };
 use talaria_core::{BrowserEvent, LoadState, PageIcon, PointerCursor, TabEvent, TabId};
+use talaria_core::{PageRequest, PageRequestKind};
 use url::Url;
 
 use crate::adblocker::ContentBlocker;
 use crate::frame_ready::FrameReadySignal;
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
+use crate::page_requests::{
+    PendingEngineRequests, ServoPageRequest, page_permission, simple_dialog_kind,
+};
 use crate::screen::ScreenMetrics;
 use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
 use crate::{ServoWebView, ServoWebViewError};
@@ -168,6 +172,7 @@ impl ServoRuntime {
     ) -> Result<ServoWebView, ServoWebViewError> {
         let initial_url = Url::parse(initial_url)?;
         let frame_ready = FrameReadySignal::default();
+        let page_requests = Rc::new(RefCell::new(PendingEngineRequests::default()));
         let delegate = Rc::new(BrowserDelegate {
             tab_id,
             browser_event_sender: browser_event_sender.clone(),
@@ -175,6 +180,7 @@ impl ServoRuntime {
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
+            page_requests: Rc::clone(&page_requests),
             _after_engine_cleanup: self.after_engine_cleanup.clone(),
         });
 
@@ -189,7 +195,13 @@ impl ServoRuntime {
             let _send_result = browser_event_sender.send(TabEvent::new(tab_id, event));
         }
         info!("created Servo WebView for tab {}", tab_id.value());
-        Ok(ServoWebView::new(inner, frame_ready, tab_id, scale_factor))
+        Ok(ServoWebView::new(
+            inner,
+            frame_ready,
+            tab_id,
+            scale_factor,
+            page_requests,
+        ))
     }
 
     pub fn spin_event_loop(&self) {
@@ -318,6 +330,9 @@ struct BrowserDelegate {
     load_metrics: RefCell<PageLoadMetrics>,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
+    /// Dialogs, leave prompts, sign-ins and permission prompts waiting for the user; shared with
+    /// the tab's `ServoWebView`, which answers them.
+    page_requests: Rc<RefCell<PendingEngineRequests<ServoPageRequest>>>,
     /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
     _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
 }
@@ -384,6 +399,8 @@ impl servo::WebViewDelegate for BrowserDelegate {
     fn notify_load_status_changed(&self, _web_view: servo::WebView, status: LoadStatus) {
         match status {
             LoadStatus::Started => {
+                // dialogs: the previous document's requests no longer apply.
+                self.send_browser_event(BrowserEvent::PageLoadStarted);
                 self.load_metrics.borrow_mut().start(Instant::now());
                 info!("tab {}: page load started", self.tab_id.value());
             }
@@ -426,6 +443,63 @@ impl servo::WebViewDelegate for BrowserDelegate {
         for event in crash_feedback(reason, web_view.cursor(), web_view.status_text()) {
             self.send_browser_event(event);
         }
+    }
+
+    // dialogs
+    fn show_embedder_control(&self, web_view: servo::WebView, control: servo::EmbedderControl) {
+        // Other controls are not handled here: dropped, which gives the engine's default.
+        if let servo::EmbedderControl::SimpleDialog(dialog) = control {
+            let kind = simple_dialog_kind(&dialog);
+            self.forward_page_request(web_view.url(), kind, ServoPageRequest::Dialog(dialog));
+        }
+    }
+
+    fn request_unload(&self, web_view: servo::WebView, request: servo::AllowOrDenyRequest) {
+        self.forward_page_request(
+            web_view.url(),
+            PageRequestKind::LeavePage,
+            ServoPageRequest::Unload(request),
+        );
+    }
+
+    fn request_authentication(
+        &self,
+        _web_view: servo::WebView,
+        request: servo::AuthenticationRequest,
+    ) {
+        let url = Some(request.url().clone());
+        let kind = PageRequestKind::Authentication {
+            for_proxy: request.for_proxy(),
+        };
+        self.forward_page_request(url, kind, ServoPageRequest::Authentication(request));
+    }
+
+    fn request_permission(&self, web_view: servo::WebView, request: servo::PermissionRequest) {
+        // Servo does not say which frame asked; the request is shown for the tab's page.
+        let kind = PageRequestKind::Permission(page_permission(request.feature()));
+        self.forward_page_request(web_view.url(), kind, ServoPageRequest::Permission(request));
+    }
+}
+
+// dialogs
+impl BrowserDelegate {
+    /// Keeps the engine's request and tells the browser about it. A request that arrives while
+    /// the web view is closing is dropped at once, which gives the engine's default answer.
+    fn forward_page_request(
+        &self,
+        url: Option<Url>,
+        kind: PageRequestKind,
+        request: ServoPageRequest,
+    ) {
+        let Some(id) = self.page_requests.borrow_mut().insert(request) else {
+            return;
+        };
+        self.send_browser_event(BrowserEvent::PageRequested(PageRequest {
+            id,
+            url: url.map(String::from).unwrap_or_default(),
+            kind,
+            received_at: crate::page_request_clock(),
+        }));
     }
 }
 
