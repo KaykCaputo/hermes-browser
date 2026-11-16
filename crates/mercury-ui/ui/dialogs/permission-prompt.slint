@@ -1,6 +1,7 @@
 // A permission prompt hanging from the address bar: "<site> wants to …" with Block and Allow.
 // The page stays visible and usable beneath it.
 
+import { ChromePalette } from "../theme/chrome-palette.slint";
 import { PageRequestView, RequestButton } from "page-request-parts.slint";
 
 export component PermissionPrompt inherits Rectangle {
@@ -31,8 +32,8 @@ export component PermissionPrompt inherits Rectangle {
             y: 0px;
             width: 16px;
             height: 9px;
-            fill: #18212b;
-            stroke: #3a4a5c;
+            fill: ChromePalette.popup-background;
+            stroke: ChromePalette.popup-border;
             stroke-width: 1px;
             commands: "M 0 9 L 8 0 L 16 9";
         }
@@ -40,12 +41,12 @@ export component PermissionPrompt inherits Rectangle {
         Rectangle {
             y: 8px;
             height: parent.height - 8px;
-            background: #18212b;
+            background: ChromePalette.popup-background;
             border-width: 1px;
-            border-color: #3a4a5c;
+            border-color: ChromePalette.popup-border;
             border-radius: 10px;
             drop-shadow-blur: 20px;
-            drop-shadow-color: #00000090;
+            drop-shadow-color: ChromePalette.shadow;
             drop-shadow-offset-y: 4px;
 
             TouchArea { }
@@ -56,7 +57,7 @@ export component PermissionPrompt inherits Rectangle {
 
                 Text {
                     text: root.request.heading;
-                    color: #edf4fa;
+                    color: ChromePalette.text;
                     font-size: 14px;
                     font-weight: 600;
                     wrap: word-wrap;

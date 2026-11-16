@@ -13,8 +13,9 @@ use slint::{ComponentHandle, LogicalPosition, PhysicalSize, SharedString};
 
 slint::slint! {
     import { PageRequestSheet, PageRequestStyle, PageRequestView, PermissionPrompt } from "../ui/dialogs/page-requests.slint";
+    import { ChromePalette, ChromeTheme } from "../ui/theme/chrome-palette.slint";
 
-    export { PageRequestStyle, PageRequestView }
+    export { ChromePalette, ChromeTheme, PageRequestStyle, PageRequestView }
 
     // A stand-in for the browser window: toolbar, then a white page with the request above it.
     export component Harness inherits Window {
@@ -23,12 +24,12 @@ slint::slint! {
 
         width: 900px;
         height: 520px;
-        background: #0b0f14;
+        background: ChromePalette.window-background;
 
         Rectangle {
             y: 0px;
             height: 60px;
-            background: #11171f;
+            background: ChromePalette.toolbar-background;
 
             Rectangle {
                 x: 146px;
@@ -37,13 +38,13 @@ slint::slint! {
                 height: 38px;
                 border-radius: 9px;
                 border-width: 1px;
-                border-color: #29323d;
-                background: #1a222c;
+                border-color: ChromePalette.field-border;
+                background: ChromePalette.field-background;
 
                 Text {
                     x: 14px;
                     text: "http://127.0.0.1:8123/test.html";
-                    color: #edf4fa;
+                    color: ChromePalette.text;
                     font-size: 14px;
                     vertical-alignment: center;
                 }
@@ -96,6 +97,8 @@ const HEIGHT: u32 = 1040;
 type Answer = (i32, bool, String, String, bool);
 
 struct Fixture {
+    /// Put before each saved file name: the theme being rendered.
+    prefix: RefCell<String>,
     window: Rc<MinimalSoftwareWindow>,
     harness: Harness,
     answers: Rc<RefCell<Vec<Answer>>>,
@@ -124,6 +127,7 @@ impl Fixture {
             ));
         });
         Self {
+            prefix: RefCell::default(),
             window,
             harness,
             answers,
@@ -158,7 +162,8 @@ impl Fixture {
                 .iter()
                 .flat_map(|pixel| [pixel.red, pixel.green, pixel.blue, 255])
                 .collect::<Vec<_>>();
-            let path = std::path::Path::new(&directory).join(format!("{name}.png"));
+            let path = std::path::Path::new(&directory)
+                .join(format!("{}-{name}.png", self.prefix.borrow()));
             image::save_buffer(
                 &path,
                 &bytes,
@@ -235,11 +240,29 @@ fn dialog(id: i32, style: PageRequestStyle, message: &str) -> PageRequestView {
     }
 }
 
-// Slint's platform is set once per thread, so every check runs in this one test.
+/// Whether the page's white is dimmed by the scrim (in either theme).
+fn is_dimmed(pixel: (u8, u8, u8)) -> bool {
+    pixel.0 < 200 && pixel.1 < 200 && pixel.2 < 200
+}
+
+// Slint's platform is set once per thread, so every check runs in this one test, once for each
+// chrome theme. System follows the window's colour scheme, which is unknown here: the chrome then
+// stays dark.
 #[test]
 fn page_request_components_render_and_answer() {
     let fixture = Fixture::new();
+    for (theme, name) in [
+        (ChromeTheme::System, "system"),
+        (ChromeTheme::Light, "light"),
+        (ChromeTheme::Dark, "dark"),
+    ] {
+        fixture.harness.global::<ChromePalette>().set_theme(theme);
+        *fixture.prefix.borrow_mut() = name.to_owned();
+        render_and_answer(&fixture);
+    }
+}
 
+fn render_and_answer(fixture: &Fixture) {
     // Nothing pending: the page is untouched.
     fixture.show(view(0, PageRequestStyle::None));
     let pixels = fixture.save("00-none");
@@ -253,10 +276,14 @@ fn page_request_components_render_and_answer() {
     ));
     let pixels = fixture.save("01-alert");
     let dimmed = pixel_at(&pixels, 40.0, 480.0);
-    assert!(dimmed.0 < 120, "the page beneath is dimmed: {dimmed:?}");
+    assert!(is_dimmed(dimmed), "the page beneath is dimmed: {dimmed:?}");
+    let card = fixture
+        .harness
+        .global::<ChromePalette>()
+        .get_sheet_background();
     assert_eq!(
         pixel_at(&pixels, 450.0, 64.0),
-        (0x18, 0x21, 0x2b),
+        (card.red(), card.green(), card.blue()),
         "the sheet's card"
     );
     // Escape gives an alert's only answer, OK.
@@ -334,7 +361,7 @@ fn page_request_components_render_and_answer() {
     fixture.show(dialog(6, PageRequestStyle::Alert, &long));
     let pixels = fixture.save("04-long-message");
     assert!(
-        pixel_at(&pixels, 40.0, 480.0).0 < 120,
+        is_dimmed(pixel_at(&pixels, 40.0, 480.0)),
         "the sheet stays short"
     );
     fixture.key(Key::Return);
@@ -431,7 +458,7 @@ fn page_request_components_render_and_answer() {
     });
     let pixels = fixture.save("10-long-host");
     assert!(
-        pixel_at(&pixels, 40.0, 480.0).0 < 120,
+        is_dimmed(pixel_at(&pixels, 40.0, 480.0)),
         "the sheet stays inside the page"
     );
     fixture.key(Key::Escape);

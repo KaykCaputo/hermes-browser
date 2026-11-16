@@ -1,6 +1,7 @@
 // Shared pieces of the UI for requests a page makes: dialogs, the leave prompt, sign-in and
-// permission prompts. Colours follow the browser chrome in main-window.slint.
+// permission prompts. Colours come from the chrome theme, `ChromePalette`.
 
+import { ChromePalette } from "../theme/chrome-palette.slint";
 export enum PageRequestStyle {
     none,
     alert,
@@ -45,19 +46,25 @@ export component RequestButton inherits Rectangle {
     border-radius: 7px;
     // A focus ring when Tab has reached the button.
     border-width: keys.has-focus ? 2px : root.primary ? 0px : 1px;
-    border-color: keys.has-focus ? #edf4fa : #364556;
+    border-color: keys.has-focus ? ChromePalette.focus-ring : ChromePalette.field-border;
     accessible-role: button;
     accessible-label: root.label;
     accessible-action-default => {
         root.clicked();
     }
     background: root.primary
-        ? (touch.pressed ? #45a9ed : touch.has-hover ? #78caff : #62bfff)
-        : (touch.pressed ? #2b3744 : touch.has-hover ? #263241 : #1f2934);
+        ? (touch.pressed
+            ? ChromePalette.primary-button-background.darker(15%)
+            : touch.has-hover
+                ? ChromePalette.primary-button-background.brighter(10%)
+                : ChromePalette.primary-button-background)
+        : (touch.pressed
+            ? ChromePalette.button-pressed
+            : touch.has-hover ? ChromePalette.button-hover : ChromePalette.field-background);
 
     label-text := Text {
         text: root.label;
-        color: root.primary ? #09131c : #edf4fa;
+        color: root.primary ? ChromePalette.primary-button-text : ChromePalette.text;
         font-size: 13px;
         font-weight: 600;
         horizontal-alignment: center;
@@ -101,12 +108,12 @@ export component RequestCheckBox inherits Rectangle {
                 height: 16px;
                 border-radius: 4px;
                 border-width: 1px;
-                border-color: root.checked ? #62bfff : #536375;
-                background: root.checked ? #62bfff : #0f151c;
+                border-color: root.checked ? ChromePalette.accent : ChromePalette.field-border;
+                background: root.checked ? ChromePalette.accent : ChromePalette.field-background;
 
                 if root.checked: Text {
                     text: "✓";
-                    color: #09131c;
+                    color: ChromePalette.primary-button-text;
                     font-size: 12px;
                     font-weight: 700;
                     horizontal-alignment: center;
@@ -117,7 +124,7 @@ export component RequestCheckBox inherits Rectangle {
 
         Text {
             text: root.label;
-            color: #c9d3de;
+            color: ChromePalette.text;
             font-size: 12px;
             vertical-alignment: center;
             wrap: word-wrap;
@@ -148,15 +155,15 @@ export component RequestField inherits Rectangle {
     height: 32px;
     border-radius: 7px;
     border-width: 1px;
-    border-color: input.has-focus ? #62bfff : #2f3a47;
-    background: #0f151c;
+    border-color: input.has-focus ? ChromePalette.accent : ChromePalette.field-border;
+    background: ChromePalette.field-background;
 
     if root.text == "": Text {
         x: 10px;
         width: parent.width - 20px;
         height: parent.height;
         text: root.placeholder;
-        color: #6b7888;
+        color: ChromePalette.placeholder;
         font-size: 13px;
         vertical-alignment: center;
     }
@@ -166,7 +173,7 @@ export component RequestField inherits Rectangle {
         width: parent.width - 20px;
         height: parent.height;
         text <=> root.text;
-        color: #edf4fa;
+        color: ChromePalette.text;
         font-size: 13px;
         vertical-alignment: center;
         single-line: true;

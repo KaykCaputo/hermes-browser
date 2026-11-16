@@ -1,6 +1,7 @@
 // A sheet attached to the top of the content area, over a dimmed page that takes no input while
 // it is shown: JavaScript dialogs, the leave prompt and HTTP sign-in.
 
+import { ChromePalette } from "../theme/chrome-palette.slint";
 import {
     PageRequestStyle,
     PageRequestView,
@@ -58,7 +59,7 @@ export component PageRequestSheet inherits Rectangle {
 
     // The dimmed page: it takes every pointer and wheel event, so the page cannot be used.
     Rectangle {
-        background: #05080cb0;
+        background: ChromePalette.scrim;
 
         TouchArea {
             mouse-cursor: default;
@@ -75,13 +76,13 @@ export component PageRequestSheet inherits Rectangle {
         // Overlaps the toolbar's bottom edge, which a page cannot draw over, so the page cannot
         // show a pixel-identical copy of the sheet inside its own area.
         y: -4px;
-        background: #18212b;
+        background: ChromePalette.sheet-background;
         border-width: 1px;
-        border-color: #3a4a5c;
+        border-color: ChromePalette.popup-border;
         border-bottom-left-radius: 12px;
         border-bottom-right-radius: 12px;
         drop-shadow-blur: 24px;
-        drop-shadow-color: #00000090;
+        drop-shadow-color: ChromePalette.shadow;
         drop-shadow-offset-y: 6px;
 
         // Clicks on the card's background must not reach the page either.
@@ -114,7 +115,7 @@ export component PageRequestSheet inherits Rectangle {
 
                 Text {
                     text: root.request.heading;
-                    color: #edf4fa;
+                    color: ChromePalette.text;
                     font-size: 15px;
                     font-weight: 650;
                     wrap: word-wrap;
@@ -128,7 +129,7 @@ export component PageRequestSheet inherits Rectangle {
                         y: 4px;
                         width: parent.width;
                         text: root.request.detail;
-                        color: #8b98a8;
+                        color: ChromePalette.text-secondary;
                         font-size: 12px;
                         wrap: word-wrap;
                     }
@@ -147,7 +148,7 @@ export component PageRequestSheet inherits Rectangle {
                         message-text := Text {
                             width: message-view.width;
                             text: root.request.message;
-                            color: #c9d3de;
+                            color: ChromePalette.text;
                             font-size: 13px;
                             wrap: word-wrap;
                         }
@@ -162,7 +163,7 @@ export component PageRequestSheet inherits Rectangle {
                         y: 10px;
                         width: parent.width;
                         text: root.request.warning;
-                        color: #ffb35c;
+                        color: ChromePalette.danger;
                         font-size: 12px;
                         wrap: word-wrap;
                     }
