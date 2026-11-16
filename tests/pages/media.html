@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Mercury media test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; font-family: sans-serif; }
+  #videos video, #videos canvas { display: inline-block; vertical-align: top; margin: 6px; border: 1px solid #cccccc; }
+  #results { margin: 0 10px; font: bold 14px/1.2 monospace; }
+  .pass { color: #006400; }
+  .fail { color: #b00000; }
+  .note { color: #555555; }
+</style>
+</head>
+<body>
+  <!-- Every element is muted with volume 0: decoding and the audio pipeline run, nothing is heard. -->
+  <div id="videos">
+    <video id="mp4" muted playsinline width="320" height="240"></video>
+    <video id="webm" muted playsinline width="320" height="240"></video>
+    <canvas id="canvas" width="320" height="240"></canvas>
+  </div>
+  <audio id="ogg" muted></audio>
+  <audio id="mp3" muted></audio>
+  <audio id="wav" muted></audio>
+  <div id="results"></div>
+  <script>
+    "use strict";
+    const results = document.getElementById("results");
+    const canvas = document.getElementById("canvas");
+    const context = canvas.getContext("2d");
+    const started = performance.now();
+    // Every wait below is bounded, so each check ends in PASS, FAIL or (under file://) SKIP,
+    // and DONE always appears within PAGE_BUDGET_MS of the page starting; nothing is printed
+    // after DONE. The budget fits inside the documented 30 s screenshot delay, including a
+    // first launch that spends about 10 s loading freshly copied libraries.
+    const TIMEOUT_MS = 12000;
+    const PAGE_BUDGET_MS = 25000;
+    // Video must keep up with the clock: never ahead of it, and at most this far behind.
+    const BEHIND_TOLERANCE_S = 0.5;
+    const opaqueOrigin = location.protocol === "file:";
+    const pending = new Set();
+    let finished = false;
+
+    function seconds(since) {
+      return (performance.now() - since) / 1000;
+    }
+
+    function line(text, ok) {
+      if (finished) return;
+      const element = document.createElement("div");
+      element.className = ok === null ? "note" : ok ? "pass" : "fail";
+      const at = "[" + seconds(started).toFixed(1) + "s] ";
+      element.textContent = at + (ok === null ? text : text + " " + (ok ? "PASS" : "FAIL"));
+      results.appendChild(element);
+      console.log(element.textContent);
+    }
+
+    function check(label, ok, detail) {
+      line(label + (detail ? " (" + detail + ")" : ""), ok);
+    }
+
+    function withTimeout(promise, ms, what) {
+      let timer;
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("timeout after " + ms / 1000 + " s waiting for " + what)), ms);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    }
+
+    // Resolves with the event, or rejects on a media error or after the timeout.
+    function waitFor(target, events, timeout) {
+      return withTimeout(new Promise((resolve, reject) => {
+        for (const name of events) {
+          target.addEventListener(name, (event) => resolve(event), { once: true });
+        }
+        target.addEventListener("error", () => {
+          const error = target.error;
+          reject(new Error("media error " + (error ? error.code + " " + (error.message || "") : "")));
+        }, { once: true });
+      }), timeout, events.join("/"));
+    }
+
+    function waitUntil(predicate, timeout, what) {
+      return new Promise((resolve, reject) => {
+        const begin = performance.now();
+        (function poll() {
+          if (predicate()) { resolve(); return; }
+          if (performance.now() - begin > timeout) { reject(new Error("timeout waiting for " + what)); return; }
+          setTimeout(poll, 50);
+        })();
+      });
+    }
+
+    function tracked(name, body) {
+      pending.add(name);
+      return Promise.resolve().then(body)
+        .catch((error) => check(name, false, "unexpected: " + (error && error.message ? error.message : error)))
+        .finally(() => pending.delete(name));
+    }
+
+    function silence(element) {
+      element.muted = true;
+      element.volume = 0;
+    }
+
+    function play(element) {
+      silence(element);
+      return withTimeout(element.play(), 5000, "play()");
+    }
+
+    // Real time: a position ahead of the wall clock cannot come from playback (it is a jump),
+    // and one more than BEHIND_TOLERANCE_S behind it means slow or stalled playback.
+    function realTime(position, wall) {
+      return position <= wall + 0.3 && position >= wall - BEHIND_TOLERANCE_S;
+    }
+
+    // Under file:// the clips are cross-origin: the canvas read-back and XHR are refused by
+    // design, so those checks are skipped with the reason rather than reported as failures.
+    function skip(label, reason) {
+      line(label + " SKIP (" + reason + ")", null);
+    }
+
+    const early = {};
+    const types = {
+      "video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\"": "mp4 h264+aac",
+      "video/webm; codecs=\"vp9, opus\"": "webm vp9+opus",
+      "audio/ogg; codecs=\"opus\"": "ogg opus",
+      "audio/mpeg": "mp3",
+      "audio/wav": "wav",
+      "video/mp4": "mp4 container",
+      "video/webm": "webm container",
+      "audio/ogg": "ogg container",
+    };
+    if (opaqueOrigin) {
+      line("note: loaded from file://, where media and XHR are cross-origin; the canvas and "
+        + "decodeAudioData checks are skipped (serve the page with scripts/serve-tests.py)", null);
+    }
+    for (const type of Object.keys(types)) {
+      early[type] = document.createElement("video").canPlayType(type);
+    }
+
+    // Classifies the colour band at the top of each test clip: red for 0-2 s, blue for 2-4 s.
+    // A read-back the page may not do (a file:// clip taints the canvas) gives name "unreadable",
+    // so that only the colour check fails and the timing checks still run.
+    function bandColour(video) {
+      try {
+        context.drawImage(video, 0, 0, 320, 240);
+        const [r, g, b] = context.getImageData(160, 40, 1, 1).data;
+        const name = r > 150 && g < 90 && b < 90 ? "red" : b > 150 && r < 90 && g < 90 ? "blue" : "other";
+        return { name, rgb: r + "," + g + "," + b };
+      } catch (error) {
+        return { name: "unreadable", rgb: error.message };
+      }
+    }
+
+    async function videoChecks(id, url, duration) {
+      const video = document.getElementById(id);
+      silence(video);
+      try {
+        video.src = url;
+        await waitFor(video, ["loadedmetadata"], TIMEOUT_MS);
+        const atMetadata = video.duration;
+        if (!isFinite(atMetadata)) {
+          await waitFor(video, ["durationchange"], 5000).catch(() => {});
+        }
+        check(id + " loadedmetadata duration=" + video.duration.toFixed(3)
+          + (atMetadata === video.duration ? "" : " (at loadedmetadata " + atMetadata + ")")
+          + " size=" + video.videoWidth + "x" + video.videoHeight,
+          Math.abs(video.duration - duration) < 0.15 && video.videoWidth === 320 && video.videoHeight === 240);
+      } catch (error) {
+        check(id + " loadedmetadata", false, error.message);
+        return;
+      }
+      let playStarted = performance.now();
+      try {
+        playStarted = performance.now();
+        await play(video);
+        await waitUntil(() => video.currentTime >= 0.5 || video.ended, TIMEOUT_MS, "currentTime 0.5 s");
+        const first = bandColour(video);
+        const firstTime = video.currentTime;
+        const firstWall = seconds(playStarted);
+        await waitUntil(() => video.currentTime >= 1.1 || video.ended, TIMEOUT_MS, "currentTime 1.1 s");
+        const wall = seconds(playStarted);
+        check(id + " currentTime " + video.currentTime.toFixed(2) + " s after " + wall.toFixed(2)
+          + " s of wall time: past 1 s, in step with the clock (0.3 s ahead to "
+          + BEHIND_TOLERANCE_S + " s behind)",
+          !video.ended && video.currentTime >= 1.1 && realTime(video.currentTime, wall));
+        await waitUntil(() => video.currentTime >= 2.5 || video.ended, TIMEOUT_MS, "currentTime 2.5 s");
+        const ended = video.ended;
+        const second = bandColour(video);
+        const secondTime = video.currentTime;
+        const secondWall = seconds(playStarted);
+        if (opaqueOrigin) {
+          check(id + " position in step with the clock at " + firstTime.toFixed(2) + " s and "
+            + secondTime.toFixed(2) + " s (wall " + firstWall.toFixed(2) + " s, " + secondWall.toFixed(2) + " s)",
+            !ended && realTime(firstTime, firstWall) && realTime(secondTime, secondWall));
+          skip(id + " frame colour", "a cross-origin frame cannot be read back from a canvas");
+        } else check(id + " frame colour " + first.name + "@" + firstTime.toFixed(2) + "s [" + first.rgb + "] then "
+          + second.name + "@" + secondTime.toFixed(2) + "s [" + second.rgb + "]"
+          + (ended ? ", video had ended" : "") + "; want red then blue in real time",
+          first.name === "red" && second.name === "blue" && !ended
+          && realTime(firstTime, firstWall) && realTime(secondTime, secondWall)
+          && secondTime < 3.7);
+      } catch (error) {
+        check(id + " playback (currentTime " + video.currentTime.toFixed(2) + " after "
+          + seconds(playStarted).toFixed(2) + " s)", false, error.message);
+      }
+      // Keep a frame on screen for the screenshot.
+      video.loop = true;
+      silence(video);
+      video.play().catch(() => {});
+    }
+
+    async function audioChecks(id, url, duration) {
+      const audio = document.getElementById(id);
+      silence(audio);
+      try {
+        audio.src = url;
+        await waitFor(audio, ["loadedmetadata"], TIMEOUT_MS);
+        const atMetadata = audio.duration;
+        const ended = waitFor(audio, ["ended"], TIMEOUT_MS);
+        const playStarted = performance.now();
+        await play(audio);
+        // Playing to the end must take about as long as the clip: a jump straight to the end
+        // (for example a position reported while the demuxer probes the duration) is a failure.
+        try {
+          await ended;
+          const wall = seconds(playStarted);
+          check(id + " plays to ended in " + wall.toFixed(2) + " s (clip " + duration.toFixed(1) + " s)",
+            wall > 0.7 * duration && wall < 2 * duration + 1);
+        } catch (error) {
+          check(id + " plays (currentTime " + audio.currentTime.toFixed(2) + ")", false, error.message);
+        }
+        // Some demuxers (Ogg from a streamed source) only learn the duration once data flows;
+        // a later durationchange is fine.
+        check(id + " duration=" + audio.duration.toFixed(3)
+          + (atMetadata === audio.duration ? "" : " (at loadedmetadata " + atMetadata + ")"),
+          Math.abs(audio.duration - duration) < 0.15);
+      } catch (error) {
+        check(id + " audio (currentTime " + audio.currentTime.toFixed(2) + ")", false, error.message);
+      }
+    }
+
+    // Ogg is left out of the macOS build until GStreamer's oggdemux is fixed (DEFAULT_EXCLUDED in
+    // scripts/macos/gstreamer-plugins.sh). Then an Ogg element must fail promptly with
+    // MEDIA_ERR_SRC_NOT_SUPPORTED; where Ogg is present, it must play correctly.
+    async function oggChecks() {
+      if (document.createElement("audio").canPlayType("audio/ogg") !== "") {
+        line("note: Ogg is supported by this build; checking that it plays correctly", null);
+        await audioChecks("ogg", "../media/tone-opus.ogg", 3.0);
+        return;
+      }
+      line("note: Ogg is not supported by this build; checking that it fails cleanly", null);
+      const audio = document.getElementById("ogg");
+      silence(audio);
+      const begin = performance.now();
+      audio.src = "../media/tone-opus.ogg";
+      try {
+        await waitFor(audio, ["loadedmetadata"], 5000);
+        check("ogg loaded although canPlayType('audio/ogg') is ''", false);
+      } catch (error) {
+        const code = audio.error ? audio.error.code : 0;
+        check("ogg fails with MEDIA_ERR_SRC_NOT_SUPPORTED after " + seconds(begin).toFixed(2) + " s (error "
+          + code + ")", code === 4 && seconds(begin) < 5, code === 4 ? "" : error.message);
+      }
+    }
+
+    function analyse(samples, sampleRate) {
+      // Upward crossings with hysteresis, timed from the first to the last one, so encoder
+      // padding and low-level noise at either end do not count.
+      let peak = 0;
+      for (let i = 0; i < samples.length; i++) peak = Math.max(peak, Math.abs(samples[i]));
+      const threshold = peak / 4;
+      let armed = false;
+      let crossings = 0;
+      let first = -1;
+      let last = -1;
+      for (let i = 0; i < samples.length; i++) {
+        if (samples[i] < -threshold) armed = true;
+        if (armed && samples[i] > threshold) {
+          armed = false;
+          if (first < 0) first = i; else crossings++;
+          last = i;
+        }
+      }
+      const frequency = crossings > 0 ? crossings / ((last - first) / sampleRate) : 0;
+      return { peak, frequency };
+    }
+
+    async function offlineCheck() {
+      try {
+        const sampleRate = 44100;
+        const offline = new OfflineAudioContext(1, 4410, sampleRate);
+        const oscillator = offline.createOscillator();
+        oscillator.type = "sine";
+        oscillator.frequency.value = 441; // 100-sample period: first maximum at sample 25
+        oscillator.connect(offline.destination);
+        oscillator.start(0);
+        const rendered = await withTimeout(offline.startRendering(), TIMEOUT_MS, "startRendering()");
+        const data = rendered.getChannelData(0);
+        let peakIndex = 0;
+        for (let i = 0; i < 100; i++) if (data[i] > data[peakIndex]) peakIndex = i;
+        const { peak, frequency } = analyse(data, sampleRate);
+        check("OfflineAudioContext sine peak=" + peak.toFixed(3) + " at sample " + peakIndex
+          + " freq=" + frequency.toFixed(1) + "Hz want 1.000 at 25, 441Hz",
+          peak > 0.98 && peak < 1.02 && Math.abs(peakIndex - 25) <= 1 && Math.abs(frequency - 441) < 15);
+      } catch (error) {
+        check("OfflineAudioContext", false, error.message);
+      }
+    }
+
+    function load(url) {
+      return new Promise((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("GET", url);
+        request.responseType = "arraybuffer";
+        request.timeout = 10000;
+        request.onload = () => {
+          if (request.status >= 200 && request.status < 300) resolve(request.response);
+          else reject(new Error("HTTP status " + request.status + " for " + url));
+        };
+        request.onerror = () => reject(new Error("could not load " + url));
+        request.ontimeout = () => reject(new Error("timeout loading " + url));
+        request.send();
+      });
+    }
+
+    async function decodeCheck(url, duration, frequency) {
+      if (opaqueOrigin) {
+        skip("decodeAudioData " + url.split("/").pop(), "XHR cannot read a cross-origin file");
+        return;
+      }
+      try {
+        const offline = new OfflineAudioContext(1, 44100, 44100);
+        const bytes = await load(url);
+        const buffer = await withTimeout(
+          new Promise((resolve, reject) => offline.decodeAudioData(bytes, resolve, reject)),
+          TIMEOUT_MS, "decodeAudioData");
+        const result = analyse(buffer.getChannelData(0), buffer.sampleRate);
+        check("decodeAudioData " + url.split("/").pop() + " duration=" + buffer.duration.toFixed(3)
+          + " freq=" + result.frequency.toFixed(1) + "Hz peak=" + result.peak.toFixed(3),
+          Math.abs(buffer.duration - duration) < 0.1 && Math.abs(result.frequency - frequency) < 10
+          && result.peak > 0.05);
+      } catch (error) {
+        check("decodeAudioData " + url.split("/").pop(), false, error && error.message ? error.message : String(error));
+      }
+    }
+
+    // What canPlayType must answer. Servo's GStreamer plugin list has no Opus parser
+    // (opusparse), so it answers '' for any codecs="opus" type: a known limitation.
+    function expectedAnswer(type, oggSupported) {
+      if (type.includes("opus")) return { ok: (a) => a === "", why: "known: no opusparse in Servo's plugin list" };
+      if (type === "audio/ogg") {
+        return oggSupported
+          ? { ok: (a) => a !== "", why: "Ogg bundled" }
+          : { ok: (a) => a === "", why: "Ogg not bundled" };
+      }
+      if (type.includes("codecs")) return { ok: (a) => a === "probably", why: "" };
+      return { ok: (a) => a === "maybe" || a === "probably", why: "" };
+    }
+
+    async function run() {
+      await Promise.all([
+        tracked("mp4", () => videoChecks("mp4", "../media/clip-h264-aac.mp4", 4.0)),
+        tracked("webm", () => videoChecks("webm", "../media/clip-vp9-opus.webm", 4.008)),
+        tracked("ogg", oggChecks),
+        tracked("mp3", () => audioChecks("mp3", "../media/tone.mp3", 3.0)),
+        tracked("wav", () => audioChecks("wav", "../media/tone.wav", 2.0)),
+        tracked("offline", offlineCheck),
+      ]);
+      await tracked("decode wav", () => decodeCheck("../media/tone.wav", 2.0, 441));
+      await tracked("decode mp3", () => decodeCheck("../media/tone.mp3", 3.0, 440));
+      // Asked again here, after the backend has certainly finished loading its plugins.
+      const oggSupported = document.createElement("audio").canPlayType("audio/ogg") !== "";
+      for (const type of Object.keys(types)) {
+        const answer = document.createElement("audio").canPlayType(type);
+        const expected = expectedAnswer(type, oggSupported);
+        check("canPlayType " + types[type] + " = '" + answer + "' (at load: '" + early[type] + "')"
+          + (expected.why ? " [" + expected.why + "]" : ""), expected.ok(answer));
+      }
+    }
+
+    function done(note) {
+      if (finished) return;
+      line("DONE in " + seconds(started).toFixed(1) + " s" + (note ? " (" + note + ")" : ""), null);
+      finished = true;
+    }
+
+    setTimeout(() => {
+      if (!finished) {
+        for (const name of pending) check(name, false, "still running after " + PAGE_BUDGET_MS / 1000 + " s");
+        done("page budget reached");
+      }
+    }, PAGE_BUDGET_MS - (performance.now() - started));
+    run()
+      .catch((error) => check("test page", false, "unexpected: " + (error && error.message ? error.message : error)))
+      .finally(() => done());
+  </script>
+</body>
+</html>
