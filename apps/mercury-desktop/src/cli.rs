@@ -64,6 +64,8 @@ pub(crate) enum CliOutcome {
     PrintAndExit { text: String, code: i32 },
 }
 
+const EXIT_BY_VALUES: &str = "close-request|quit";
+
 const DEFAULT_SCREENSHOT_DELAY: Duration = Duration::from_millis(1000);
 
 const USAGE: &str = "\
@@ -99,7 +101,9 @@ Exit status:
   1  Failure, or a screenshot could not be saved
   2  Invalid command line
   3  The screenshot's page did not finish loading
-  4  The profile is in use by another Mercury Browser";
+  4  The profile is in use by another Mercury Browser
+  On SIGTERM, SIGINT or SIGHUP the browser quits in order and then ends by that same
+  signal (a shell reports 128 + its number: 143, 130, 129); a second one ends it at once.";
 
 /// `--profile-dir` and `--screenshot` need paths that are valid UTF-8; anything else would be
 /// silently altered by the conversion to `String`. Returns the usage error to print, if any.
@@ -188,13 +192,13 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
                 exit_after = Some(Duration::from_millis(milliseconds));
             }
             "--exit-by" => {
-                let value = option_value(&mut arguments, "--exit-by", "close-request|quit")?;
+                let value = option_value(&mut arguments, "--exit-by", EXIT_BY_VALUES)?;
                 exit_by = Some(match value.as_str() {
                     "close-request" => ExitBy::CloseRequest,
                     "quit" => ExitBy::Quit,
                     _ => {
                         return Err(format!(
-                            "invalid --exit-by '{value}': expected close-request or quit"
+                            "invalid --exit-by '{value}': expected {EXIT_BY_VALUES}"
                         ));
                     }
                 });
@@ -665,6 +669,20 @@ mod tests {
         ] {
             assert_eq!(exit_code(&parse(arguments)), Some(2), "{arguments:?}");
         }
+    }
+
+    #[test]
+    fn help_documents_how_quit_signals_end_the_browser() {
+        let CliOutcome::PrintAndExit { text, .. } = parse(&["--help"]) else {
+            panic!("--help should not run the browser");
+        };
+
+        let exit_status = text
+            .split_once("Exit status:")
+            .map(|(_, rest)| rest)
+            .expect("an exit status section");
+        assert!(exit_status.contains("SIGTERM, SIGINT or SIGHUP"));
+        assert!(exit_status.contains("ends by that same"));
     }
 
     #[test]

@@ -31,6 +31,7 @@ mod screen_metrics;
 mod screenshot;
 mod shortcuts;
 mod shutdown;
+mod signals;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {
@@ -81,6 +82,8 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
             return Ok(ExitCode::from(EXIT_PROFILE_IN_USE));
         }
     };
+    // From here on a terminate, interrupt or hang-up signal quits in order.
+    signals::install();
     select_hardware_accelerated_backend(options.is_automated())?;
 
     let window = MainWindow::new()?;
@@ -143,6 +146,12 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     drop(exit_request_timer);
     shut_down_engine(exit_code);
     drop(window);
+    if let Some(signal) = signals::received() {
+        // Ended by a quit signal: now that the engine is down and the temporary profile gone,
+        // end the way that signal would have, so the parent sees it.
+        drop(profile);
+        signals::end_by(signal);
+    }
 
     run_result?;
     Ok(ExitCode::from(exit_code))

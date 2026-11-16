@@ -68,6 +68,17 @@ Before merging a rendering or media change, verify at least:
 4. A direct MP4 or WebM resource plays on Linux when media code changed.
 5. Closing the browser does not leave a repeated broken-pipe error loop.
 
+### Quit paths
+
+Nobody may synthesise input on the shared test machine, so the quits a user performs are exercised from inside the process with the diagnostic options `--exit-after <milliseconds>` and `--exit-by close-request|quit`. `close-request` dispatches Slint's close request to the window, the same call the winit backend makes for the title bar's close button; `quit` calls `slint::quit_event_loop()`, as the quit shortcut does. They work with `--background` (exit status 0) and with `--screenshot`, where a quit before the capture exits with status 1. Signals are tested by sending `SIGTERM`, `SIGINT` or `SIGHUP` to a `--background` run: it quits in order and ends by that signal.
+
+```bash
+target/release/mercury-browser --background --exit-after 3000 --exit-by close-request \
+    "file://$PWD/tests/pages/animation.html"
+```
+
+After any quit, no `mercury-browser` process of the run may be left, and a temporary profile (`$TMPDIR/mercury-browser-profile-<pid>-*`) must be gone. `SLINT_DESTROY_WINDOW_ON_HIDE=1` makes hiding destroy the window on macOS too, which exercises the Wayland teardown path.
+
 For an engine-level website failure, reproduce it in the pinned Servo `servoshell`. Record whether the same revision succeeds or fails there.
 
 ## Documentation checks

@@ -17,11 +17,11 @@ use talaria_servo::{
 };
 
 use crate::keyboard::system_color_scheme;
-use crate::rendering::BrowserRenderingContext;
+use crate::rendering::{BrowserRenderingContext, RenderingBridgeError, ReportOncePerKind};
 use crate::screen_metrics::screen_metrics;
 use crate::shutdown::{
     ENGINE_SHUTDOWN_TIMEOUT, EngineParts, Watchdog, drop_catching_panic, release_in_order,
-    settle_period, spin_for,
+    settle_period, shut_down_runtime,
 };
 use crate::ui_sync::sync_ui;
 
@@ -46,8 +46,12 @@ struct Engine {
     bootstrap_failure_logged: Cell<bool>,
 }
 
+/// Dropped any way other than `shut_down` (an early return during start-up, unwinding), its
+/// `Drop` still releases the web views, the runtime, the rendering context and the device in
+/// that order; see `take_parts`.
 struct EngineState {
-    runtime: ServoRuntime,
+    /// `None` only once `take_parts` has run.
+    runtime: Option<ServoRuntime>,
     controller: Rc<RefCell<BrowserController>>,
     web_view_focused: Rc<Cell<bool>>,
     rendering_context: Option<Rc<BrowserRenderingContext>>,
@@ -62,7 +66,19 @@ struct EngineState {
     web_view_created: bool,
     /// What pages were last told about the screen and window.
     screen_metrics: Option<ScreenMetrics>,
+    frame_import_errors: ReportOncePerKind<RenderingBridgeError>,
 }
+
+/// The parts of `EngineState` that are released in order.
+type OwnedEngineParts = EngineParts<
+    (
+        HashMap<TabId, ServoWebView>,
+        HashMap<TabId, Receiver<TabEvent>>,
+    ),
+    ServoRuntime,
+    Option<Rc<BrowserRenderingContext>>,
+    Option<slint::wgpu_29::wgpu::Device>,
+>;
 
 enum GraphicsStatus {
     Ready,
@@ -86,7 +102,7 @@ pub(crate) fn connect_servo_runtime(
     let engine = Rc::new(Engine {
         window: window.as_weak(),
         state: RefCell::new(Some(EngineState {
-            runtime: ServoRuntime::new(event_loop_waker, runtime_options),
+            runtime: Some(ServoRuntime::new(event_loop_waker, runtime_options)),
             controller,
             web_view_focused,
             rendering_context: None,
@@ -98,6 +114,7 @@ pub(crate) fn connect_servo_runtime(
             current_scale_factor: None,
             web_view_created: false,
             screen_metrics: None,
+            frame_import_errors: ReportOncePerKind::default(),
         })),
         bootstrap_failure_logged: Cell::new(false),
     });
@@ -317,7 +334,10 @@ impl EngineState {
     fn pump(&mut self, window: &MainWindow) {
         // Before spinning, so that a page's first query after the window moved is current.
         self.update_screen_metrics(window);
-        self.runtime.spin_event_loop();
+        let Some(runtime) = &self.runtime else {
+            return;
+        };
+        runtime.spin_event_loop();
 
         let ready_before = {
             let controller = self.controller.borrow();
@@ -378,7 +398,7 @@ impl EngineState {
             };
 
             let (event_sender, event_receiver) = mpsc::channel::<TabEvent>();
-            let create_result = self.runtime.create_web_view(
+            let create_result = runtime.create_web_view(
                 rendering_context.clone(),
                 &url,
                 scale_factor,
@@ -468,8 +488,10 @@ impl EngineState {
 
     fn update_screen_metrics(&mut self, window: &MainWindow) {
         let metrics = window.window().with_winit_window(screen_metrics).flatten();
-        if metrics != self.screen_metrics {
-            self.runtime.set_screen_metrics(metrics);
+        if metrics != self.screen_metrics
+            && let Some(runtime) = &self.runtime
+        {
+            runtime.set_screen_metrics(metrics);
             self.screen_metrics = metrics;
         }
     }
@@ -493,9 +515,12 @@ impl EngineState {
         match rendering_context.current_frame_as_image(device) {
             Ok(image) => window.set_web_view_texture(image),
             Err(error) => {
-                log::error!("failed to import Servo frame into Slint: {error}");
-                window
-                    .set_content_message(format!("Failed to display Servo frame: {error}").into());
+                if self.frame_import_errors.first(&error) {
+                    log::error!("failed to import Servo frame into Slint: {error}");
+                    window.set_content_message(
+                        format!("Failed to display Servo frame: {error}").into(),
+                    );
+                }
             }
         }
     }
@@ -531,52 +556,65 @@ impl EngineState {
 
     /// Closes the web views, then the runtime, then the rendering context, then the device.
     /// The order is spelled out in `release_in_order` rather than left to field order.
-    fn shut_down(self, window: Option<&MainWindow>, exit_code_if_stuck: u8) {
+    fn shut_down(mut self, window: Option<&MainWindow>, exit_code_if_stuck: u8) {
         if let Some(window) = window {
-            // The window's texture was imported from Servo's frames; let it go first.
+            // The window's texture was imported from Servo's frames; let it go first. Safe
+            // here: the event loop has ended, so Slint holds nothing borrowed.
             window.set_web_view_texture(Image::default());
         }
-        let EngineState {
-            runtime,
-            rendering_context,
-            wgpu_device,
-            web_views,
-            event_receivers,
-            web_view_created,
-            ..
-        } = self;
+        let settle = settle_period(self.web_view_created);
 
-        release_in_order(
-            EngineParts {
-                web_views: (web_views, event_receivers),
-                runtime: Some(runtime),
-                rendering_context,
-                wgpu_device,
-            },
-            |runtime| {
-                let watchdog = Watchdog::start(ENGINE_SHUTDOWN_TIMEOUT, move || {
-                    log::error!(
-                        "Servo did not shut down within {} seconds; exiting without it",
-                        ENGINE_SHUTDOWN_TIMEOUT.as_secs()
-                    );
-                    // `process::exit` skips destructors; the temporary profile holds this
-                    // run's cookies.
-                    crate::profile::remove_temporary_profile();
-                    std::process::exit(i32::from(exit_code_if_stuck));
-                });
-                // Let content processes release their WebGL contexts before the constellation
-                // is told to exit; see `WEBGL_SETTLE_PERIOD` for the race this works around.
-                spin_for(settle_period(web_view_created), || {
-                    runtime.spin_event_loop()
-                });
-                // Dropping the last `Servo` handle exits the constellation and the WebGL
-                // thread and waits for them.
-                if !drop_catching_panic(runtime) {
-                    log::error!("the engine did not shut down cleanly (it panicked while exiting)");
-                }
-                watchdog.disarm();
-            },
-        );
+        release_in_order(self.take_parts(), |runtime| {
+            let watchdog = Watchdog::start(ENGINE_SHUTDOWN_TIMEOUT, move || {
+                log::error!(
+                    "Servo did not shut down within {} seconds; exiting without it",
+                    ENGINE_SHUTDOWN_TIMEOUT.as_secs()
+                );
+                log::logger().flush();
+                // `_exit` skips destructors, which the main thread is in the middle of
+                // running; the temporary profile holds this run's cookies.
+                crate::profile::remove_temporary_profile();
+                let code = crate::signals::received().map_or(
+                    i32::from(exit_code_if_stuck),
+                    crate::signals::exit_status_for,
+                );
+                // SAFETY: `_exit` ends the process at once; nothing runs after it.
+                unsafe { libc::_exit(code) }
+            });
+            // Let content processes release their WebGL contexts before the constellation is
+            // told to exit (see `WEBGL_SETTLE_PERIOD`); dropping the last `Servo` handle then
+            // exits the constellation and the WebGL thread and waits for them.
+            if !shut_down_runtime(runtime, settle, ServoRuntime::spin_event_loop, drop) {
+                log::error!("the engine did not shut down cleanly (it panicked while exiting)");
+            }
+            watchdog.disarm();
+        });
+        // `self` is dropped here with its parts already taken; its `Drop` finds nothing.
+    }
+
+    /// Takes the parts that must be released in order, leaving the state without them.
+    fn take_parts(&mut self) -> OwnedEngineParts {
+        EngineParts {
+            web_views: (
+                std::mem::take(&mut self.web_views),
+                std::mem::take(&mut self.event_receivers),
+            ),
+            runtime: self.runtime.take(),
+            rendering_context: self.rendering_context.take(),
+            wgpu_device: self.wgpu_device.take(),
+        }
+    }
+}
+
+impl Drop for EngineState {
+    /// Finds the parts still here only when the state was not shut down: an early return during
+    /// start-up, or unwinding. There is no settle period and no watchdog on these paths.
+    fn drop(&mut self) {
+        release_in_order(self.take_parts(), |runtime| {
+            if !drop_catching_panic(runtime) {
+                log::error!("the engine did not shut down cleanly (it panicked while exiting)");
+            }
+        });
     }
 }
 
