@@ -11,8 +11,9 @@ mod zoom;
 pub use address::{AddressResolutionError, NavigationTarget, classify_address, resolve_address};
 pub use browser::{
     BrowserCommand, BrowserEvent, BrowserState, LoadState, PointerButton, PointerButtonAction,
+    placeholder_title,
 };
-pub use controller::BrowserController;
+pub use controller::{BrowserController, CloseTabOutcome};
 pub use cursor::{ColorScheme, PointerCursor};
 pub use input::{
     CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, KeyboardModifiers,

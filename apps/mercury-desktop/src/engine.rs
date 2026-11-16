@@ -420,8 +420,12 @@ impl EngineState {
                 // Servo 0.8 couples visibility and throttling: show() resumes the active
                 // pipeline and hide() throttles background tabs.
                 active_web_view.show();
+                // tabs: wait for a frame drawn after show(); see `blank_until_new_tab_frame`
+                active_web_view.discard_ready_frame();
                 let _focus_result = active_web_view.set_focus(self.web_view_focused.get());
             }
+            // tabs: never leave the previous tab's frame on screen
+            blank_until_new_tab_frame(window);
             self.visible_tab_id = Some(active_tab_id);
         }
 
@@ -655,6 +659,13 @@ pub(crate) fn queue_leaving_tab(controller: &mut BrowserController, tab_id: TabI
     if is_fullscreen {
         controller.queue_command_for(tab_id, BrowserCommand::ExitFullscreen);
     }
+}
+
+/// Shows the neutral background in place of the previous tab's frame. `show()` only queues a
+/// scene change; painting at once would draw the scene WebRender still holds, which shows the
+/// previous tab. The new tab's frame replaces the background when Servo announces it.
+fn blank_until_new_tab_frame(window: &MainWindow) {
+    window.set_web_view_texture(Image::default());
 }
 
 fn tab_zoom_percent(controller: &BrowserController, tab_id: TabId) -> u16 {

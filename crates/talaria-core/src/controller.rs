@@ -5,6 +5,15 @@ use crate::browser::LoadState;
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
 use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, Tab, TabActivation, TabCommand, TabId};
 
+/// What `close_tab` did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseTabOutcome {
+    Closed,
+    NotFound,
+    /// The tab is the only one and stays open; closing it means quitting.
+    LastTab,
+}
+
 #[derive(Debug)]
 pub struct BrowserController {
     tabs: Vec<Tab>,
@@ -201,14 +210,14 @@ impl BrowserController {
         self.queue_command(BrowserCommand::SetPageZoom { percent });
     }
 
-    pub fn close_tab(&mut self, tab_id: TabId) -> bool {
-        if self.tabs.len() == 1 {
-            return false;
-        }
-
+    /// Closes a tab. The only tab is never closed; `LastTab` tells the caller to quit instead.
+    pub fn close_tab(&mut self, tab_id: TabId) -> CloseTabOutcome {
         let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id) else {
-            return false;
+            return CloseTabOutcome::NotFound;
         };
+        if self.tabs.len() == 1 {
+            return CloseTabOutcome::LastTab;
+        }
 
         let was_active = self.active_tab_id == tab_id;
         self.tabs.remove(index);
@@ -220,12 +229,12 @@ impl BrowserController {
             self.active_tab_id = self.tabs[replacement_index].id();
         }
 
-        true
+        CloseTabOutcome::Closed
     }
 
-    pub fn close_tab_at(&mut self, index: usize) -> bool {
+    pub fn close_tab_at(&mut self, index: usize) -> CloseTabOutcome {
         let Some(tab_id) = self.tabs.get(index).map(Tab::id) else {
-            return false;
+            return CloseTabOutcome::NotFound;
         };
 
         self.close_tab(tab_id)

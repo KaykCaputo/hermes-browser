@@ -64,6 +64,13 @@ impl ServoWebView {
         true
     }
 
+    /// Forgets a frame announced before now. A hidden web view is told about every frame of the
+    /// shared rendering context, including frames drawn while another tab was shown; after
+    /// `show()` only a frame announced later contains this web view.
+    pub fn discard_ready_frame(&self) {
+        let _was_ready = self.frame_ready.take_ready();
+    }
+
     pub fn show(&self) {
         self.inner.show();
     }

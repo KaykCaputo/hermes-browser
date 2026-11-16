@@ -1,7 +1,33 @@
+use url::Url;
+
 use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon, PointerCursor};
 
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
 const INITIAL_ADDRESS: &str = "";
+
+/// Title shown until a document supplies its own: the URL's host, else the URL, else "New Tab".
+pub fn placeholder_title(url: &str) -> String {
+    if url.is_empty() {
+        return DEFAULT_PAGE_TITLE.to_owned();
+    }
+    Url::parse(url)
+        .ok()
+        .and_then(|parsed| parsed.host_str().map(str::to_owned))
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| url.to_owned())
+}
+
+/// Whether two addresses differ at most in their fragment, which keeps the same document.
+fn same_document(current: &str, next: &str) -> bool {
+    match (Url::parse(current), Url::parse(next)) {
+        (Ok(mut current), Ok(mut next)) => {
+            current.set_fragment(None);
+            next.set_fragment(None);
+            current == next
+        }
+        _ => current == next,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadState {
@@ -209,14 +235,17 @@ impl BrowserState {
                 // reports changes against its own cached values, so the engine's notifications
                 // must stay the only source of both.
                 if self.url != url {
+                    if !same_document(&self.url, &url) {
+                        self.page_title = placeholder_title(&url);
+                        self.page_icon = None;
+                    }
                     self.url = url;
-                    self.page_icon = None;
                 }
             }
             BrowserEvent::PageTitleChanged { title } => {
                 self.page_title = title
                     .filter(|title| !title.trim().is_empty())
-                    .unwrap_or_else(|| DEFAULT_PAGE_TITLE.to_owned());
+                    .unwrap_or_else(|| placeholder_title(&self.url));
             }
             BrowserEvent::PageIconChanged { icon } => {
                 self.page_icon = icon;

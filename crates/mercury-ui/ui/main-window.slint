@@ -318,6 +318,16 @@ export component MainWindow inherits Window {
         );
     }
 
+    // --- tabs ---
+    out property <bool> address-has-focus: address-input.has-focus;
+    // The active tab's committed address; Escape in the address field restores it.
+    in property <string> committed-address: "";
+
+    public function reset-address(text: string) {
+        root.address = text;
+    }
+    // --- end tabs ---
+
     title: page-title + " — Mercury Browser";
     icon: @image-url("../../../apps/mercury-desktop/resources/mercury-browser.svg");
     preferred-width: 1180px;
@@ -355,7 +365,7 @@ export component MainWindow inherits Window {
                         for tab[index] in root.tabs: BrowserTabButton {
                             width: 184px;
                             tab: tab;
-                            closable: root.tabs.length > 1;
+                            closable: true;
 
                             selected => {
                                 root.select-tab(index);
@@ -433,6 +443,19 @@ export component MainWindow inherits Window {
                         single-line: true;
                         accepted => {
                             root.navigate(self.text);
+                        }
+                        // tabs: Escape drops the draft and returns focus to the page
+                        key-pressed(event) => {
+                            if event.text != Key.Escape {
+                                return reject;
+                            }
+                            root.reset-address(root.committed-address);
+                            if root.web-view-visible {
+                                web-view-focus.focus();
+                            } else {
+                                self.clear-focus();
+                            }
+                            accept
                         }
                     }
                 }

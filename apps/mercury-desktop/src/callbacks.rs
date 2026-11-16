@@ -8,6 +8,7 @@ use talaria_core::{
     BrowserCommand, BrowserController, BrowserEvent, LoadState, PointerButtonAction,
 };
 
+use crate::tab_close::finish_closing_tab;
 use crate::ui_sync::{pointer_button_from_ui, sync_ui};
 
 pub(crate) fn connect_ui_callbacks(
@@ -103,10 +104,10 @@ pub(crate) fn connect_ui_callbacks(
         let Ok(index) = usize::try_from(index) else {
             return;
         };
-        if close_tab_controller.borrow_mut().close_tab_at(index)
-            && let Some(window) = close_tab_window.upgrade()
-        {
-            sync_ui(&window, &close_tab_controller.borrow());
+        let outcome = close_tab_controller.borrow_mut().close_tab_at(index);
+        if let Some(window) = close_tab_window.upgrade() {
+            // tabs: closing the last tab quits
+            finish_closing_tab(&window, &close_tab_controller.borrow(), outcome);
             window.window().request_redraw();
         }
     });

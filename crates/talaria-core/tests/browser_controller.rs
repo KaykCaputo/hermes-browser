@@ -1,6 +1,7 @@
 use talaria_core::{
     AddressResolutionError, BrowserCommand, BrowserController, BrowserEvent, BrowserState,
-    ColorScheme, LoadState, PointerButton, PointerButtonAction, TabActivation, TabCommand, TabId,
+    CloseTabOutcome, ColorScheme, LoadState, PointerButton, PointerButtonAction, TabActivation,
+    TabCommand, TabId,
 };
 
 fn command(queued: Option<TabCommand>) -> Option<BrowserCommand> {
@@ -285,18 +286,48 @@ fn closing_the_active_tab_selects_its_left_neighbor() {
     let first_tab_id = controller.active_tab_id();
     let second_tab_id = controller.open_tab();
 
-    assert!(controller.close_tab(second_tab_id));
+    assert_eq!(controller.close_tab(second_tab_id), CloseTabOutcome::Closed);
     assert_eq!(controller.active_tab_id(), first_tab_id);
     assert_eq!(controller.tabs().len(), 1);
 }
 
 #[test]
-fn the_last_tab_cannot_be_closed() {
+fn closing_the_last_tab_reports_last_tab() {
     let mut controller = BrowserController::default();
     let tab_id = controller.active_tab_id();
 
-    assert!(!controller.close_tab(tab_id));
+    assert_eq!(controller.close_tab(tab_id), CloseTabOutcome::LastTab);
+    assert_eq!(controller.close_tab_at(0), CloseTabOutcome::LastTab);
     assert_eq!(controller.tabs().len(), 1);
+    assert_eq!(controller.active_tab_id(), tab_id);
+}
+
+#[test]
+fn closing_an_unknown_tab_reports_not_found() {
+    let mut controller = BrowserController::default();
+    let tab_id = controller.active_tab_id();
+    controller.open_tab();
+
+    assert_eq!(
+        controller.close_tab(TabId::new(999)),
+        CloseTabOutcome::NotFound
+    );
+    assert_eq!(controller.close_tab_at(2), CloseTabOutcome::NotFound);
+    assert_eq!(controller.tabs().len(), 2);
+    assert_eq!(controller.close_tab_at(0), CloseTabOutcome::Closed);
+    assert_eq!(controller.tabs().len(), 1);
+    assert!(controller.tabs().all(|tab| tab.id() != tab_id));
+}
+
+#[test]
+fn an_unknown_tab_is_not_found_even_when_one_tab_is_left() {
+    let mut controller = BrowserController::default();
+
+    assert_eq!(
+        controller.close_tab(TabId::new(999)),
+        CloseTabOutcome::NotFound
+    );
+    assert_eq!(controller.close_tab_at(1), CloseTabOutcome::NotFound);
 }
 
 #[test]
@@ -308,7 +339,7 @@ fn closed_tabs_discard_their_pending_commands_and_late_events() {
     controller.queue_command(BrowserCommand::Reload);
     assert!(controller.has_pending_commands());
 
-    assert!(controller.close_tab(closed_tab_id));
+    assert_eq!(controller.close_tab(closed_tab_id), CloseTabOutcome::Closed);
     assert!(!controller.has_pending_commands());
     assert!(!controller.handle_event(
         closed_tab_id,

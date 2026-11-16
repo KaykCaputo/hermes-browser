@@ -30,6 +30,8 @@ mod screen_metrics;
 mod screenshot;
 mod shortcuts;
 mod shutdown;
+// tabs
+mod tab_close;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {

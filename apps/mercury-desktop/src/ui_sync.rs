@@ -1,11 +1,26 @@
+use std::cell::Cell;
+
 use mercury_ui::{BrowserTab, MainWindow, WebViewCursor, WebViewPointerButton};
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
-use talaria_core::{BrowserController, LoadState, PageIcon, PointerButton, PointerCursor};
+use talaria_core::{BrowserController, LoadState, PageIcon, PointerButton, PointerCursor, TabId};
+
+thread_local! {
+    // tabs: the active tab at the previous sync, so a tab switch replaces the address draft.
+    static LAST_SYNCED_TAB: Cell<Option<TabId>> = const { Cell::new(None) };
+}
 
 pub(crate) fn sync_ui(window: &MainWindow, controller: &BrowserController) {
     let state = controller.active_state();
     window.set_page_title(state.page_title().into());
-    window.set_address(state.url().into());
+    // tabs: keep what the user is typing unless the active tab changed.
+    let tab_changed = LAST_SYNCED_TAB.replace(Some(controller.active_tab_id()))
+        != Some(controller.active_tab_id());
+    window.set_committed_address(state.url().into());
+    if let Some(address) =
+        address_bar_update(state.url(), window.get_address_has_focus(), tab_changed)
+    {
+        window.invoke_reset_address(address.into());
+    }
     window.set_is_new_tab(state.url().is_empty());
     window.set_can_go_back(state.can_go_back());
     window.set_can_go_forward(state.can_go_forward());
@@ -67,6 +82,15 @@ fn sync_fullscreen(window: &MainWindow, page_fullscreen: bool) {
     // fullscreen also ends window fullscreen that the user had turned on before; this matches
     // servoshell and is deliberate.
     window.window().set_fullscreen(page_fullscreen);
+}
+
+/// What the address field should show. `None` means leave the user's text alone.
+pub(crate) fn address_bar_update(
+    committed: &str,
+    field_has_focus: bool,
+    tab_changed: bool,
+) -> Option<String> {
+    (tab_changed || !field_has_focus).then(|| committed.to_owned())
 }
 
 fn single_line(text: &str) -> String {
@@ -178,6 +202,28 @@ mod tests {
             WebViewCursor::NwseResize
         );
         assert_eq!(web_view_cursor(PointerCursor::None), WebViewCursor::None);
+    }
+
+    #[test]
+    fn address_is_written_when_the_field_is_idle() {
+        assert_eq!(
+            address_bar_update("https://a.test/", false, false),
+            Some("https://a.test/".to_owned())
+        );
+    }
+
+    #[test]
+    fn address_is_left_alone_while_the_user_is_typing() {
+        assert_eq!(address_bar_update("https://a.test/", true, false), None);
+    }
+
+    #[test]
+    fn tab_change_overrides_typing() {
+        assert_eq!(
+            address_bar_update("https://b.test/", true, true),
+            Some("https://b.test/".to_owned())
+        );
+        assert_eq!(address_bar_update("", false, true), Some(String::new()));
     }
 
     #[test]
