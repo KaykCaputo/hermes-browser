@@ -1,4 +1,8 @@
+mod common;
+
 use std::error::Error;
+
+use common::test_search;
 
 use talaria_core::{AddressResolutionError, NavigationTarget, classify_address, resolve_address};
 use url::Url;
@@ -18,7 +22,8 @@ fn explicit_https_url_is_preserved() {
 
 #[test]
 fn about_url_is_preserved() {
-    let url = resolve_address("about:blank").expect("about:blank should be supported");
+    let url =
+        resolve_address("about:blank", &test_search()).expect("about:blank should be supported");
 
     assert_eq!(url.as_str(), "about:blank");
 }
@@ -34,7 +39,7 @@ fn file_urls_are_accepted() {
         )
     );
     assert_eq!(
-        resolve_address("file:///tmp/page.html")
+        resolve_address("file:///tmp/page.html", &test_search())
             .expect("a file URL should be supported")
             .as_str(),
         "file:///tmp/page.html"
@@ -43,30 +48,30 @@ fn file_urls_are_accepted() {
 
 #[test]
 fn hostname_without_scheme_uses_https() {
-    let url =
-        resolve_address("servo.org/downloads").expect("a hostname with a path should be accepted");
+    let url = resolve_address("servo.org/downloads", &test_search())
+        .expect("a hostname with a path should be accepted");
 
     assert_eq!(url.as_str(), "https://servo.org/downloads");
 }
 
 #[test]
 fn localhost_with_port_uses_https() {
-    let url =
-        resolve_address("localhost:3000/status").expect("localhost with a port should be accepted");
+    let url = resolve_address("localhost:3000/status", &test_search())
+        .expect("localhost with a port should be accepted");
 
     assert_eq!(url.as_str(), "https://localhost:3000/status");
 }
 
 #[test]
 fn ip_address_with_port_uses_https() {
-    let url = resolve_address("127.0.0.1:8080/status")
+    let url = resolve_address("127.0.0.1:8080/status", &test_search())
         .expect("an IP address with a port should be accepted");
 
     assert_eq!(url.as_str(), "https://127.0.0.1:8080/status");
 }
 
 #[test]
-fn plain_text_becomes_a_duckduckgo_search() {
+fn plain_text_becomes_a_search() {
     let target = classify_address("  ownership in rust  ")
         .expect("plain text should be classified as a search");
 
@@ -77,19 +82,19 @@ fn plain_text_becomes_a_duckduckgo_search() {
 }
 
 #[test]
-fn search_query_is_encoded_in_duckduckgo_url() {
-    let url =
-        resolve_address("rust ownership & borrowing").expect("a search query should produce a URL");
+fn a_search_is_built_by_the_given_builder() {
+    let url = resolve_address("rust ownership & borrowing", &test_search())
+        .expect("a search query should produce a URL");
 
     assert_eq!(
         url.as_str(),
-        "https://duckduckgo.com/?q=rust+ownership+%26+borrowing"
+        "https://search.test/?q=rust+ownership+%26+borrowing"
     );
 }
 
 #[test]
 fn empty_input_is_rejected() {
-    let error = resolve_address("   ").expect_err("blank input should be rejected");
+    let error = resolve_address("   ", &test_search()).expect_err("blank input should be rejected");
 
     assert!(matches!(error, AddressResolutionError::EmptyInput));
     assert_eq!(error.to_string(), "address input cannot be empty");
@@ -98,7 +103,7 @@ fn empty_input_is_rejected() {
 
 #[test]
 fn unsupported_explicit_scheme_is_rejected() {
-    let error = resolve_address("ftp://example.com/file")
+    let error = resolve_address("ftp://example.com/file", &test_search())
         .expect_err("an unsupported scheme should be rejected");
 
     assert!(matches!(
@@ -110,7 +115,8 @@ fn unsupported_explicit_scheme_is_rejected() {
 
 #[test]
 fn malformed_explicit_url_preserves_parse_error_as_source() {
-    let error = resolve_address("https://").expect_err("a malformed explicit URL should fail");
+    let error = resolve_address("https://", &test_search())
+        .expect_err("a malformed explicit URL should fail");
 
     assert!(matches!(error, AddressResolutionError::InvalidUrl(_)));
     assert!(error.to_string().starts_with("invalid URL: "));

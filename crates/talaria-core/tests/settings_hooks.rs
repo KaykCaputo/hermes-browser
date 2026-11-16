@@ -2,11 +2,13 @@
 //! input that is not an address, the default page zoom, and a colour scheme forced over the
 //! system's.
 
+mod common;
+
+use common::test_search;
 use talaria_core::{
     AddressResolutionError, BrowserCommand, BrowserController, BrowserEvent, ColorScheme,
-    SearchUrlBuilder, TabCommand, TabId, resolve_address_with,
+    SearchUrlBuilder, TabCommand, TabId, resolve_address,
 };
-use url::Url;
 
 fn mark_engine_ready(controller: &mut BrowserController, tab_id: TabId) {
     assert!(controller.handle_event(tab_id, BrowserEvent::AddressChanged { url: String::new() }));
@@ -16,18 +18,9 @@ fn queued(controller: &mut BrowserController) -> Vec<TabCommand> {
     std::iter::from_fn(|| controller.next_command()).collect()
 }
 
-/// A search that records nothing and puts the text after `https://search.test/?q=`.
-fn test_search() -> SearchUrlBuilder {
-    SearchUrlBuilder::new(|text| {
-        let mut url = Url::parse("https://search.test/").map_err(|error| error.to_string())?;
-        url.query_pairs_mut().append_pair("q", text);
-        Ok(url)
-    })
-}
-
 #[test]
 fn a_search_goes_through_the_builder_it_is_given() {
-    let url = resolve_address_with("rust book", Some(&test_search())).expect("a search URL");
+    let url = resolve_address("rust book", &test_search()).expect("a search URL");
 
     assert_eq!(url.as_str(), "https://search.test/?q=rust+book");
 }
@@ -42,15 +35,14 @@ fn addresses_never_reach_the_builder() {
         ("w.org", "https://w.org/"),
         ("localhost:3000", "https://localhost:3000/"),
     ] {
-        let url = resolve_address_with(input, Some(&builder)).expect("an address");
+        let url = resolve_address(input, &builder).expect("an address");
         assert_eq!(url.as_str(), expected, "{input}");
     }
 }
 
 #[test]
 fn the_whole_trimmed_text_is_handed_to_the_builder() {
-    let url = resolve_address_with("  @wikipedia rust book  ", Some(&test_search()))
-        .expect("a search URL");
+    let url = resolve_address("  @wikipedia rust book  ", &test_search()).expect("a search URL");
 
     assert_eq!(
         url.as_str(),
@@ -59,12 +51,22 @@ fn the_whole_trimmed_text_is_handed_to_the_builder() {
 }
 
 #[test]
-fn without_a_builder_searches_keep_todays_url() {
-    let url = resolve_address_with("rust ownership & borrowing", None).expect("a search URL");
+fn without_a_builder_the_controller_refuses_to_search() {
+    let mut controller = BrowserController::default();
 
+    let error = controller
+        .queue_navigation("rust ownership")
+        .expect_err("no search engine is set");
+
+    assert!(matches!(error, AddressResolutionError::Search(_)));
+    assert_eq!(controller.active_state().url(), "");
     assert_eq!(
-        url.as_str(),
-        "https://duckduckgo.com/?q=rust+ownership+%26+borrowing"
+        controller
+            .queue_navigation("example.com")
+            .map(|()| controller.active_state().url().to_owned())
+            .ok()
+            .as_deref(),
+        Some("https://example.com/")
     );
 }
 
@@ -72,7 +74,7 @@ fn without_a_builder_searches_keep_todays_url() {
 fn a_builder_that_refuses_the_text_is_an_address_error() {
     let builder = SearchUrlBuilder::new(|_| Err("no place for this query".to_owned()));
 
-    let error = resolve_address_with("plain words", Some(&builder)).expect_err("refused");
+    let error = resolve_address("plain words", &builder).expect_err("refused");
 
     assert!(matches!(error, AddressResolutionError::Search(_)));
     assert_eq!(

@@ -4,8 +4,6 @@ use std::net::IpAddr;
 
 use url::Url;
 
-const DUCKDUCKGO_SEARCH_URL: &str = "https://duckduckgo.com/";
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NavigationTarget {
     Url(Url),
@@ -13,10 +11,11 @@ pub enum NavigationTarget {
 }
 
 impl NavigationTarget {
-    pub fn into_url(self) -> Result<Url, AddressResolutionError> {
+    /// The URL to open; a search is built by `search`, the only place search URLs come from.
+    pub fn into_url(self, search: &SearchUrlBuilder) -> Result<Url, AddressResolutionError> {
         match self {
             Self::Url(url) => Ok(url),
-            Self::SearchQuery(query) => duckduckgo_search_url(&query),
+            Self::SearchQuery(query) => search.build(&query),
         }
     }
 }
@@ -85,13 +84,16 @@ pub fn classify_address(input: &str) -> Result<NavigationTarget, AddressResoluti
     }
 }
 
-pub fn resolve_address(input: &str) -> Result<Url, AddressResolutionError> {
-    classify_address(input)?.into_url()
+/// The URL for address-bar input; text that is not an address is searched for with `search`.
+pub fn resolve_address(
+    input: &str,
+    search: &SearchUrlBuilder,
+) -> Result<Url, AddressResolutionError> {
+    classify_address(input)?.into_url(search)
 }
 
 /// Builds the results-page URL for address-bar text that is not an address. The application
-/// supplies it (from its search-engine settings), so the core never builds search URLs itself
-/// once one is set; without one, `NavigationTarget::into_url` is used.
+/// supplies it (from its search-engine settings); the core never builds search URLs itself.
 pub struct SearchUrlBuilder(Box<BuildSearchUrl>);
 
 type BuildSearchUrl = dyn Fn(&str) -> Result<Url, String>;
@@ -114,17 +116,6 @@ impl std::fmt::Debug for SearchUrlBuilder {
     }
 }
 
-/// Like `resolve_address`, with searches built by `search` when one is given.
-pub fn resolve_address_with(
-    input: &str,
-    search: Option<&SearchUrlBuilder>,
-) -> Result<Url, AddressResolutionError> {
-    match (classify_address(input)?, search) {
-        (NavigationTarget::SearchQuery(query), Some(search)) => search.build(&query),
-        (target, _) => target.into_url(),
-    }
-}
-
 fn is_supported_scheme(scheme: &str) -> bool {
     matches!(scheme, "http" | "https" | "about" | "file")
 }
@@ -142,15 +133,4 @@ fn parse_hostname(input: &str) -> Option<Url> {
         || host.parse::<IpAddr>().is_ok();
 
     looks_like_host.then_some(candidate)
-}
-
-fn duckduckgo_search_url(query: &str) -> Result<Url, AddressResolutionError> {
-    let mut search_url = Url::parse(DUCKDUCKGO_SEARCH_URL)?;
-
-    {
-        let mut query_pairs = search_url.query_pairs_mut();
-        query_pairs.append_pair("q", query);
-    }
-
-    Ok(search_url)
 }

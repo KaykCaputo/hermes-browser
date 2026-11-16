@@ -1,9 +1,11 @@
 use std::collections::VecDeque;
 
-use crate::address::{AddressResolutionError, SearchUrlBuilder, resolve_address_with};
+use crate::address::{AddressResolutionError, SearchUrlBuilder, resolve_address};
 use crate::browser::LoadState;
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
 use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, Tab, TabActivation, TabCommand, TabId};
+
+const NO_SEARCH: &str = "no search engine is set";
 
 #[derive(Debug)]
 pub struct BrowserController {
@@ -41,7 +43,7 @@ impl BrowserController {
     /// cannot navigate it, so the pending page is replaced instead: the URL becomes the tab's
     /// initial URL again and the engine recreates the tab's web view with it.
     pub fn queue_navigation(&mut self, input: &str) -> Result<(), AddressResolutionError> {
-        let url = resolve_address_with(input, self.search.as_ref())?.to_string();
+        let url = self.resolve(input)?.to_string();
         let tab_id = self.active_tab_id;
         let tab = self
             .tab_mut(tab_id)
@@ -91,9 +93,7 @@ impl BrowserController {
         activation: TabActivation,
     ) -> Result<TabId, AddressResolutionError> {
         let initial_url = initial_address
-            .map(|address| {
-                resolve_address_with(address, self.search.as_ref()).map(|url| url.to_string())
-            })
+            .map(|address| self.resolve(address).map(|url| url.to_string()))
             .transpose()?;
         let tab_id = self.open_blank_tab(activation);
 
@@ -114,7 +114,7 @@ impl BrowserController {
         tab_id: TabId,
         address: &str,
     ) -> Result<bool, AddressResolutionError> {
-        let url = resolve_address_with(address, self.search.as_ref())?.to_string();
+        let url = self.resolve(address)?.to_string();
         Ok(self
             .tab_mut(tab_id)
             .is_some_and(|tab| set_tab_initial_url(tab, url)))
@@ -379,6 +379,15 @@ impl BrowserController {
     }
 
     // settings
+
+    /// Resolves address-bar input. Until a search builder is set, text that is not an address
+    /// is refused rather than searched for anywhere.
+    fn resolve(&self, input: &str) -> Result<url::Url, AddressResolutionError> {
+        match &self.search {
+            Some(search) => resolve_address(input, search),
+            None => resolve_address(input, &SearchUrlBuilder::new(|_| Err(NO_SEARCH.to_owned()))),
+        }
+    }
 
     /// Searches typed in the address bar are built by `search` from now on.
     pub fn set_search_url_builder(&mut self, search: SearchUrlBuilder) {
