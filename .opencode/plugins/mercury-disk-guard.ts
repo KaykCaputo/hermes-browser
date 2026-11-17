@@ -285,6 +285,9 @@ export default {
       event.env.CARGO_PROFILE_RELEASE_DEBUG = "0"
       event.env.MERCURY_DISK_GUARD = "1"
       event.env.CI_TOOLS_DIR = CI_TOOLS
+      // One profile per round: `make lint` and `make test` build in release like `make build-release`,
+      // so a cold round compiles Servo once instead of twice (CI's macOS job tests in release too).
+      if (!event.env.CARGO_FLAGS) event.env.CARGO_FLAGS = "--release"
       const command: string = event.command ?? ""
       if (command.includes(SLOT_SCRIPT)) return
       if (COPIES_BUILD_OUTPUT.test(command)) {

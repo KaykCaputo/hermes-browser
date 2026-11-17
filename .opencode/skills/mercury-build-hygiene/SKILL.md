@@ -16,6 +16,9 @@ whatever you do. Follow the rules below so that it never deletes something you s
 
 - **Every shell command** gets `CARGO_INCREMENTAL=0` and no debug info (`CARGO_PROFILE_*_DEBUG=0`).
   Builds are smaller and start cold; that is expected.
+- **`CARGO_FLAGS=--release`** is set unless you set it yourself, so `make lint`, `make test` and
+  `make build-release` share one release build: a round compiles Servo once, not twice. Binaries are in
+  `target/release/`. Use the same profile for any `cargo` command you run by hand (`--release`).
 - **Every build command** (`cargo build|test|clippy|check|run|doc`, `make lint|test|build|build-release|check|app-macos|run`,
   `scripts/macos/bundle.sh`) runs through `scripts/dev/build-slot.sh`. It waits until one of the three
   build slots is free and at least 40 GB of disk is free, shares the cores between the builds running
