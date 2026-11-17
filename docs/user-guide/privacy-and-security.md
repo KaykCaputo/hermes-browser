@@ -19,6 +19,25 @@ There are currently no per-site controls, exception lists, cosmetic filtering co
 
 The current preview does not implement persistent sessions, history, bookmarks, settings, extensions, or private profiles. Do not interpret the absence of those features as a complete privacy mode: Servo and native media libraries may still use normal process and system resources during a session.
 
+Pages are cached on disk as well as in memory: for the default profile in `~/Library/Caches/io.github.thepigdestroyer.mercury-browser/Default/http-cache` (macOS), for a `--profile-dir` profile in its `http-cache` folder. In Settings, **When Mercury Browser quits, clear > Cached files** removes it when Mercury quits (or at the next start, if Mercury did not quit normally).
+
+## Proxy servers
+
+On macOS, Mercury uses the proxies set in **System Settings > Network > (your network) > Details > Proxies**, read when Mercury starts; a change takes effect at the next start. The `http_proxy`, `https_proxy` and `no_proxy` environment variables, if set, are used instead (on Linux they are the only source).
+
+Used:
+
+- **Web proxy (HTTP)** and **Secure web proxy (HTTPS)**, with the list of hosts and domains that bypass them. `localhost` and `127.0.0.1` always bypass the proxy.
+
+Not used:
+
+- **Automatic proxy configuration** (a PAC file) and **Auto proxy discovery** (WPAD). If your network depends on them, set the web proxies by hand.
+- **SOCKS proxy.** With only a SOCKS proxy set, Mercury connects **directly**, not through it.
+- **Exclude simple hostnames**, and bypass entries with a wildcard in the middle (such as `www.*.example`).
+- **Proxies that ask for a password.** Mercury cannot prompt for one; the page fails with a connection error. A user name and password in `http_proxy` (`http://user:password@host:port`) do work.
+
+Mercury sends plain `http://` addresses through the proxy with `CONNECT` as well, so a proxy that allows `CONNECT` only to port 443 refuses them. Mercury writes a warning to its log at start when the system asks for something it does not use.
+
 ## Sandboxing status
 
 !!! danger "Do not use Mercury for sensitive browsing"

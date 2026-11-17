@@ -144,7 +144,11 @@ impl ServoRuntime {
         // them belong to an earlier session that was not ended (killed, or cut short by the
         // shutdown watchdog); remove them from the files before Servo can load them.
         if let Some(config_dir) = &runtime_options.config_dir {
-            clean_up_before_engine_start(config_dir, runtime_options.clear_on_exit);
+            clean_up_before_engine_start(
+                config_dir,
+                runtime_options.http_disk_cache_dir.as_deref(),
+                runtime_options.clear_on_exit,
+            );
         }
         // Servo panics at start on some damaged caches; nothing has the file open yet.
         let cache_check = runtime_options
@@ -167,7 +171,11 @@ impl ServoRuntime {
         let after_engine_cleanup = runtime_options.config_dir.clone().map(|config_dir| {
             // Session cookies saved by a run that did not end them (it was killed) end now.
             end_session_cookies(&inner);
-            Rc::new(AfterEngineCleanup::new(config_dir, switches.clone()))
+            Rc::new(AfterEngineCleanup::new(
+                config_dir,
+                runtime_options.http_disk_cache_dir.clone(),
+                switches.clone(),
+            ))
         });
         if multiprocess_enabled {
             info!(
@@ -368,7 +376,8 @@ fn apply_system_proxy(preferences: &mut Preferences, system: Option<&SystemProxy
     preferences.network_http_no_proxy = proxy.no_proxy;
 }
 
-/// Once, at start: which proxies are used, and what of the system settings is not.
+/// Once, at start: which proxies are used (in the log), and what of the system settings is not
+/// (a warning that is always shown).
 fn log_proxy_settings(system: Option<&SystemProxySettings>) {
     let preferences = servo::prefs::get();
     for (scheme, uri) in [
@@ -384,11 +393,14 @@ fn log_proxy_settings(system: Option<&SystemProxySettings>) {
             info!("{scheme} requests go through the proxy at {host}");
         }
     }
+    // A warning on standard error, always shown: Servo's logger prints only errors unless
+    // `RUST_LOG` asks for more, and someone whose network needs a PAC file must be able to see
+    // why pages do not load.
     for message in system
         .map(SystemProxySettings::unsupported)
         .unwrap_or_default()
     {
-        log::warn!("{message}");
+        eprintln!("mercury-browser: warning: {message}");
     }
 }
 
