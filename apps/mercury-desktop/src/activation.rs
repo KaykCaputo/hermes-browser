@@ -35,7 +35,13 @@ pub(crate) fn consume_user_activation(tab: TabId, now: Instant) -> bool {
     })
 }
 
-#[expect(dead_code, reason = "the tabs lane calls it when a tab closes")]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the tabs lane calls it when a document starts or a tab closes"
+    )
+)]
 pub(crate) fn forget_tab(tab: TabId) {
     LAST_ACTIVATION.with(|last| {
         last.borrow_mut().remove(&tab);

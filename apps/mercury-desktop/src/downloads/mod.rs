@@ -117,8 +117,16 @@ struct Downloads {
     pending_quit: RefCell<Option<Box<dyn FnOnce()>>>,
     /// Whether the page has the keyboard (shared with the window's input handling).
     web_view_focused: Rc<Cell<bool>>,
-    /// The page had the keyboard when the popover, list or question opened.
-    focus_returns_to_page: Cell<bool>,
+    /// Who had the keyboard when the popover, list or question opened.
+    focus_returns_to: Cell<FocusReturn>,
+}
+
+/// Where the keyboard goes back when the downloads UI closes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusReturn {
+    Nowhere,
+    Page,
+    AddressBar,
 }
 
 fn current() -> Option<Rc<Downloads>> {
@@ -154,7 +162,7 @@ pub(crate) fn start(
         more_records: Cell::new(false),
         pending_quit: RefCell::new(None),
         web_view_focused,
-        focus_returns_to_page: Cell::new(false),
+        focus_returns_to: Cell::new(FocusReturn::Nowhere),
     });
     DOWNLOADS.with(|current| *current.borrow_mut() = Some(Rc::clone(&downloads)));
     window.set_downloads_show_label(show_label().into());
@@ -277,6 +285,27 @@ pub(crate) fn note_typed_navigation(tab: TabId, address: &str) {
         .note_typed(tab, url.as_str(), Instant::now());
 }
 
+/// The engine's top-level request hook (`ServoRuntime::set_document_request_listener`):
+/// decides, synchronously as each request starts, whether the user started it — the address
+/// they typed, or a gesture in the tab, which it consumes. Runs inside the engine's event loop,
+/// before a new document starting in the same spin can drop the gesture.
+pub(crate) fn document_request_listener() -> talaria_servo::DocumentRequestListener {
+    Rc::new(|tab: TabId, url: &Url, redirect: bool| {
+        let now = Instant::now();
+        let take_gesture = || crate::activation::consume_user_activation(tab, now);
+        match current() {
+            Some(downloads) => downloads
+                .navigations
+                .try_borrow_mut()
+                .map(|mut navigations| {
+                    navigations.user_started_now(tab, url.as_str(), redirect, now, take_gesture)
+                })
+                .unwrap_or(false),
+            None => !redirect && take_gesture(),
+        }
+    })
+}
+
 /// Whether a key press passed to the page counts as a gesture: anything but Escape and keys
 /// pressed alone as modifiers (HTML's activation-triggering `keydown`).
 pub(crate) fn counts_as_activation(key: &winit::keyboard::Key) -> bool {
@@ -322,14 +351,18 @@ pub(crate) fn take_download_offers(controller: &RefCell<BrowserController>) {
                 url,
                 redirect,
                 from,
-            } => downloads.navigations.borrow_mut().request_started(
-                tab,
-                &url,
-                redirect,
-                from.as_deref(),
-                now,
-                || crate::activation::consume_user_activation(tab, now),
-            ),
+                user_started,
+            } => {
+                let foreground = controller.borrow().active_tab_id() == tab;
+                downloads.navigations.borrow_mut().request_started(
+                    tab,
+                    &url,
+                    redirect,
+                    from.as_deref(),
+                    user_started,
+                    foreground,
+                );
+            }
             DownloadSignal::Offered(offer) => downloads.offered(controller, tab, offer, now),
         }
     }
@@ -551,9 +584,10 @@ impl Downloads {
             return;
         };
         let navigation = self.navigations.borrow_mut().take(tab, &offer.url);
+        // A gesture counts only in the tab that was in front when the request started.
         let user_started = navigation
             .as_ref()
-            .is_some_and(|navigation| navigation.user_started);
+            .is_some_and(|navigation| navigation.user_started && navigation.foreground);
         let from = navigation
             .and_then(|navigation| navigation.from)
             .and_then(|from| Url::parse(&from).ok());
@@ -562,21 +596,10 @@ impl Downloads {
             .as_deref()
             .and_then(|referrer| Url::parse(referrer).ok());
         let foreground = controller.borrow().active_tab_id() == tab;
-        // Back to the page before, only if the tab still shows the offered page.
-        let went_back = {
-            let mut controller = controller.borrow_mut();
-            let on_offer = controller.tabs().any(|candidate| {
-                candidate.id() == tab
-                    && candidate.state().url() == offer.url
-                    && candidate.state().can_go_back()
-            });
-            if on_offer {
-                controller.queue_command_for(tab, BrowserCommand::GoBack);
-            }
-            on_offer
-        };
-        let initiator = offers::initiator(referrer.as_ref(), from.as_ref(), &url).clone();
-        let initiator_site = offers::site_of(&initiator);
+        let initiator = offers::initiator(referrer.as_ref(), from.as_ref()).cloned();
+        // Block keys on the page that started it; a tab that opened on the file has none, so
+        // the file's own origin stands in.
+        let initiator_site = offers::site_of(initiator.as_ref().unwrap_or(&url));
         let decision = self.policy.borrow_mut().decide(
             &OfferFacts {
                 tab,
@@ -588,20 +611,41 @@ impl Downloads {
             },
             now,
         );
-        let name =
-            mercury_downloads::file_name_for(None, &url, Some(offer.mime_type.as_str()), None);
         log::info!(
             "tab {}: a page offered a download: {decision:?}",
             tab.value()
         );
+        // A refusal the user never hears of leaves the tab alone; everything else takes the tab
+        // back to the page before, if it still shows the offered page.
+        let silent = !user_started
+            && matches!(
+                decision,
+                Decision::Refuse(Refusal::Background | Refusal::Blocked | Refusal::RateLimited)
+            );
+        let went_back = !silent && {
+            let mut controller = controller.borrow_mut();
+            let on_offer = controller.tabs().any(|candidate| {
+                candidate.id() == tab
+                    && candidate.state().url() == offer.url
+                    && candidate.state().can_go_back()
+            });
+            if on_offer {
+                controller.queue_command_for(tab, BrowserCommand::GoBack);
+            }
+            on_offer
+        };
+        let name =
+            mercury_downloads::file_name_for(None, &url, Some(offer.mime_type.as_str()), None);
         let referrer = referrer_for(referrer.as_ref());
         match decision {
             Decision::Download => self.start_download(url, referrer, None, true),
             Decision::Ask => {
-                let text = format!(
-                    "{} wants to download {name}",
-                    offers::host_label(&initiator)
-                );
+                let text = match &initiator {
+                    Some(page) => {
+                        format!("{} wants to download {name}", offers::host_label(page))
+                    }
+                    None => format!("This tab wants to download {name}"),
+                };
                 let detail = format!("From {}", offers::host_label(&url));
                 let watch = BarWatch::new(&offer.url, went_back);
                 self.ask(
@@ -625,6 +669,22 @@ impl Downloads {
                 &name,
                 &format!("Files from “{scheme}:” addresses cannot be saved yet"),
             ),
+            // A download the user started is never dropped without a word.
+            Decision::Refuse(Refusal::Blocked) if user_started => self.note(
+                &name,
+                &format!(
+                    "Downloads started by {} are blocked for this session",
+                    initiator
+                        .as_ref()
+                        .map_or_else(|| offers::host_label(&url), offers::host_label)
+                ),
+            ),
+            Decision::Refuse(Refusal::RateLimited | Refusal::Background) if user_started => {
+                self.note(
+                    &name,
+                    "This download was not started; download it from the page",
+                );
+            }
             Decision::Refuse(Refusal::Background | Refusal::Blocked | Refusal::RateLimited) => {}
         }
     }
@@ -759,12 +819,24 @@ impl Downloads {
     }
 
     /// The popover, the list or the question opens and takes the keyboard: keys stop going to
-    /// the page at once (before Slint has moved the focus), and the page gets the focus back
-    /// when the last of them closes, if it had it.
+    /// the page at once (before Slint has moved the focus), and whoever had it (the page or the
+    /// address field) gets it back when the last of them closes.
     fn take_keyboard(&self) {
-        if self.web_view_focused.replace(false) {
-            self.focus_returns_to_page.set(true);
+        let page = self.web_view_focused.replace(false);
+        if self.focus_returns_to.get() != FocusReturn::Nowhere {
+            return;
         }
+        let address_bar = self
+            .window
+            .upgrade()
+            .is_some_and(|window| window.get_text_input_focused());
+        self.focus_returns_to.set(if page {
+            FocusReturn::Page
+        } else if address_bar {
+            FocusReturn::AddressBar
+        } else {
+            FocusReturn::Nowhere
+        });
     }
 
     fn give_keyboard_back(&self) {
@@ -774,11 +846,16 @@ impl Downloads {
                 .window
                 .upgrade()
                 .is_some_and(|window| window.get_quit_prompt_open());
-        if still_open || !self.focus_returns_to_page.replace(false) {
+        if still_open {
             return;
         }
-        if let Some(window) = self.window.upgrade() {
-            window.invoke_downloads_focus_web_view();
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        match self.focus_returns_to.replace(FocusReturn::Nowhere) {
+            FocusReturn::Page => window.invoke_downloads_focus_web_view(),
+            FocusReturn::AddressBar => window.invoke_downloads_focus_address_bar(),
+            FocusReturn::Nowhere => {}
         }
     }
 
@@ -1206,5 +1283,121 @@ mod tests {
         ] {
             assert!(counts_as_activation(&key), "{key:?}");
         }
+    }
+
+    // Review round 3.
+
+    #[test]
+    fn a_click_whose_document_starts_in_the_same_spin_is_still_the_users() {
+        use std::time::Instant;
+
+        use talaria_core::TabId;
+
+        use crate::activation::{forget_tab, note_user_activation};
+        use crate::downloads::offers::Navigations;
+
+        let tab = TabId::new(41);
+        let url = url::Url::parse("https://files.example.net/a.zip").unwrap();
+        let now = Instant::now();
+        note_user_activation(tab, now);
+        let mut navigations = Navigations::default();
+        // Inside one engine spin: the request hook decides (and consumes the click)...
+        let listener = super::document_request_listener();
+        let user_started = listener(tab, &url, false);
+        // ...then the new document starts, which drops the tab's activation (tabs lane).
+        forget_tab(tab);
+        // Later in the same pump, the queued `DocumentRequestStarted` carries the answer.
+        navigations.request_started(tab, url.as_str(), false, None, user_started, true);
+        assert!(navigations.take(tab, url.as_str()).unwrap().user_started);
+        // A redirect hop never takes a gesture.
+        note_user_activation(tab, now);
+        assert!(!listener(tab, &url, true));
+    }
+
+    #[test]
+    fn return_on_the_quit_question_keeps_downloading_and_never_reaches_the_page() {
+        use std::cell::{Cell, RefCell};
+        use std::rc::Rc;
+
+        use mercury_downloads::DownloadId;
+        use mercury_ui::MainWindow;
+        use slint::ComponentHandle;
+        use slint::platform::software_renderer::{
+            MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
+        };
+        use slint::platform::{Key as SlintKey, Platform, WindowAdapter, WindowEvent};
+        use talaria_core::BrowserController;
+
+        use super::{DownloadOptions, confirm_quit, current, start};
+        use crate::downloads::model::NewItem;
+
+        struct TestPlatform(Rc<MinimalSoftwareWindow>);
+        impl Platform for TestPlatform {
+            fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.0.clone())
+            }
+        }
+        let adapter = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform(adapter.clone())))
+            .expect("the platform is set once in this test thread");
+        let window = MainWindow::new().expect("the window builds");
+        adapter.set_size(slint::PhysicalSize::new(900, 600));
+        window.show().expect("the window shows");
+        let settle = || {
+            for _ in 0..3 {
+                slint::platform::update_timers_and_animations();
+                adapter.request_redraw();
+                let mut buffer = vec![PremultipliedRgbaColor::default(); 900 * 600];
+                adapter.draw_if_needed(|renderer| {
+                    renderer.render(&mut buffer, 900);
+                });
+            }
+        };
+
+        let controller = Rc::new(RefCell::new(BrowserController::default()));
+        // The page had the keyboard.
+        let web_view_focused = Rc::new(Cell::new(true));
+        start(
+            &window,
+            Rc::clone(&controller),
+            Rc::clone(&web_view_focused),
+            DownloadOptions::default(),
+        );
+        current().unwrap().list.borrow_mut().begin(NewItem {
+            guid: "running".into(),
+            url: "https://example.com/a.zip".into(),
+            referrer: None,
+            name_guess: "a.zip".into(),
+            transfer: DownloadId(1),
+            started_at_ms: 1,
+            suggested_name: None,
+            refetched: false,
+        });
+        let quit = Rc::new(Cell::new(false));
+        let quitting = Rc::clone(&quit);
+        confirm_quit(move || quitting.set(true));
+        assert!(window.get_quit_prompt_open());
+        // The window's keyboard handler passes a key to the page only while this is set; it is
+        // cleared before the question is even drawn.
+        assert!(!web_view_focused.get());
+        settle();
+
+        // Return, as the window delivers it to Slint once the native handler has passed it on.
+        adapter.dispatch_event(WindowEvent::KeyPressed {
+            text: SlintKey::Return.into(),
+        });
+        adapter.dispatch_event(WindowEvent::KeyReleased {
+            text: SlintKey::Return.into(),
+        });
+        settle();
+
+        assert!(
+            !window.get_quit_prompt_open(),
+            "Return answered the question"
+        );
+        assert!(!quit.get(), "the answer was \"Keep downloading\"");
+        // Nothing was queued for the page (no `KeyboardInput` or any other command).
+        assert_eq!(controller.borrow_mut().next_command(), None);
+        super::DOWNLOADS.with(|current| current.borrow_mut().take());
     }
 }

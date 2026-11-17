@@ -256,6 +256,9 @@ export component MainWindow inherits Window {
     public function downloads-focus-web-view() {
         web-view-focus.focus();
     }
+    public function downloads-focus-address-bar() {
+        address-input.focus();
+    }
     // --- end downloads-ui ---
 
     pure function mouse-cursor-for(cursor: WebViewCursor) -> MouseCursor {

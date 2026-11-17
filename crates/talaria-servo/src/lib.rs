@@ -22,6 +22,8 @@ pub use error::ServoWebViewError;
 pub use error_pages::error_page_titles;
 pub use opengl_context::ViewportSize;
 pub use panics::{hard_fail_in_single_process, should_panic_hook_suppress_termination};
-pub use runtime::{EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ServoRuntime};
+pub use runtime::{
+    DocumentRequestListener, EventLoopWaker, NEW_TAB_URL, RuntimeOptions, ServoRuntime,
+};
 pub use screen::ScreenMetrics;
 pub use web_view::ServoWebView;

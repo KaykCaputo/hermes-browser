@@ -86,7 +86,12 @@ pub(crate) fn connect_servo_runtime(
     let engine = Rc::new(Engine {
         window: window.as_weak(),
         state: RefCell::new(Some(EngineState {
-            runtime: ServoRuntime::new(event_loop_waker, runtime_options),
+            runtime: {
+                let runtime = ServoRuntime::new(event_loop_waker, runtime_options);
+                runtime
+                    .set_document_request_listener(crate::downloads::document_request_listener()); // downloads-ui lane
+                runtime
+            },
             controller,
             web_view_focused,
             rendering_context: None,

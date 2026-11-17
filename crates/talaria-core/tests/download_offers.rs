@@ -17,6 +17,7 @@ fn request(url: &str, redirect: bool) -> BrowserEvent {
         url: url.to_owned(),
         redirect,
         from: Some("https://a.test/page".to_owned()),
+        user_started: !redirect,
     }
 }
 
@@ -41,6 +42,7 @@ fn requests_and_offers_are_queued_per_tab_in_order_and_taken_once() {
                     url: "https://a.test/go".into(),
                     redirect: false,
                     from: Some("https://a.test/page".into()),
+                    user_started: true,
                 }
             ),
             (
@@ -49,6 +51,7 @@ fn requests_and_offers_are_queued_per_tab_in_order_and_taken_once() {
                     url: "https://cdn.test/a.zip".into(),
                     redirect: true,
                     from: Some("https://a.test/page".into()),
+                    user_started: false,
                 }
             ),
             (

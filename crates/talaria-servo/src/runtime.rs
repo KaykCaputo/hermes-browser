@@ -28,6 +28,11 @@ type WakeCallback = dyn Fn() + Send + Sync + 'static;
 
 pub const NEW_TAB_URL: &str = "about:blank";
 
+/// downloads: called synchronously inside Servo's event loop as a tab's top-level request starts,
+/// with the tab, the URL and whether it is a redirect hop; answers whether the user started it.
+pub type DocumentRequestListener = Rc<dyn Fn(TabId, &Url, bool) -> bool>;
+type SharedDocumentRequestListener = Rc<RefCell<Option<DocumentRequestListener>>>;
+
 #[derive(Clone)]
 pub struct EventLoopWaker {
     callback: Arc<WakeCallback>,
@@ -96,6 +101,8 @@ pub struct ServoRuntime {
     user_content: Rc<servo::UserContentManager>,
     /// The `User-Agent` pages are loaded with; downloads send the same. (downloads)
     user_agent: String,
+    /// downloads: decides, as a top-level request starts, whether the user started it.
+    document_request_listener: SharedDocumentRequestListener,
     /// Declared after `inner` and `user_content`, the two fields that hold a handle to Servo,
     /// so it is dropped after the last of them. Every web view's delegate holds a clone too;
     /// see `AfterEngineCleanup`.
@@ -154,6 +161,7 @@ impl ServoRuntime {
             screen_metrics: Rc::default(),
             user_content,
             user_agent,
+            document_request_listener: Rc::default(),
             after_engine_cleanup,
         }
     }
@@ -182,6 +190,7 @@ impl ServoRuntime {
             screen_metrics: Rc::clone(&self.screen_metrics),
             _after_engine_cleanup: self.after_engine_cleanup.clone(),
             last_document_request: RefCell::new(None), // downloads
+            document_request_listener: Rc::clone(&self.document_request_listener), // downloads
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -204,6 +213,12 @@ impl ServoRuntime {
     }
 
     // downloads
+    /// Called synchronously, inside `spin_event_loop`, as each top-level request of a tab starts
+    /// (`redirect` for the next hop of a navigation); answers whether the user started it.
+    pub fn set_document_request_listener(&self, listener: DocumentRequestListener) {
+        self.document_request_listener.replace(Some(listener));
+    }
+
     /// The `User-Agent` the engine sends.
     pub fn user_agent(&self) -> &str {
         &self.user_agent
@@ -341,6 +356,8 @@ struct BrowserDelegate {
     _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
     /// downloads: the method, URL and referrer of the last top-level request.
     last_document_request: RefCell<Option<(String, Url, Option<Url>)>>,
+    /// downloads: shared with the runtime.
+    document_request_listener: SharedDocumentRequestListener,
 }
 
 impl BrowserDelegate {
@@ -360,11 +377,17 @@ impl BrowserDelegate {
                     .clone()
                     .map(|referrer| referrer.into_url()),
             ));
-            // Sent as the request starts, so a gesture is matched before the server answers.
+            // Decided now, inside the engine's event loop as the request starts, so neither the
+            // server's latency nor a new document starting in the same spin (which ends the
+            // click's activation) can make the user's click look like the page's own doing.
+            let listener = self.document_request_listener.borrow().clone();
+            let user_started =
+                listener.is_some_and(|listener| listener(self.tab_id, &url, request.is_redirect));
             self.send_browser_event(BrowserEvent::DocumentRequestStarted {
                 url: url.to_string(),
                 redirect: request.is_redirect,
                 from: web_view.url().map(|from| from.to_string()),
+                user_started,
             });
         }
     }

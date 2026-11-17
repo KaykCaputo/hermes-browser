@@ -162,10 +162,13 @@ pub enum BrowserEvent {
     },
     /// A top-level request is starting: a new navigation, or (`redirect`) the next hop of one.
     /// `from` is the page the tab showed when it started, if any.
+    /// `user_started`: the embedder decided, synchronously as the request started, that the
+    /// user started this navigation (a gesture in the tab, or the address they typed).
     DocumentRequestStarted {
         url: String,
         redirect: bool,
         from: Option<String>,
+        user_started: bool,
     },
 }
 
@@ -187,6 +190,7 @@ pub enum DownloadSignal {
         url: String,
         redirect: bool,
         from: Option<String>,
+        user_started: bool,
     },
     /// A page the engine could not show.
     Offered(DownloadOffer),

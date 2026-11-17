@@ -1,12 +1,14 @@
 //! Pages the engine could not show (its "Unknown content type" page), offered as downloads.
 //!
-//! Who started the navigation is decided when its top-level request *starts*
-//! (`Navigations::request_started`), so a slow server does not make a click look like the page's
-//! own doing: a gesture in the tab (consumed there), or an address the user typed for exactly
-//! that URL. Redirect hops belong to the navigation they continue.
+//! Who started the navigation is decided synchronously when its top-level request *starts*
+//! (`Navigations::user_started_now`, called from the engine's request hook inside its event
+//! loop), so neither a slow server nor a new document starting in the same spin makes a click
+//! look like the page's own doing: a gesture in the tab (consumed there), or an address the user
+//! typed for exactly that URL. Redirect hops belong to the navigation they continue.
 //!
 //! The decision for one offer, in order:
-//! 1. an offer from a tab in the background is dropped silently: no bar, no download;
+//! 1. an offer the user did not start, from a tab in the background, is dropped silently: no
+//!    bar, no download (a download the user started goes on in the background);
 //! 2. only `http` and `https` can be fetched again: `blob:`, `data:`, `file:` and the rest
 //!    are refused ("cannot be saved");
 //! 3. a page fetched by a form's POST is refused: its body is never seen by Mercury and must
@@ -78,14 +80,26 @@ pub(crate) fn site_of(url: &Url) -> String {
 }
 
 /// The page that started a download, for its bar and for Block: the request's referrer, else
-/// the page the tab showed when the request started, else (a tab that opened on the file)
-/// the file's own URL.
-pub(crate) fn initiator<'a>(
-    referrer: Option<&'a Url>,
-    from: Option<&'a Url>,
-    file: &'a Url,
-) -> &'a Url {
-    referrer.or(from).unwrap_or(file)
+/// the page the tab showed when the request started. `None` for a tab that opened on the file.
+pub(crate) fn initiator<'a>(referrer: Option<&'a Url>, from: Option<&'a Url>) -> Option<&'a Url> {
+    referrer.or(from)
+}
+
+/// Whether two addresses are the same apart from `http` against `https` (HSTS upgrades a typed
+/// `http` address before the request hook sees it).
+pub(crate) fn same_address(typed: &str, requested: &str) -> bool {
+    fn rest(address: &str) -> &str {
+        address
+            .strip_prefix("https://")
+            .or_else(|| address.strip_prefix("http://"))
+            .unwrap_or(address)
+    }
+    let web = |address: &str| address.starts_with("http://") || address.starts_with("https://");
+    if web(typed) && web(requested) {
+        rest(typed) == rest(requested)
+    } else {
+        typed == requested
+    }
 }
 
 /// "host" or "host:port", for people.
@@ -99,7 +113,7 @@ pub(crate) fn host_label(url: &Url) -> String {
 
 impl OfferPolicy {
     pub(crate) fn decide(&mut self, offer: &OfferFacts<'_>, now: Instant) -> Decision {
-        if !offer.foreground {
+        if !offer.foreground && !offer.user_started {
             return Decision::Refuse(Refusal::Background);
         }
         if !matches!(offer.url.scheme(), "http" | "https") {
@@ -145,6 +159,8 @@ pub(crate) struct Navigation {
     pub(crate) urls: Vec<String>,
     pub(crate) user_started: bool,
     pub(crate) from: Option<String>,
+    /// The tab was the one in front when the request started.
+    pub(crate) foreground: bool,
 }
 
 /// Typed addresses waiting for their request, and each tab's current navigation.
@@ -160,38 +176,55 @@ impl Navigations {
         self.typed.insert(tab, (url.to_owned(), now));
     }
 
-    /// A top-level request of `tab` started. A new navigation is the user's if it is the
-    /// address they just typed, or if `take_gesture` finds a gesture in the tab (it consumes
-    /// it); a redirect hop continues the navigation before it.
+    /// Called synchronously as a top-level request of `tab` starts: whether the user started
+    /// it. A new navigation is the user's if it is the address they just typed (once, within
+    /// `TYPED_LIFETIME`, `http` and `https` alike), or if `take_gesture` finds a gesture in
+    /// the tab (it consumes it). A redirect hop is not a new navigation and takes nothing.
+    pub(crate) fn user_started_now(
+        &mut self,
+        tab: TabId,
+        url: &str,
+        redirect: bool,
+        now: Instant,
+        take_gesture: impl FnOnce() -> bool,
+    ) -> bool {
+        if redirect {
+            return false;
+        }
+        // The typed note waits for its own URL (another request may come first, from the page
+        // being left), and is used once.
+        let typed = self.typed.get(&tab).is_some_and(|(typed, at)| {
+            same_address(typed, url) && now.saturating_duration_since(*at) <= TYPED_LIFETIME
+        });
+        if typed {
+            self.typed.remove(&tab);
+            return true;
+        }
+        take_gesture()
+    }
+
+    /// Records a top-level request of `tab` with the answer `user_started_now` gave when it
+    /// started; a redirect hop continues the navigation before it.
     pub(crate) fn request_started(
         &mut self,
         tab: TabId,
         url: &str,
         redirect: bool,
         from: Option<&str>,
-        now: Instant,
-        take_gesture: impl FnOnce() -> bool,
+        user_started: bool,
+        foreground: bool,
     ) {
         if redirect && let Some(navigation) = self.current.get_mut(&tab) {
             navigation.urls.push(url.to_owned());
             return;
         }
-        // The typed note waits for its own URL (another request may come first, from the page
-        // being left), and is used once.
-        let typed = self.typed.get(&tab).is_some_and(|(typed, at)| {
-            typed == url && now.saturating_duration_since(*at) <= TYPED_LIFETIME
-        });
-        if typed {
-            self.typed.remove(&tab);
-        }
-        // A typed address is the user's without a gesture; otherwise the gesture is taken now.
-        let user_started = typed || take_gesture();
         self.current.insert(
             tab,
             Navigation {
                 urls: vec![url.to_owned()],
                 user_started,
-                from: if typed { None } else { from.map(str::to_owned) },
+                from: from.map(str::to_owned),
+                foreground,
             },
         );
     }
@@ -273,13 +306,14 @@ mod tests {
         let file = url("https://files.example.net/a.zip");
         let mut policy = OfferPolicy::default();
 
-        // A tab in the background: dropped, whatever else holds.
-        for user_started in [false, true] {
+        // A tab in the background, for a download the page started: dropped, whatever the
+        // method (a user-started one goes on: see below).
+        for posted in [Some(false), None] {
             assert_eq!(
                 policy.decide(
                     &OfferFacts {
                         foreground: false,
-                        ..facts(&file, Some(false), user_started)
+                        ..facts(&file, posted, false)
                     },
                     now
                 ),
@@ -376,13 +410,40 @@ mod tests {
     }
 
     #[test]
-    fn the_initiator_is_the_referrer_else_the_page_shown_else_the_file() {
+    fn a_download_the_user_started_goes_on_in_a_background_tab() {
+        let now = Instant::now();
         let file = url("https://files.example.net/a.zip");
+        let mut policy = OfferPolicy::default();
+        assert_eq!(
+            policy.decide(
+                &OfferFacts {
+                    foreground: false,
+                    ..facts(&file, Some(false), true)
+                },
+                now
+            ),
+            Decision::Download
+        );
+        // With an unknown method it asks, on that tab's bar, rather than vanish.
+        assert_eq!(
+            policy.decide(
+                &OfferFacts {
+                    foreground: false,
+                    ..facts(&file, None, true)
+                },
+                now
+            ),
+            Decision::Ask
+        );
+    }
+
+    #[test]
+    fn the_initiator_is_the_referrer_else_the_page_shown() {
         let referrer = url("https://shop.example.com/");
         let from = url("https://shop.example.com/basket");
-        assert_eq!(initiator(Some(&referrer), Some(&from), &file), &referrer);
-        assert_eq!(initiator(None, Some(&from), &file), &from);
-        assert_eq!(initiator(None, None, &file), &file);
+        assert_eq!(initiator(Some(&referrer), Some(&from)), Some(&referrer));
+        assert_eq!(initiator(None, Some(&from)), Some(&from));
+        assert_eq!(initiator(None, None), None);
         assert_eq!(site_of(&from), "https://shop.example.com");
         assert_eq!(
             host_label(&url("http://127.0.0.1:8123/x")),
@@ -395,52 +456,38 @@ mod tests {
     }
 
     #[test]
-    fn a_gesture_counts_when_the_request_starts_not_when_the_server_answers() {
+    fn a_gesture_is_taken_as_the_request_starts_and_redirects_continue_it() {
         let now = Instant::now();
         let tab = TabId::new(1);
         let mut navigations = Navigations::default();
-        // The click's gesture is taken as the request starts, however slow the server.
+        let first = "https://shop.example.com/download?id=7";
+        let user_started = navigations.user_started_now(tab, first, false, now, || true);
+        assert!(user_started);
         navigations.request_started(
             tab,
-            "https://shop.example.com/download?id=7",
+            first,
             false,
             Some("https://shop.example.com/basket"),
-            now,
-            || true,
-        );
-        navigations.request_started(
-            tab,
-            "https://files.example.net/a.zip",
+            user_started,
             true,
-            None,
-            now,
-            || panic!("a redirect hop takes no gesture"),
         );
+        // A redirect hop takes no gesture and continues the navigation.
+        let hop = "https://files.example.net/a.zip";
+        assert!(!navigations.user_started_now(tab, hop, true, now, || panic!("no gesture")));
+        navigations.request_started(tab, hop, true, None, false, true);
         assert_eq!(
-            navigations.take(tab, "https://files.example.net/a.zip"),
+            navigations.take(tab, hop),
             Some(Navigation {
-                urls: vec![
-                    "https://shop.example.com/download?id=7".into(),
-                    "https://files.example.net/a.zip".into(),
-                ],
+                urls: vec![first.into(), hop.into()],
                 user_started: true,
                 from: Some("https://shop.example.com/basket".into()),
+                foreground: true,
             })
         );
         // Decided once.
-        assert_eq!(
-            navigations.take(tab, "https://files.example.net/a.zip"),
-            None
-        );
-
+        assert_eq!(navigations.take(tab, hop), None);
         // Without a gesture, the page started it.
-        navigations.request_started(tab, "https://x.test/b.zip", false, None, now, || false);
-        assert!(
-            !navigations
-                .take(tab, "https://x.test/b.zip")
-                .unwrap()
-                .user_started
-        );
+        assert!(!navigations.user_started_now(tab, "https://x.test/b.zip", false, now, || false));
     }
 
     #[test]
@@ -448,78 +495,48 @@ mod tests {
         let now = Instant::now();
         let tab = TabId::new(1);
         let mut navigations = Navigations::default();
-        navigations.note_typed(tab, "https://files.example.net/a.zip", now);
-        // Another URL first (a page redirecting elsewhere by script): not the typed one, and no
-        // gesture either.
-        navigations.request_started(tab, "https://ads.test/", false, None, now, || false);
-        assert!(
-            !navigations
-                .take(tab, "https://ads.test/")
-                .unwrap()
-                .user_started
-        );
-        // The typed URL itself, without any gesture.
-        navigations.request_started(
+        let no_gesture = || false;
+        navigations.note_typed(tab, "http://files.example.net/a.zip", now);
+        // Another URL first (the page being left): not the typed one.
+        assert!(!navigations.user_started_now(tab, "https://ads.test/", false, now, no_gesture));
+        // The typed URL itself, upgraded to https by HSTS before the hook sees it.
+        assert!(navigations.user_started_now(
             tab,
             "https://files.example.net/a.zip",
             false,
-            None,
             now,
-            || false,
-        );
-        assert!(
-            navigations
-                .take(tab, "https://files.example.net/a.zip")
-                .unwrap()
-                .user_started
-        );
+            no_gesture
+        ));
         // Used once.
-        navigations.request_started(
+        assert!(!navigations.user_started_now(
             tab,
             "https://files.example.net/a.zip",
             false,
-            None,
             now,
-            || false,
-        );
-        assert!(
-            !navigations
-                .take(tab, "https://files.example.net/a.zip")
-                .unwrap()
-                .user_started
-        );
+            no_gesture
+        ));
         // Too old.
         navigations.note_typed(tab, "https://files.example.net/b.zip", now);
-        navigations.request_started(
+        assert!(!navigations.user_started_now(
             tab,
             "https://files.example.net/b.zip",
             false,
-            None,
             now + TYPED_LIFETIME + Duration::from_millis(1),
-            || false,
-        );
-        assert!(
-            !navigations
-                .take(tab, "https://files.example.net/b.zip")
-                .unwrap()
-                .user_started
-        );
+            no_gesture
+        ));
         // Another tab's typed address is not this tab's.
         navigations.note_typed(TabId::new(2), "https://files.example.net/c.zip", now);
-        navigations.request_started(
+        assert!(!navigations.user_started_now(
             tab,
             "https://files.example.net/c.zip",
             false,
-            None,
             now,
-            || false,
-        );
-        assert!(
-            !navigations
-                .take(tab, "https://files.example.net/c.zip")
-                .unwrap()
-                .user_started
-        );
+            no_gesture
+        ));
+        // Only http and https are alike; other differences are not.
+        assert!(same_address("http://a.test/x", "https://a.test/x"));
+        assert!(!same_address("http://a.test/x", "https://a.test/y"));
+        assert!(!same_address("file:///x", "https:///x"));
     }
 
     #[test]

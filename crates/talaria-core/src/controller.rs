@@ -369,10 +369,12 @@ impl BrowserController {
                     url,
                     redirect,
                     from,
+                    user_started,
                 } => Some(crate::DownloadSignal::RequestStarted {
                     url: url.clone(),
                     redirect: *redirect,
                     from: from.clone(),
+                    user_started: *user_started,
                 }),
                 _ => None,
             };
