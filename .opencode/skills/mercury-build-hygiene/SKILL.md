@@ -29,7 +29,8 @@ whatever you do. Follow the rules below so that it never deletes something you s
 
   A build that is still running, or a program started from that folder, is never touched.
 - **Mercury's cache** (`~/Library/Caches/mercury-browser`) and leftover temporary profiles are deleted
-  whenever no Mercury is running. **Scratch files** in `$TMPDIR/opencode/lanes/` are deleted after 24 hours.
+  whenever no Mercury is running. The exception is the unpacked GStreamer in `…/mercury-browser/gstreamer/`,
+  which every build needs (about 1 GB); only its installer packages are deleted once unpacked. **Scratch files** in `$TMPDIR/opencode/lanes/` are deleted after 24 hours.
 - Everything it does is logged in `~/mercury-browser/.superpowers/disk-guard/guard.log`.
 
 ## Rules for you

@@ -10,8 +10,8 @@
 // - a worktree's build output (`target/`, `dist/`) is removed as soon as the agent working in it
 //   pushes, when that agent's turn ends, and by a sweep every five minutes once it has
 //   been unused for 30 minutes (this also catches agents stopped by an outage);
-// - the sweep also removes Mercury's own cache and temporary profiles when no Mercury runs, and
-//   scratch files older than a day.
+// - the sweep also removes Mercury's own cache (except the unpacked GStreamer every build needs)
+//   and temporary profiles when no Mercury runs, and scratch files older than a day.
 //
 // Only build output, caches and scratch files are ever removed: never source files, never git
 // data, never anything outside the paths below.
@@ -200,10 +200,32 @@ function sweep() {
     const used = lastUsed(wt)
     if (used > 0 && Date.now() - used > STALE_MS) cleanWorktree(wt, "30 min without a build", holders)
   }
+  // The unpacked GStreamer framework that every build links against (scripts/macos/gstreamer.sh)
+  // lives in Mercury's cache directory: keep it, but drop its installer packages once unpacked.
+  const gstreamer = path.join(MERCURY_CACHE, "gstreamer")
+  try {
+    for (const version of fs.readdirSync(gstreamer)) {
+      const dir = path.join(gstreamer, version)
+      if (!fs.existsSync(path.join(dir, "GStreamer.framework", `.mercury-unpacked-${version}`))) continue
+      for (const file of fs.readdirSync(dir)) {
+        if (file.endsWith(".pkg")) {
+          fs.rmSync(path.join(dir, file), { force: true })
+          log(`removed unpacked installer ${file}`)
+        }
+      }
+    }
+  } catch {
+    // no GStreamer yet
+  }
   if (!mercuryRunning()) {
-    if (fs.existsSync(MERCURY_CACHE)) {
-      fs.rmSync(MERCURY_CACHE, { recursive: true, force: true })
-      log(`removed ${MERCURY_CACHE}`)
+    try {
+      for (const entry of fs.readdirSync(MERCURY_CACHE)) {
+        if (entry === "gstreamer") continue
+        fs.rmSync(path.join(MERCURY_CACHE, entry), { recursive: true, force: true })
+        log(`removed ${path.join(MERCURY_CACHE, entry)}`)
+      }
+    } catch {
+      // no cache directory
     }
     try {
       for (const entry of fs.readdirSync(os.tmpdir())) {
