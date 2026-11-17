@@ -21,12 +21,14 @@ use crate::adblocker::ContentBlocker;
 use crate::embedder_controls::{ControlIds, EmbedderControls};
 use crate::exit_clearing::{EngineSwitches, ExitClearing, clear_at_exit};
 use crate::frame_ready::FrameReadySignal;
+use crate::http_disk_cache::{CacheCheck, http_disk_cache_database, repair_http_disk_cache};
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
 use crate::page_requests::{
     ClosesOnDrop, DocumentStartTracker, PendingEngineRequests, ServoPageRequest, page_permission,
     simple_dialog_kind,
 };
+use crate::proxy::SystemProxySettings;
 use crate::screen::ScreenMetrics;
 use crate::session_data::{
     AfterEngineCleanup, HandleThenCleanup, clean_up_before_engine_start, end_session_cookies,
@@ -89,6 +91,12 @@ pub struct RuntimeOptions {
     /// What to clear at quit; also cleared before the engine starts, in case the last quit
     /// never got to it. Changed later through `ServoRuntime::switches`.
     pub clear_on_exit: ExitClearing,
+    /// The system's proxy settings, read at start; used unless the proxy environment
+    /// variables are set. Servo builds its HTTP clients once, so a change applies at the
+    /// next start.
+    pub system_proxy: Option<SystemProxySettings>,
+    /// Where Servo keeps its HTTP disk cache. `None` keeps the cache in memory only.
+    pub http_disk_cache_dir: Option<PathBuf>,
 }
 
 impl Default for RuntimeOptions {
@@ -99,6 +107,8 @@ impl Default for RuntimeOptions {
             experimental_web_features: true,
             block_ads_and_trackers: true,
             clear_on_exit: ExitClearing::default(),
+            system_proxy: None,
+            http_disk_cache_dir: None,
         }
     }
 }
@@ -134,8 +144,17 @@ impl ServoRuntime {
         // them belong to an earlier session that was not ended (killed, or cut short by the
         // shutdown watchdog); remove them from the files before Servo can load them.
         if let Some(config_dir) = &runtime_options.config_dir {
-            clean_up_before_engine_start(config_dir, runtime_options.clear_on_exit);
+            clean_up_before_engine_start(
+                config_dir,
+                runtime_options.http_disk_cache_dir.as_deref(),
+                runtime_options.clear_on_exit,
+            );
         }
+        // Servo panics at start on some damaged caches; nothing has the file open yet.
+        let cache_check = runtime_options
+            .http_disk_cache_dir
+            .as_deref()
+            .map(repair_http_disk_cache);
         let options = mercury_options(runtime_options.config_dir.clone());
         let multiprocess_enabled = options.multiprocess;
         let sandbox_enabled = options.sandbox;
@@ -145,10 +164,18 @@ impl ServoRuntime {
             .event_loop_waker(Box::new(event_loop_waker))
             .build();
         inner.setup_logging();
+        log_proxy_settings(runtime_options.system_proxy.as_ref());
+        if let Some(CacheCheck::Removed(reason)) = cache_check {
+            log::warn!("removed the HTTP disk cache, which the engine could not use: {reason}");
+        }
         let after_engine_cleanup = runtime_options.config_dir.clone().map(|config_dir| {
             // Session cookies saved by a run that did not end them (it was killed) end now.
             end_session_cookies(&inner);
-            Rc::new(AfterEngineCleanup::new(config_dir, switches.clone()))
+            Rc::new(AfterEngineCleanup::new(
+                config_dir,
+                runtime_options.http_disk_cache_dir.clone(),
+                switches.clone(),
+            ))
         });
         if multiprocess_enabled {
             info!(
@@ -317,7 +344,64 @@ fn mercury_preferences(runtime_options: &RuntimeOptions) -> Preferences {
     // for Servo's own tests.
     preferences.dom_testing_html_input_element_select_files_enabled = false;
     preferences.user_agent = firefox_compatible_user_agent(&preferences.user_agent);
+    apply_system_proxy(&mut preferences, runtime_options.system_proxy.as_ref());
+    // Servo's size limit (`network_http_disk_cache_size`, 100 MB) is kept.
+    if let Some(database) = runtime_options
+        .http_disk_cache_dir
+        .as_deref()
+        .map(http_disk_cache_database)
+        .and_then(|database| database.to_str().map(str::to_owned))
+    {
+        preferences.network_http_disk_cache = database;
+    }
     preferences
+}
+
+/// Servo's `Preferences::default` has already read the `http_proxy`, `https_proxy` and
+/// `no_proxy` environment variables (and their upper-case forms); if any was set, those win
+/// and the system settings are not used, as in command-line tools.
+fn apply_system_proxy(preferences: &mut Preferences, system: Option<&SystemProxySettings>) {
+    let from_environment = !preferences.network_http_proxy_uri.is_empty()
+        || !preferences.network_https_proxy_uri.is_empty()
+        || !preferences.network_http_no_proxy.is_empty();
+    let Some(system) = system else {
+        return;
+    };
+    if from_environment {
+        return;
+    }
+    let proxy = system.preferences();
+    preferences.network_http_proxy_uri = proxy.http_uri;
+    preferences.network_https_proxy_uri = proxy.https_uri;
+    preferences.network_http_no_proxy = proxy.no_proxy;
+}
+
+/// Once, at start: which proxies are used (in the log), and what of the system settings is not
+/// (a warning that is always shown).
+fn log_proxy_settings(system: Option<&SystemProxySettings>) {
+    let preferences = servo::prefs::get();
+    for (scheme, uri) in [
+        ("http", &preferences.network_http_proxy_uri),
+        ("https", &preferences.network_https_proxy_uri),
+    ] {
+        if !uri.is_empty() {
+            // The address may carry credentials (from the environment); log the host only.
+            let host = Url::parse(uri)
+                .ok()
+                .and_then(|url| url.host_str().map(str::to_owned))
+                .unwrap_or_else(|| "(unparsed)".to_owned());
+            info!("{scheme} requests go through the proxy at {host}");
+        }
+    }
+    // A warning on standard error, always shown: Servo's logger prints only errors unless
+    // `RUST_LOG` asks for more, and someone whose network needs a PAC file must be able to see
+    // why pages do not load.
+    for message in system
+        .map(SystemProxySettings::unsupported)
+        .unwrap_or_default()
+    {
+        eprintln!("mercury-browser: warning: {message}");
+    }
 }
 
 // From Servo's servoshell, https://github.com/servo/servo, tag `v0.8.0` (commit
@@ -894,6 +978,108 @@ mod tests {
         for enabled in [true, false] {
             assert!(!preferences_with_experimental_web_features(enabled).dom_webrtc_enabled);
         }
+    }
+
+    use crate::proxy::ProxyServer;
+
+    fn proxy_preferences(preferences: &Preferences) -> [&str; 3] {
+        [
+            &preferences.network_http_proxy_uri,
+            &preferences.network_https_proxy_uri,
+            &preferences.network_http_no_proxy,
+        ]
+    }
+
+    fn preferences_without_environment_proxies() -> Preferences {
+        let mut preferences = Preferences::default();
+        preferences.network_http_proxy_uri.clear();
+        preferences.network_https_proxy_uri.clear();
+        preferences.network_http_no_proxy.clear();
+        preferences
+    }
+
+    fn system_proxy() -> SystemProxySettings {
+        SystemProxySettings {
+            http: Some(ProxyServer::new("proxy.example", Some(3128))),
+            exceptions: vec!["*.local".to_owned()],
+            ..SystemProxySettings::default()
+        }
+    }
+
+    #[test]
+    fn the_system_proxy_fills_servos_proxy_preferences() {
+        let mut preferences = preferences_without_environment_proxies();
+
+        apply_system_proxy(&mut preferences, Some(&system_proxy()));
+
+        assert_eq!(
+            proxy_preferences(&preferences),
+            [
+                "http://proxy.example:3128",
+                "",
+                "localhost,127.0.0.0/8,::1,.local"
+            ]
+        );
+    }
+
+    #[test]
+    fn without_system_proxy_settings_the_preferences_are_unchanged() {
+        let mut preferences = preferences_without_environment_proxies();
+
+        apply_system_proxy(&mut preferences, None);
+        apply_system_proxy(&mut preferences, Some(&SystemProxySettings::default()));
+
+        assert_eq!(proxy_preferences(&preferences), ["", "", ""]);
+    }
+
+    #[test]
+    fn proxy_environment_variables_win_over_the_system_proxy() {
+        // Servo's `Preferences::default` reads `http_proxy`, `https_proxy` and `no_proxy`.
+        for (index, value) in [
+            "http://env.example:1",
+            "http://env.example:2",
+            "env.example",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut preferences = preferences_without_environment_proxies();
+            match index {
+                0 => preferences.network_http_proxy_uri = value.to_owned(),
+                1 => preferences.network_https_proxy_uri = value.to_owned(),
+                _ => preferences.network_http_no_proxy = value.to_owned(),
+            }
+            let before = proxy_preferences(&preferences).map(str::to_owned);
+
+            apply_system_proxy(&mut preferences, Some(&system_proxy()));
+
+            assert_eq!(proxy_preferences(&preferences).map(str::to_owned), before);
+        }
+    }
+
+    #[test]
+    fn the_http_cache_stays_in_memory_without_a_cache_directory() {
+        let preferences = mercury_preferences(&RuntimeOptions::default());
+
+        assert_eq!(preferences.network_http_disk_cache, "");
+    }
+
+    #[test]
+    fn the_http_disk_cache_is_a_database_in_the_cache_directory() {
+        let preferences = mercury_preferences(&RuntimeOptions {
+            http_disk_cache_dir: Some(PathBuf::from("/profile/http-cache")),
+            ..RuntimeOptions::default()
+        });
+
+        assert_eq!(
+            preferences.network_http_disk_cache,
+            "/profile/http-cache/cache.sqlite3"
+        );
+        assert_eq!(
+            preferences.network_http_disk_cache_size,
+            Preferences::default().network_http_disk_cache_size
+        );
+        assert_eq!(preferences.network_http_disk_cache_size, 100 * 1024 * 1024);
     }
 
     #[test]
