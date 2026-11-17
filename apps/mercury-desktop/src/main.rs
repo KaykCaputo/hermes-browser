@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use callbacks::connect_ui_callbacks;
 use cli::{CliOutcome, LaunchOptions, parse_arguments, reject_non_utf8_paths};
-use engine::{connect_servo_runtime, shut_down_engine};
+use engine::connect_servo_runtime;
 use keyboard::connect_native_keyboard_input;
 use mercury_ui::MainWindow;
 use profile::{ActiveProfile, EXIT_PROFILE_IN_USE, ProfileInUse};
@@ -16,27 +16,40 @@ use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_proce
 use ui_sync::sync_ui;
 
 mod about;
+// activation (tabs lane)
+mod activation;
+mod callback_scope;
 mod callbacks;
 mod cli;
+// controls
+mod controls;
 mod crash_handler;
 mod engine;
 mod keyboard;
 mod keyutils;
 #[cfg(target_os = "macos")]
+mod macos_app_delegate;
+#[cfg(target_os = "macos")]
+mod macos_terminate;
+#[cfg(target_os = "macos")]
 mod media_buffers;
 #[cfg(target_os = "macos")]
 mod media_isolation;
 mod menus;
+mod page_requests; // dialogs
 mod panic_hook;
 #[cfg(target_os = "macos")]
 mod platform_macos;
+mod post_run;
 mod profile;
+mod quit;
 mod rendering;
 mod screen_metrics;
 mod screenshot;
 mod settings;
 mod shortcuts;
 mod shutdown;
+mod signals;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {
@@ -58,10 +71,11 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
 
     // (5) Media: GLib's user directories, where GStreamer writes its download buffers (copies of
     // the media being played), point into a private directory of this run under Mercury's cache;
-    // content processes inherit them. Removed when this run ends (dropped at the end of `main`),
-    // and leftovers of killed runs at the next start. Before any thread starts.
+    // content processes inherit them. Removed when this run ends (by `post_run::finish`, or
+    // when dropped on an early return), and leftovers of killed runs at the next start. Before
+    // any thread starts.
     #[cfg(target_os = "macos")]
-    let _media_buffers = media_buffers::keep_media_buffers_private();
+    let media_buffers = media_buffers::keep_media_buffers_private();
 
     let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
     let parsed = reject_non_utf8_paths(&arguments).unwrap_or_else(|| {
@@ -100,11 +114,15 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
             return Ok(ExitCode::from(EXIT_PROFILE_IN_USE));
         }
     };
+    // From here on a terminate, interrupt or hang-up signal quits in order.
+    signals::install();
     // settings-ui: loaded under the profile's lock; GPU canvas and experimental features apply now.
     let settings =
         settings::SettingsHandle::start(profile.paths.as_ref().map(|p| p.root.as_path()));
     let options = settings::launch_options(options, &settings);
     select_hardware_accelerated_backend(options.is_automated())?;
+    #[cfg(target_os = "macos")]
+    macos_terminate::end_the_run_in_order_on_terminate_requests();
 
     let window = MainWindow::new()?;
     if let Some((width, height)) = options.window_size {
@@ -140,39 +158,50 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&web_view_focused),
     );
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
+    // controls
+    controls::connect_controls(&window, Rc::clone(&controller));
+    quit::quit_when_the_window_is_closed(&window);
 
-    let screenshot_result = Rc::new(Cell::new(ScreenshotResult::Pending));
-    let screenshot_timer = options.screenshot.map(|screenshot| {
-        start_screenshot(
+    let mut timers = Vec::new();
+    let screenshot_result = options.screenshot.map(|screenshot| {
+        let result = Rc::new(Cell::new(ScreenshotResult::Pending));
+        timers.push(start_screenshot(
             &window,
             controller,
             screenshot,
-            Rc::clone(&screenshot_result),
-        )
+            Rc::clone(&result),
+        ));
+        result
     });
+    timers.extend(
+        options
+            .exit_request
+            .map(|request| quit::start_exit_request(&window, request)),
+    );
 
-    let run_result = window.run();
-    // menus lane: drop the About window and the menus' handles before the engine shuts down.
-    menus::release();
+    // Not `window.run()`, which hides the window as soon as the loop ends: on Wayland hiding
+    // destroys the window and tears rendering down while the engine still runs.
+    // `shut_down_engine` hides the window once it has taken the engine's state.
+    let shown = window.show();
+    post_run::prepare(post_run::RunEnd {
+        window,
+        timers,
+        screenshot_result,
+        profile,
+        #[cfg(target_os = "macos")]
+        media_buffers,
+        settings,
+    });
+    let run_result = shown.and_then(|()| slint::run_event_loop());
 
-    let exit_code = match (&run_result, screenshot_timer.is_some()) {
-        (Err(_), _) => 1,
-        (Ok(()), false) => 0,
-        (Ok(()), true) => {
-            let result = screenshot_result.get();
-            if result == ScreenshotResult::Pending {
-                eprintln!("mercury-browser: the browser closed before the screenshot was taken");
-            }
-            result.exit_code()
-        }
-    };
-    // Nothing may capture, pump or render while the engine shuts down, and the engine must be
-    // gone before the window (and the renderer whose device Servo uses) is destroyed.
-    drop(screenshot_timer);
-    // settings-ui: last settings write and the clear-history-on-exit hook.
-    settings.finish_run(std::time::Instant::now() + settings::FINISH_RUN_BUDGET);
-    shut_down_engine(exit_code);
-    drop(window);
+    // If the session ended (macOS log-out), the terminate handler has already ended the run
+    // and AppKit exits; otherwise this ends it.
+    let exit_code = post_run::finish(run_result.is_err()).unwrap_or(0);
+    if let Some(signal) = signals::received() {
+        // Ended by a quit signal: now that the run has ended, end the way that signal would
+        // have, so the parent sees it.
+        signals::end_by(signal);
+    }
 
     run_result?;
     Ok(ExitCode::from(exit_code))

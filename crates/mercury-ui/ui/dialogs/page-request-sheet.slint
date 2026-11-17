@@ -1,0 +1,244 @@
+// A sheet attached to the top of the content area, over a dimmed page that takes no input while
+// it is shown: JavaScript dialogs, the leave prompt and HTTP sign-in.
+
+import { ChromePalette } from "../theme/chrome-palette.slint";
+import {
+    PageRequestStyle,
+    PageRequestView,
+    RequestButton,
+    RequestCheckBox,
+    RequestField,
+} from "page-request-parts.slint";
+
+export component PageRequestSheet inherits Rectangle {
+    in property <PageRequestView> request;
+    // False while the user types in one of the browser's own fields, so that the sheet does not
+    // take the keyboard from them.
+    in property <bool> may-take-focus: true;
+    // accepted: OK, Leave or Sign in; otherwise Cancel or Stay. text: the prompt's value or the
+    // user name. checked: the "Don't allow this page to show more dialogs" choice.
+    callback answered(/* id */ int, /* accepted */ bool, /* text */ string, /* password */ string, /* checked */ bool);
+
+    property <int> shown-id: -1;
+    property <string> entered-text;
+    property <string> entered-password;
+    property <bool> checked;
+    property <bool> has-text-field: root.request.style == PageRequestStyle.prompt || root.request.style == PageRequestStyle.sign-in;
+
+    function show-request() {
+        if root.shown-id == root.request.id {
+            return;
+        }
+        root.shown-id = root.request.id;
+        root.entered-text = root.request.value;
+        root.entered-password = root.request.secret;
+        root.checked = false;
+        if root.may-take-focus {
+            root.take-focus();
+        }
+    }
+
+    // The card takes the keyboard, never a field: keys the user meant for the page (the end of
+    // a password, say) must not end up in a prompt's or sign-in's field. Tab or a click enters
+    // the field.
+    function take-focus() {
+        keys.focus();
+    }
+
+    function answer(accepted: bool) {
+        root.answered(root.request.id, accepted, root.entered-text, root.entered-password, root.checked);
+    }
+
+    init => {
+        root.show-request();
+    }
+
+    changed request => {
+        root.show-request();
+    }
+
+    // The dimmed page: it takes every pointer and wheel event, so the page cannot be used.
+    Rectangle {
+        background: ChromePalette.scrim;
+
+        TouchArea {
+            mouse-cursor: default;
+            scroll-event(event) => {
+                accept
+            }
+        }
+    }
+
+    card := Rectangle {
+        width: Math.min(parent.width - 32px, 460px);
+        height: card-layout.preferred-height;
+        x: (parent.width - self.width) / 2;
+        // Overlaps the toolbar's bottom edge, which a page cannot draw over, so the page cannot
+        // show a pixel-identical copy of the sheet inside its own area.
+        y: -4px;
+        background: ChromePalette.sheet-background;
+        border-width: 1px;
+        border-color: ChromePalette.popup-border;
+        border-bottom-left-radius: 12px;
+        border-bottom-right-radius: 12px;
+        drop-shadow-blur: 24px;
+        drop-shadow-color: ChromePalette.shadow;
+        drop-shadow-offset-y: 6px;
+
+        // Clicks on the card's background must not reach the page either.
+        TouchArea { }
+
+        keys := FocusScope {
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    // The safe answer: OK for an alert, Cancel, Stay.
+                    root.answer(root.request.style == PageRequestStyle.alert);
+                    return accept;
+                }
+                if event.text == Key.Return {
+                    // On a sign-in, Return only signs in from a field the user chose. On a prompt
+                    // it is OK with the page's own default value.
+                    if root.request.style != PageRequestStyle.sign-in {
+                        root.answer(true);
+                    }
+                    return accept;
+                }
+                reject
+            }
+
+            card-layout := VerticalLayout {
+                padding-left: 20px;
+                padding-right: 20px;
+                padding-top: 20px;
+                padding-bottom: 16px;
+                spacing: 0px;
+
+                Text {
+                    text: root.request.heading;
+                    color: ChromePalette.text;
+                    font-size: 15px;
+                    font-weight: 650;
+                    wrap: word-wrap;
+                }
+
+                Rectangle {
+                    height: root.request.detail == "" ? 0px : detail-text.preferred-height + 4px;
+                    visible: root.request.detail != "";
+
+                    detail-text := Text {
+                        y: 4px;
+                        width: parent.width;
+                        text: root.request.detail;
+                        color: ChromePalette.text-secondary;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                // The page's message, as plain text; a long one scrolls.
+                Rectangle {
+                    height: root.request.message == "" ? 0px : Math.min(message-text.preferred-height, 260px) + 10px;
+                    visible: root.request.message != "";
+
+                    message-view := Flickable {
+                        y: 10px;
+                        height: parent.height - 10px;
+                        viewport-height: message-text.preferred-height;
+
+                        message-text := Text {
+                            width: message-view.width;
+                            text: root.request.message;
+                            color: ChromePalette.text;
+                            font-size: 13px;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: root.request.warning == "" ? 0px : warning-text.preferred-height + 10px;
+                    visible: root.request.warning != "";
+
+                    warning-text := Text {
+                        y: 10px;
+                        width: parent.width;
+                        text: root.request.warning;
+                        color: ChromePalette.danger;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+
+                Rectangle {
+                    height: root.has-text-field ? 44px : 0px;
+                    visible: root.has-text-field;
+
+                    first-field := RequestField {
+                        y: 12px;
+                        width: parent.width;
+                        text <=> root.entered-text;
+                        placeholder: root.request.style == PageRequestStyle.sign-in ? "User name" : "";
+                        // A prompt's default value is selected when the user enters the field.
+                        select-on-focus: root.request.style == PageRequestStyle.prompt;
+                        accepted => {
+                            if root.request.style == PageRequestStyle.sign-in {
+                                password-field.focus-and-select();
+                            } else {
+                                root.answer(true);
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: root.request.style == PageRequestStyle.sign-in ? 40px : 0px;
+                    visible: root.request.style == PageRequestStyle.sign-in;
+
+                    password-field := RequestField {
+                        y: 8px;
+                        width: parent.width;
+                        text <=> root.entered-password;
+                        placeholder: "Password";
+                        password: true;
+                        accepted => {
+                            root.answer(true);
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: root.request.choice-label == "" ? 0px : choice.preferred-height + 12px;
+                    visible: root.request.choice-label != "";
+
+                    choice := RequestCheckBox {
+                        y: 12px;
+                        width: parent.width;
+                        label: root.request.choice-label;
+                        checked <=> root.checked;
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-top: 16px;
+                    spacing: 8px;
+                    alignment: end;
+
+                    if root.request.decline-label != "": RequestButton {
+                        label: root.request.decline-label;
+                        clicked => {
+                            root.answer(false);
+                        }
+                    }
+
+                    RequestButton {
+                        label: root.request.accept-label;
+                        primary: true;
+                        clicked => {
+                            root.answer(true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

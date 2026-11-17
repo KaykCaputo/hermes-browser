@@ -1,0 +1,135 @@
+import { ListView } from "std-widgets.slint";
+import { PopupColors, PopupStyle, PopupButton } from "page-popup.slint";
+
+export struct SelectPopupRow {
+    label: string,
+    // An option group's label.
+    heading: bool,
+    disabled: bool,
+    selected: bool,
+    in-group: bool,
+}
+
+// The list for a `<select>` element. Every row is 24 px (headings too, so a row's position is a
+// multiplication); that, the 20 px caption and the 40 px footer of a multi-select are mirrored
+// in `apps/mercury-desktop/src/controls/select.rs` and `controls/mod.rs`. `ListView` only
+// creates the rows in view, so lists of any length cost the same to show and scroll.
+export component SelectPopup inherits Rectangle {
+    in property <[SelectPopupRow]> rows;
+    in property <int> highlighted: -1;
+    in property <bool> multiple: false;
+    // The page's origin, shown so the list cannot pass for the browser's own.
+    in property <string> origin;
+    in-out property <length> scroll-y <=> list.viewport-y;
+    callback row-clicked(int);
+    callback row-hovered(int);
+    callback done();
+
+    property <PopupColors> colors: PopupStyle.colors;
+    property <length> footer-height: root.multiple ? 40px : 0px;
+
+    background: root.colors.background;
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: root.colors.border;
+    drop-shadow-blur: 14px;
+    drop-shadow-offset-y: 4px;
+    drop-shadow-color: root.colors.shadow;
+    clip: true;
+
+    Text {
+        x: 10px;
+        y: 0px;
+        width: parent.width - 20px;
+        height: 20px;
+        text: root.origin;
+        color: root.colors.muted;
+        font-size: 11px;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    list := ListView {
+        x: 0px;
+        y: 20px;
+        width: parent.width;
+        height: parent.height - 20px - root.footer-height;
+
+            for row[index] in root.rows: Rectangle {
+                height: 24px;
+                background: !row.heading && !row.disabled && index == root.highlighted
+                    ? root.colors.highlight
+                    : transparent;
+
+                property <color> label-color: row.heading
+                    ? root.colors.muted
+                    : row.disabled
+                        ? root.colors.disabled
+                        : index == root.highlighted ? root.colors.highlight-text : root.colors.text;
+
+                if row.selected: Text {
+                    x: row.in-group ? 14px : 6px;
+                    width: 16px;
+                    height: parent.height;
+                    text: "✓";
+                    color: parent.label-color;
+                    font-size: 13px;
+                    vertical-alignment: center;
+                }
+
+                Text {
+                    x: row.heading ? 10px : row.in-group ? 32px : 24px;
+                    width: parent.width - self.x - 10px;
+                    height: parent.height;
+                    text: row.label;
+                    color: parent.label-color;
+                    font-size: row.heading ? 12px : 13px;
+                    font-weight: row.heading ? 650 : 400;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    wrap: no-wrap;
+                }
+
+                TouchArea {
+                    enabled: !row.heading;
+                    mouse-cursor: row.disabled ? MouseCursor.not-allowed : MouseCursor.default;
+
+                    changed has-hover => {
+                        if self.has-hover {
+                            root.row-hovered(index);
+                        }
+                    }
+
+                    clicked => {
+                        root.row-clicked(index);
+                    }
+                }
+            }
+    }
+
+    if root.multiple: Rectangle {
+        x: 0px;
+        y: parent.height - root.footer-height;
+        width: parent.width;
+        height: root.footer-height;
+        border-width: 0px;
+
+        Rectangle {
+            y: 0px;
+            height: 1px;
+            background: root.colors.separator;
+        }
+
+        PopupButton {
+            x: parent.width - self.width - 8px;
+            y: 6px;
+            width: 72px;
+            label: "Done";
+            primary: true;
+            colors: root.colors;
+            clicked => {
+                root.done();
+            }
+        }
+    }
+}

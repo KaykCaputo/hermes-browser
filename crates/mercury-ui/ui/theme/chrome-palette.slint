@@ -78,4 +78,13 @@ export global ChromePalette {
 
     // The part of a suggestion that matches what was typed.
     out property <color> match-highlight: root.dark ? #71c5ff : #0b6fc0;
+
+    // --- controls: page popups ---
+    // Select lists, colour pickers and context menus a page opens: neutral grey, unlike the
+    // blue-grey `popup-*` of the browser's own menus, so they never pass for browser UI.
+    out property <color> page-popup-background: root.dark ? #2b2b2e : #fdfdfd;
+    out property <color> page-popup-border: root.dark ? #4b4b50 : #b9b9be;
+    // The line naming the page above a select list or colour picker.
+    out property <color> page-popup-caption: root.dark ? #a2a2a8 : #6e6e73;
+    // --- end controls ---
 }

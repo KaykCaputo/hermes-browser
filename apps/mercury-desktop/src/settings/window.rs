@@ -212,6 +212,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     crate::menus::reinstall_when_key(window.window(), "the settings window became key");
     let toggled_handle = handle.clone();
     window.on_toggled(move |name, on| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let Some(handle) = toggled_handle.upgrade() {
             handle.update(|settings| {
                 if !edit::apply_toggle(settings, &name, on) {
@@ -223,6 +224,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
 
     let chosen_handle = handle.clone();
     window.on_chosen(move |name, index| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let (Some(handle), Ok(index)) = (chosen_handle.upgrade(), usize::try_from(index)) else {
             return;
         };
@@ -236,6 +238,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     let text_handle = handle.clone();
     let text_window = window.as_weak();
     window.on_text_committed(move |name, text| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let (Some(handle), Some(window)) = (text_handle.upgrade(), text_window.upgrade()) {
             commit_text(&handle, &window, &name, &text);
         }
@@ -244,6 +247,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     let commit_handle = handle.clone();
     let commit_window = window.as_weak();
     window.on_commit_texts(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let (Some(handle), Some(window)) = (commit_handle.upgrade(), commit_window.upgrade()) {
             commit_all_texts(&handle, &window);
         }
@@ -253,6 +257,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     let close_request_handle = handle.clone();
     let close_request_window = window.as_weak();
     window.window().on_close_requested(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let (Some(handle), Some(window)) = (
             close_request_handle.upgrade(),
             close_request_window.upgrade(),
@@ -264,12 +269,14 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
 
     let warning_window = window.as_weak();
     window.on_editor_url_edited(move |text| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let Some(window) = warning_window.upgrade() {
             window.set_editor_warning(edit::template_warning(&text).unwrap_or_default().into());
         }
     });
 
     window.on_quit_browser(|| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         // What the main window's quit shortcut does (`ShortcutAction::Quit`).
         if let Err(error) = slint::quit_event_loop() {
             log::warn!("could not quit: {error}");
@@ -279,6 +286,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     let add_handle = handle.clone();
     let add_window = window.as_weak();
     window.on_add_engine(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let (Some(handle), Some(window)) = (add_handle.upgrade(), add_window.upgrade()) else {
             return;
         };
@@ -289,6 +297,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     let edit_handle = handle.clone();
     let edit_window = window.as_weak();
     window.on_edit_engine(move |id| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let (Some(handle), Some(window)) = (edit_handle.upgrade(), edit_window.upgrade()) else {
             return;
         };
@@ -313,6 +322,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
 
     let remove_handle = handle.clone();
     window.on_remove_engine(move |id| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let Some(handle) = remove_handle.upgrade() {
             handle.update(|settings| edit::remove_engine(settings, &id));
         }
@@ -321,6 +331,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     let save_handle = handle.clone();
     let save_window = window.as_weak();
     window.on_save_engine(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let (Some(handle), Some(window)) = (save_handle.upgrade(), save_window.upgrade()) else {
             return;
         };
@@ -348,6 +359,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     let cancel_handle = handle.clone();
     let cancel_window = window.as_weak();
     window.on_cancel_engine(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if let Some(handle) = cancel_handle.upgrade() {
             handle.window.editing.borrow_mut().take();
         }
@@ -359,6 +371,7 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
 
     let never_save_handle = handle.clone();
     window.on_remove_never_save(move |index| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let (Some(handle), Ok(index)) = (never_save_handle.upgrade(), usize::try_from(index))
         else {
             return;
@@ -374,9 +387,11 @@ fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
 
     let close_handle = handle;
     window.on_close_settings(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let close_handle = close_handle.clone();
         // Dropping the window inside its own callback is not safe; do it right after.
         slint::Timer::single_shot(std::time::Duration::ZERO, move || {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
             if let Some(handle) = close_handle.upgrade() {
                 handle.close_settings_window();
             }
@@ -596,7 +611,7 @@ mod tests {
         element(&window, "Language").set_accessible_value("pt-BR");
         drop(window);
 
-        handle.finish_run(std::time::Instant::now() + super::super::FINISH_RUN_BUDGET);
+        handle.finish_run(std::time::Instant::now() + crate::post_run::FINAL_SAVES_BUDGET);
 
         let saved = std::fs::read_to_string(directory.path().join("settings.json"))
             .expect("a settings file");

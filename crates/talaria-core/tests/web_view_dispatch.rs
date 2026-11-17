@@ -1,8 +1,9 @@
 use talaria_core::{
-    BrowserCommand, ClipboardCommand, ColorScheme, CompositionState, ImeInput, KeyLocation,
+    BrowserCommand, ClipboardCommand, ColorScheme, CompositionState, ControlAnswer, ControlId, ImeInput, KeyLocation,
     KeyState, KeyboardInput, KeyboardModifiers, PointerButton, PointerButtonAction, WebView,
     dispatch_command,
 };
+use talaria_core::{PageRequestAnswer, PageRequestId};
 
 #[derive(Debug, PartialEq)]
 enum FakeCall {
@@ -38,6 +39,10 @@ enum FakeCall {
         x: f32,
         y: f32,
     },
+    AnswerControl(ControlId, ControlAnswer),
+    // dialogs
+    AnswerPageRequest(PageRequestId, PageRequestAnswer),
+    // menus
     Clipboard(ClipboardCommand),
 }
 
@@ -146,6 +151,20 @@ impl WebView for FakeWebView {
         self.record(FakeCall::PointerLeft)
     }
 
+    fn answer_control(&mut self, id: ControlId, answer: ControlAnswer) -> Result<(), Self::Error> {
+        self.record(FakeCall::AnswerControl(id, answer))
+    }
+
+    // dialogs
+    fn answer_page_request(
+        &mut self,
+        id: PageRequestId,
+        answer: PageRequestAnswer,
+    ) -> Result<(), Self::Error> {
+        self.record(FakeCall::AnswerPageRequest(id, answer))
+    }
+
+    // menus
     fn clipboard(&mut self, command: ClipboardCommand) -> Result<(), Self::Error> {
         self.record(FakeCall::Clipboard(command))
     }
@@ -395,6 +414,50 @@ fn pointer_left_command_calls_pointer_left() {
 
     assert_eq!(result, Ok(()));
     assert_eq!(web_view.calls, vec![FakeCall::PointerLeft]);
+}
+
+#[test]
+fn answer_control_command_forwards_the_id_and_answer() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(
+        &mut web_view,
+        BrowserCommand::AnswerControl {
+            id: ControlId::new(3),
+            answer: ControlAnswer::Select(vec![2]),
+        },
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        web_view.calls,
+        vec![FakeCall::AnswerControl(
+            ControlId::new(3),
+            ControlAnswer::Select(vec![2])
+        )]
+    );
+}
+
+#[test]
+fn answer_page_request_command_forwards_the_id_and_answer() {
+    let mut web_view = FakeWebView::default();
+
+    let result = dispatch_command(
+        &mut web_view,
+        BrowserCommand::AnswerPageRequest {
+            id: PageRequestId::new(7),
+            answer: PageRequestAnswer::PromptText("typed".to_owned()),
+        },
+    );
+
+    assert_eq!(result, Ok(()));
+    assert_eq!(
+        web_view.calls,
+        vec![FakeCall::AnswerPageRequest(
+            PageRequestId::new(7),
+            PageRequestAnswer::PromptText("typed".to_owned())
+        )]
+    );
 }
 
 #[test]

@@ -79,9 +79,9 @@ pub(crate) fn save_snapshot(path: &std::path::Path) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-/// Closes and drops the window before the engine and the main window go away.
+/// Drops the window before the engine and the browser window go away. Called from the end of
+/// the run (`post_run.rs`), which may run inside AppKit's terminate callback: it only drops.
 pub(crate) fn release() {
-    hide();
     ABOUT.with(|about| about.take());
 }
 
