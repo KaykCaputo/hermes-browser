@@ -208,6 +208,8 @@ fn commit_text(handle: &SettingsHandle, window: &SettingsWindow, name: &str, tex
 
 fn connect(window: &SettingsWindow, handle: Weak<SettingsHandle>) {
     // menus lane: reinstall Mercury's menu when this window becomes key
+    #[cfg(target_os = "macos")]
+    crate::menus::reinstall_when_key(window.window(), "the settings window became key");
     let toggled_handle = handle.clone();
     window.on_toggled(move |name, on| {
         let _slint = crate::callback_scope::InSlintCallback::enter();

@@ -1,0 +1,333 @@
+// The browser menu behind the toolbar's "⋮" button.
+
+// Colours come only from `ChromePalette`, so the menu follows the appearance setting.
+import { ChromePalette } from "../theme/chrome-palette.slint";
+
+export enum BrowserMenuCommand {
+    new-tab,
+    zoom-in,
+    zoom-out,
+    zoom-reset,
+    find,
+    settings,
+    about,
+    help,
+    quit,
+}
+
+// Edit commands for the address bar's text field, run when the native Edit menu is clicked.
+export enum AddressBarEdit {
+    undo,
+    redo,
+    cut,
+    copy,
+    paste,
+    select-all,
+}
+
+export struct BrowserMenuEntry {
+    title: string,
+    // The key that runs the same action, as the platform writes it ("⌘T", "Ctrl+T"), or "".
+    shortcut: string,
+    enabled: bool,
+    command: BrowserMenuCommand,
+    separator-before: bool,
+}
+
+component MenuSeparatorLine inherits Rectangle {
+    height: 9px;
+    accessible-role: none;
+
+    Rectangle {
+        x: 8px;
+        y: 4px;
+        width: parent.width - 16px;
+        height: 1px;
+        background: ChromePalette.separator;
+    }
+}
+
+component BrowserMenuRow inherits Rectangle {
+    in property <BrowserMenuEntry> entry;
+    // Chosen with the arrow keys.
+    in property <bool> highlighted;
+    callback activated(BrowserMenuCommand);
+
+    height: 30px;
+    border-radius: 6px;
+    background: !root.entry.enabled ? transparent : root.highlighted ? ChromePalette.item-selected : touch.has-hover ? ChromePalette.item-hover : transparent;
+    accessible-role: button;
+    accessible-label: root.entry.title;
+    accessible-description: root.entry.shortcut;
+    accessible-enabled: root.entry.enabled;
+    accessible-action-default => {
+        if root.entry.enabled {
+            root.activated(root.entry.command);
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 10px;
+        spacing: 16px;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.entry.title;
+            color: !root.entry.enabled ? ChromePalette.disabled-text : root.highlighted ? ChromePalette.item-selected-text : ChromePalette.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+            accessible-role: none;
+        }
+
+        Text {
+            text: root.entry.shortcut;
+            color: !root.entry.enabled ? ChromePalette.disabled-text : root.highlighted ? ChromePalette.item-selected-text : ChromePalette.shortcut-text;
+            font-size: 12px;
+            vertical-alignment: center;
+            accessible-role: none;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.entry.enabled;
+        clicked => {
+            root.activated(root.entry.command);
+        }
+    }
+}
+
+component ZoomButton inherits Rectangle {
+    in property <string> label;
+    in property <string> accessible-name;
+    callback clicked;
+
+    width: 32px;
+    height: 26px;
+    border-radius: 6px;
+    background: touch.pressed ? ChromePalette.button-pressed : touch.has-hover ? ChromePalette.button-hover : ChromePalette.field-background;
+    accessible-role: button;
+    accessible-label: root.accessible-name;
+    accessible-action-default => {
+        root.clicked();
+    }
+
+    Text {
+        text: root.label;
+        color: touch.has-hover ? ChromePalette.button-label-hover : ChromePalette.button-label;
+        font-size: 16px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        accessible-role: none;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// The menu's content, also rendered on its own by the rendering test.
+export component BrowserMenuPanel inherits Rectangle {
+    in property <[BrowserMenuEntry]> top-entries;
+    in property <[BrowserMenuEntry]> bottom-entries;
+    in property <int> zoom-percent: 100;
+    // The row chosen with the arrow keys: an index into the top entries followed by the bottom
+    // ones, or -1.
+    in property <int> highlighted: -1;
+    // An item other than the zoom buttons was chosen: the popup closes.
+    callback activated(BrowserMenuCommand);
+    // The zoom buttons keep the menu open, so the new percentage can be seen.
+    callback zoom(BrowserMenuCommand);
+
+    border-radius: 10px;
+    border-width: 1px;
+    border-color: ChromePalette.popup-border;
+    background: ChromePalette.popup-background;
+    drop-shadow-blur: 18px;
+    drop-shadow-color: ChromePalette.shadow;
+    drop-shadow-offset-y: 4px;
+    accessible-role: list;
+    accessible-label: "Browser menu";
+
+    VerticalLayout {
+        padding: 6px;
+        spacing: 0px;
+
+        for entry[index] in root.top-entries: VerticalLayout {
+            if entry.separator-before: MenuSeparatorLine { }
+            BrowserMenuRow {
+                entry: entry;
+                highlighted: root.highlighted == index;
+                activated(command) => {
+                    root.activated(command);
+                }
+            }
+        }
+
+        MenuSeparatorLine { }
+
+        HorizontalLayout {
+            height: 34px;
+            padding-left: 10px;
+            padding-right: 4px;
+            spacing: 4px;
+
+            Text {
+                horizontal-stretch: 1;
+                text: "Zoom";
+                color: ChromePalette.text;
+                font-size: 13px;
+                vertical-alignment: center;
+                accessible-role: none;
+            }
+
+            ZoomButton {
+                y: 4px;
+                label: "−";
+                accessible-name: "Zoom out";
+                clicked => {
+                    root.zoom(BrowserMenuCommand.zoom-out);
+                }
+            }
+
+            Rectangle {
+                width: 52px;
+                border-radius: 6px;
+                background: reset-touch.has-hover ? ChromePalette.item-hover : transparent;
+                accessible-role: button;
+                accessible-label: "Actual size";
+                accessible-value: root.zoom-percent + "%";
+                accessible-action-default => {
+                    root.zoom(BrowserMenuCommand.zoom-reset);
+                }
+
+                Text {
+                    text: root.zoom-percent + "%";
+                    color: ChromePalette.button-label;
+                    font-size: 12px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                    accessible-role: none;
+                }
+
+                reset-touch := TouchArea {
+                    clicked => {
+                        root.zoom(BrowserMenuCommand.zoom-reset);
+                    }
+                }
+            }
+
+            ZoomButton {
+                y: 4px;
+                label: "+";
+                accessible-name: "Zoom in";
+                clicked => {
+                    root.zoom(BrowserMenuCommand.zoom-in);
+                }
+            }
+        }
+
+        MenuSeparatorLine { }
+
+        for entry[index] in root.bottom-entries: VerticalLayout {
+            if entry.separator-before: MenuSeparatorLine { }
+            BrowserMenuRow {
+                entry: entry;
+                highlighted: root.highlighted == root.top-entries.length + index;
+                activated(command) => {
+                    root.activated(command);
+                }
+            }
+        }
+    }
+}
+
+export component BrowserMenu inherits PopupWindow {
+    in property <[BrowserMenuEntry]> top-entries;
+    in property <[BrowserMenuEntry]> bottom-entries;
+    in property <int> zoom-percent: 100;
+    callback activated(BrowserMenuCommand);
+
+    property <int> highlighted: -1;
+    property <int> count: root.top-entries.length + root.bottom-entries.length;
+
+    pure function entry-at(index: int) -> BrowserMenuEntry {
+        if index < root.top-entries.length {
+            return root.top-entries[index];
+        }
+        root.bottom-entries[index - root.top-entries.length]
+    }
+
+    pure function wrap(index: int) -> int {
+        Math.mod(index + root.count, root.count)
+    }
+
+    // The next enabled row from `from` in direction `step` (1 or -1). Slint has no loops: this
+    // looks up to four rows ahead, more than the longest run of disabled rows in this menu.
+    pure function next-enabled(from: int, step: int) -> int {
+        if root.count == 0 {
+            return -1;
+        }
+        if root.entry-at(root.wrap(from + step)).enabled {
+            return root.wrap(from + step);
+        }
+        if root.entry-at(root.wrap(from + 2 * step)).enabled {
+            return root.wrap(from + 2 * step);
+        }
+        if root.entry-at(root.wrap(from + 3 * step)).enabled {
+            return root.wrap(from + 3 * step);
+        }
+        if root.entry-at(root.wrap(from + 4 * step)).enabled {
+            return root.wrap(from + 4 * step);
+        }
+        from
+    }
+
+    close-policy: close-on-click-outside;
+    width: 264px;
+
+    keys := FocusScope {
+        // Arrow keys move through the rows, Return chooses, Escape closes (Slint closes popups
+        // on Escape). Zoom keys keep working: they are browser shortcuts handled before Slint.
+        init => {
+            self.focus();
+        }
+        key-pressed(event) => {
+            if event.text == Key.DownArrow {
+                root.highlighted = root.next-enabled(root.highlighted < 0 ? -1 : root.highlighted, 1);
+                return accept;
+            }
+            if event.text == Key.UpArrow {
+                root.highlighted = root.next-enabled(root.highlighted < 0 ? root.count : root.highlighted, -1);
+                return accept;
+            }
+            if (event.text == Key.Return || event.text == " ") && root.highlighted >= 0 {
+                if root.entry-at(root.highlighted).enabled {
+                    root.close();
+                    root.activated(root.entry-at(root.highlighted).command);
+                }
+                return accept;
+            }
+            reject
+        }
+
+        BrowserMenuPanel {
+            width: root.width;
+            top-entries: root.top-entries;
+            bottom-entries: root.bottom-entries;
+            zoom-percent: root.zoom-percent;
+            highlighted: root.highlighted;
+            activated(command) => {
+                root.close();
+                root.activated(command);
+            }
+            zoom(command) => {
+                root.activated(command);
+            }
+        }
+    }
+}
+

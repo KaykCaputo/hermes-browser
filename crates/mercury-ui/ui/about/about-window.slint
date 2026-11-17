@@ -1,0 +1,167 @@
+import { AboutSlint, Palette } from "std-widgets.slint";
+import { ChromePalette, ChromeTheme } from "../theme/chrome-palette.slint";
+
+export enum AboutLink {
+    licence,
+    third-party-notices,
+}
+
+component LinkText inherits Text {
+    callback clicked;
+
+    color: touch.has-hover ? ChromePalette.button-label-hover : ChromePalette.accent;
+    font-size: 12px;
+    accessible-role: button;
+    accessible-label: self.text;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// "About Mercury Browser": a small window of its own, reached from the application menu and
+// from the browser menu. Its colours come from `ChromePalette`, so it follows the appearance
+// setting; the Rust side calls `settings::apply_chrome_theme` when it creates the window.
+export component AboutWindow inherits Window {
+    in property <string> version-line;
+    in property <string> engine-line;
+    // Empty when the GStreamer version was not recorded at build time.
+    in property <string> media-line;
+    in property <string> copyright-line;
+    // The appearance setting, mirrored so that a change can be seen here.
+    property <ChromeTheme> chrome-theme: ChromePalette.theme;
+    callback open-link(AboutLink);
+    callback close-requested();
+
+    // `AboutSlint` picks its badge by Slint's `Palette`: give it the scheme the appearance setting
+    // forces. Under "Follow the system" the palette is left to follow the system.
+    // With no system scheme known, the chrome stays dark (see `ChromePalette.dark`); so does
+    // the badge.
+    init => {
+        if self.chrome-theme == ChromeTheme.system && Palette.color-scheme == ColorScheme.unknown {
+            Palette.color-scheme = ColorScheme.dark;
+        }
+    }
+    changed chrome-theme => {
+        if self.chrome-theme == ChromeTheme.light {
+            Palette.color-scheme = ColorScheme.light;
+        } else if self.chrome-theme == ChromeTheme.dark {
+            Palette.color-scheme = ColorScheme.dark;
+        }
+    }
+
+    title: "About Mercury Browser";
+    icon: @image-url("../../../../apps/mercury-desktop/resources/mercury-browser.svg");
+    width: 380px;
+    height: 370px;
+    background: ChromePalette.window-background;
+    forward-focus: key-scope;
+
+    // Keeps Slint from installing its default macOS menu bar when this window becomes active:
+    // a window that declares a `MenuBar` never gets the default one, and a hidden menu bar
+    // installs no menu. Mercury's own menu (apps/mercury-desktop/src/menus) stays in place.
+    MenuBar {
+        visible: false;
+        Menu { }
+    }
+
+    key-scope := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.close-requested();
+                return accept;
+            }
+            reject
+        }
+
+        VerticalLayout {
+            padding: 24px;
+            padding-bottom: 16px;
+            spacing: 6px;
+            alignment: start;
+
+            HorizontalLayout {
+                alignment: center;
+                height: 76px;
+
+                Image {
+                    width: 72px;
+                    height: 72px;
+                    source: @image-url("../../../../apps/mercury-desktop/resources/mercury-browser.svg");
+                    image-fit: contain;
+                    accessible-role: none;
+                }
+            }
+
+            Text {
+                text: "Mercury Browser";
+                color: ChromePalette.text;
+                font-size: 20px;
+                font-weight: 650;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: root.version-line;
+                color: ChromePalette.text;
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: root.engine-line;
+                color: ChromePalette.text-secondary;
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+
+            if root.media-line != "": Text {
+                text: root.media-line;
+                color: ChromePalette.text-secondary;
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+
+            Text {
+                text: root.copyright-line;
+                color: ChromePalette.text-secondary;
+                font-size: 11px;
+                horizontal-alignment: center;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                alignment: center;
+                spacing: 18px;
+                padding-top: 2px;
+
+                LinkText {
+                    text: "Licence (MPL-2.0)";
+                    clicked => {
+                        root.open-link(AboutLink.licence);
+                    }
+                }
+
+                LinkText {
+                    text: "Third-party notices";
+                    clicked => {
+                        root.open-link(AboutLink.third-party-notices);
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: ChromePalette.separator;
+            }
+
+            // Required by the Slint Royalty-free License 2.0, §2(a).
+            AboutSlint {
+                height: 110px;
+            }
+        }
+    }
+}

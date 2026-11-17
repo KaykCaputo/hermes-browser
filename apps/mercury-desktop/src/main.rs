@@ -15,6 +15,7 @@ use talaria_core::{BrowserController, TabActivation};
 use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
+mod about;
 // activation (tabs lane)
 mod activation;
 mod callback_scope;
@@ -34,6 +35,7 @@ mod macos_terminate;
 mod media_buffers;
 #[cfg(target_os = "macos")]
 mod media_isolation;
+mod menus;
 mod page_requests; // dialogs
 mod panic_hook;
 #[cfg(target_os = "macos")]
@@ -145,6 +147,12 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
     settings::connect(&settings, &window, &controller);
     sync_ui(&window, &controller.borrow());
     connect_ui_callbacks(
+        &window,
+        Rc::clone(&controller),
+        Rc::clone(&web_view_focused),
+    );
+    // menus lane: the macOS menu bar and the browser menu.
+    menus::connect(
         &window,
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),

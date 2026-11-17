@@ -121,6 +121,13 @@ impl ShortcutKeys {
     pub(crate) fn clear(&mut self) {
         self.consumed.clear();
     }
+
+    // menus
+    /// The native menu bar ran an action for this key's press, which therefore never reached
+    /// the window: swallow its release as if the press had run a shortcut here.
+    pub(crate) fn claim(&mut self, key: PhysicalKey) {
+        self.consumed.insert(key);
+    }
 }
 
 /// Maps a key press to a browser shortcut. "Primary" is Cmd on macOS and Ctrl elsewhere; the
@@ -263,7 +270,7 @@ pub(crate) fn handle_browser_shortcut(
     }
 }
 
-fn run_shortcut(
+pub(crate) fn run_shortcut(
     window: &MainWindow,
     controller: &RefCell<BrowserController>,
     web_view_focused: &Cell<bool>,
@@ -668,6 +675,26 @@ mod tests {
             KeyDisposition::Forward
         );
         assert_eq!(keys.release(KEY_R), KeyDisposition::Forward);
+    }
+
+    // menus
+    #[test]
+    fn a_key_the_native_menu_claimed_has_its_release_swallowed() {
+        let mut keys = ShortcutKeys::default();
+
+        keys.claim(KEY_T);
+
+        assert_eq!(keys.release(KEY_T), KeyDisposition::Consume);
+        assert_eq!(keys.release(KEY_T), KeyDisposition::Forward);
+    }
+
+    #[test]
+    fn a_later_press_of_a_claimed_key_is_handled_normally() {
+        let mut keys = ShortcutKeys::default();
+        keys.claim(KEY_T);
+
+        assert_eq!(keys.press(KEY_T, false, None), KeyDisposition::Forward);
+        assert_eq!(keys.release(KEY_T), KeyDisposition::Forward);
     }
 
     #[test]

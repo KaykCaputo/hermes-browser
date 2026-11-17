@@ -1,6 +1,6 @@
 use crate::{
-    ColorScheme, ControlAnswer, ControlId, ControlRect, ControlRequest, DEFAULT_ZOOM_PERCENT,
-    ImeInput, KeyboardInput, PageIcon, PointerCursor,
+    ClipboardCommand, ColorScheme, ControlAnswer, ControlId, ControlRect, ControlRequest,
+    DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon, PointerCursor,
 };
 use crate::{PageRequest, PageRequestAnswer, PageRequestId};
 
@@ -84,6 +84,9 @@ pub enum BrowserCommand {
         id: PageRequestId,
         answer: PageRequestAnswer,
     },
+    // menus
+    /// Cut, Copy or Paste chosen in the Edit menu while the page has focus.
+    Clipboard(ClipboardCommand),
 }
 
 impl BrowserCommand {

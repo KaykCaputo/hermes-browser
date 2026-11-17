@@ -35,6 +35,8 @@ pub(crate) fn connect_native_keyboard_input(
             let Some(window) = weak_window.upgrade() else {
                 return EventResult::Propagate;
             };
+            // menus lane: focus tracking, and releases of keys the native menu performed.
+            crate::menus::observe_window_event(&window, event, &mut shortcut_keys);
 
             match event {
                 WindowEvent::ModifiersChanged(changed) => {

@@ -1,5 +1,5 @@
 use crate::browser::{BrowserCommand, PointerButton, PointerButtonAction};
-use crate::{ColorScheme, ControlAnswer, ControlId, ImeInput, KeyboardInput};
+use crate::{ClipboardCommand, ColorScheme, ControlAnswer, ControlId, ImeInput, KeyboardInput};
 use crate::{PageRequestAnswer, PageRequestId};
 
 pub trait WebView {
@@ -34,6 +34,8 @@ pub trait WebView {
         id: PageRequestId,
         answer: PageRequestAnswer,
     ) -> Result<(), Self::Error>;
+    // menus
+    fn clipboard(&mut self, command: ClipboardCommand) -> Result<(), Self::Error>;
 }
 
 pub fn dispatch_command<W>(web_view: &mut W, command: BrowserCommand) -> Result<(), W::Error>
@@ -70,5 +72,6 @@ where
         BrowserCommand::AnswerPageRequest { id, answer } => {
             web_view.answer_page_request(id, answer)
         }
+        BrowserCommand::Clipboard(command) => web_view.clipboard(command),
     }
 }
