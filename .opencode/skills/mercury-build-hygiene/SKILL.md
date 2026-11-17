@@ -22,6 +22,11 @@ whatever you do. Follow the rules below so that it never deletes something you s
   (`CARGO_BUILD_JOBS`, at least 2), then runs your command unchanged and returns
   its exit status. While it waits it prints `mercury-disk-guard: waiting …`. Exit status 75 means it gave
   up after six hours.
+- **Running a script file** (`sh x.sh`, `./x.sh`) counts as a build when the script contains a build
+  command, so it takes a slot too.
+- **The pinned checking tools** (`make ci-tools`: cargo-deny, shellcheck, actionlint) are shared by
+  all worktrees (`CI_TOOLS_DIR` points to `~/Library/Caches/mercury-browser/ci-tools`). Run
+  `make ci-tools` once if `make deny` or `make lint-scripts` says they are missing.
 - **Copying build output** (`cp`/`rsync`/`ditto` of a `…/target`) is refused.
 - **`target/` and `dist/` of a worktree are deleted:**
   - seconds after a successful `git push` from that worktree;
