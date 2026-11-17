@@ -12,7 +12,7 @@ state_dir="${MERCURY_GUARD_STATE:?MERCURY_GUARD_STATE is not set}"
 command="${MERCURY_GUARDED_COMMAND:?MERCURY_GUARDED_COMMAND is not set}"
 run_shell="${MERCURY_GUARDED_SHELL:-/bin/zsh}"
 worktrees="${MERCURY_GUARDED_WORKTREE:-}"
-slots="${MERCURY_BUILD_SLOTS:-2}"
+slots="${MERCURY_BUILD_SLOTS:-5}"
 min_free_gb="${MERCURY_MIN_FREE_GB:-40}"
 wait_minutes="${MERCURY_SLOT_WAIT_MINUTES:-360}"
 
@@ -99,5 +99,14 @@ trap release EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+# Share the cores between the builds running now (at least two jobs each). A command that sets
+# CARGO_BUILD_JOBS itself still wins, since it runs after this.
+if [ -z "${CARGO_BUILD_JOBS:-}" ]; then
+    cores="$(sysctl -n hw.ncpu 2>/dev/null || echo 8)"
+    running="$(find "$slot_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+    jobs=$((cores / (running > 0 ? running : 1)))
+    export CARGO_BUILD_JOBS=$((jobs > 2 ? jobs : 2))
+fi
 
 "$run_shell" -c "$command"
