@@ -55,9 +55,9 @@ mod shutdown;
 mod tab_close;
 // tabs
 mod signals;
-mod tab_switch_frame;
 #[cfg(target_os = "macos")]
 mod system_proxy;
+mod tab_switch_frame;
 mod ui_sync;
 
 fn main() -> Result<ExitCode, Box<dyn Error>> {
