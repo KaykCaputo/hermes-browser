@@ -320,8 +320,21 @@ export component DownloadsPopover inherits Rectangle {
     drop-shadow-color: DownloadsPalette.shadow;
     drop-shadow-offset-y: 4px;
 
+    accessible-role: list;
+    accessible-label: "Downloads";
+
     // Clicks on the popover never reach what is under it.
     TouchArea { }
+
+    // Opening the popover moves the keyboard into it; Tab then reaches its buttons. Return
+    // does nothing here, so opening it can never press a button by accident.
+    popover-focus := FocusScope {
+        focus-on-click: false;
+    }
+
+    init => {
+        popover-focus.focus();
+    }
 
     VerticalLayout {
         padding: 8px;
@@ -398,8 +411,20 @@ export component DownloadsPanel inherits Rectangle {
 
     background: DownloadsPalette.surface;
 
+    accessible-role: list;
+    accessible-label: "Downloads";
+
     // Clicks on the panel never reach the page under it.
     TouchArea { }
+
+    // Opening the list moves the keyboard into it; Tab then reaches its buttons.
+    panel-focus := FocusScope {
+        focus-on-click: false;
+    }
+
+    init => {
+        panel-focus.focus();
+    }
 
     VerticalLayout {
         padding-left: 32px;
@@ -594,14 +619,16 @@ export component QuitDownloadsPrompt inherits Rectangle {
 // top of the page area, in the browser's own colours, naming the site.
 export component DownloadOfferBar inherits Rectangle {
     in property <string> text;
+    // Where the file comes from, when another host than the page.
+    in property <string> detail;
     callback download;
     callback block;
     callback dismiss;
 
-    height: 44px;
+    height: 48px;
     background: DownloadsPalette.surface;
     accessible-role: groupbox;
-    accessible-label: root.text;
+    accessible-label: root.text + ". " + root.detail;
 
     // Clicks on the bar never reach the page under it.
     TouchArea { }
@@ -626,13 +653,23 @@ export component DownloadOfferBar inherits Rectangle {
             accessible-role: none;
         }
 
-        Text {
+        VerticalLayout {
             horizontal-stretch: 1;
-            text: root.text;
-            color: DownloadsPalette.text;
-            font-size: 13px;
-            vertical-alignment: center;
-            overflow: elide;
+            alignment: center;
+
+            Text {
+                text: root.text;
+                color: DownloadsPalette.text;
+                font-size: 13px;
+                overflow: elide;
+            }
+
+            Text {
+                text: root.detail;
+                color: DownloadsPalette.muted;
+                font-size: 11px;
+                overflow: elide;
+            }
         }
 
         VerticalLayout {

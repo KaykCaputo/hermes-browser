@@ -125,10 +125,15 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
     );
-    connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
+    connect_native_keyboard_input(
+        &window,
+        Rc::clone(&controller),
+        Rc::clone(&web_view_focused),
+    );
     downloads::start(
         &window,
         Rc::clone(&controller),
+        web_view_focused,
         downloads::DownloadOptions {
             folder: options.download_dir.clone(),
             url: options.download_url.clone(),

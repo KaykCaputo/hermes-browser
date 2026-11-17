@@ -236,6 +236,7 @@ export component MainWindow inherits Window {
     in property <bool> downloads-attention: false;
     in property <bool> download-offer-visible: false;
     in property <string> download-offer-text;
+    in property <string> download-offer-detail;
     // Set by the downloads button wherever the toolbar places it.
     property <length> downloads-anchor-right;
     property <length> downloads-anchor-bottom;
@@ -251,6 +252,10 @@ export component MainWindow inherits Window {
     callback download-offer-download();
     callback download-offer-block();
     callback download-offer-dismiss();
+    // Gives the keyboard back to the page after the downloads list or question closes.
+    public function downloads-focus-web-view() {
+        web-view-focus.focus();
+    }
     // --- end downloads-ui ---
 
     pure function mouse-cursor-for(cursor: WebViewCursor) -> MouseCursor {
@@ -781,6 +786,7 @@ export component MainWindow inherits Window {
                 y: 0px;
                 width: parent.width;
                 text: root.download-offer-text;
+                detail: root.download-offer-detail;
                 download => {
                     root.download-offer-download();
                 }

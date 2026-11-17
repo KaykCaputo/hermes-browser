@@ -54,7 +54,10 @@ pub(crate) fn connect_native_keyboard_input(
 
                     if web_view_focused.get() {
                         let active_tab_id = controller.borrow().active_tab_id();
-                        if event.state == ElementState::Pressed && !event.repeat {
+                        if event.state == ElementState::Pressed
+                            && !event.repeat
+                            && crate::downloads::counts_as_activation(&event.logical_key)
+                        {
                             crate::activation::note_user_activation(
                                 active_tab_id,
                                 std::time::Instant::now(),

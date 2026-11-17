@@ -20,7 +20,7 @@ pub(crate) fn connect_ui_callbacks(
     window.on_navigate(move |address| {
         // An address the user typed: a download it leads to was asked for (downloads-ui lane).
         let tab_id = navigate_controller.borrow().active_tab_id();
-        crate::activation::note_user_activation(tab_id, std::time::Instant::now());
+        crate::downloads::note_typed_navigation(tab_id, address.as_str());
         let result = navigate_controller
             .borrow_mut()
             .queue_navigation(address.as_str());

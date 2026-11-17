@@ -14,8 +14,8 @@ pub struct BrowserController {
     command_queue: VecDeque<TabCommand>,
     color_scheme: ColorScheme,
     visits: VisitTracker,
-    /// downloads: pages the engine offered as downloads, oldest first.
-    download_offers: Vec<(TabId, crate::DownloadOffer)>,
+    /// downloads: top-level requests and pages offered as downloads, oldest first.
+    download_signals: Vec<(TabId, crate::DownloadSignal)>,
 }
 
 impl BrowserController {
@@ -29,7 +29,7 @@ impl BrowserController {
             command_queue: VecDeque::new(),
             color_scheme: ColorScheme::default(),
             visits: VisitTracker::default(),
-            download_offers: Vec::new(),
+            download_signals: Vec::new(),
         }
     }
 
@@ -352,24 +352,34 @@ impl BrowserController {
             self.visits.observe(tab_id, &event);
         }
         // downloads
-        if self.tabs.iter().any(|tab| tab.id() == tab_id)
-            && let BrowserEvent::DownloadOffered {
-                url,
-                mime_type,
-                posted,
-                referrer,
-            } = &event
-        {
-            self.download_offers.push((
-                tab_id,
-                crate::DownloadOffer {
+        if self.tabs.iter().any(|tab| tab.id() == tab_id) {
+            let signal = match &event {
+                BrowserEvent::DownloadOffered {
+                    url,
+                    mime_type,
+                    posted,
+                    referrer,
+                } => Some(crate::DownloadSignal::Offered(crate::DownloadOffer {
                     url: url.clone(),
                     mime_type: mime_type.clone(),
                     posted: *posted,
                     referrer: referrer.clone(),
-                },
-            ));
-            return true;
+                })),
+                BrowserEvent::DocumentRequestStarted {
+                    url,
+                    redirect,
+                    from,
+                } => Some(crate::DownloadSignal::RequestStarted {
+                    url: url.clone(),
+                    redirect: *redirect,
+                    from: from.clone(),
+                }),
+                _ => None,
+            };
+            if let Some(signal) = signal {
+                self.download_signals.push((tab_id, signal));
+                return true;
+            }
         }
         let Some(tab) = self.tab_mut(tab_id) else {
             return false;
@@ -407,9 +417,10 @@ impl BrowserController {
         self.visits.take_updates()
     }
 
-    /// downloads: the pages offered as downloads since the last call, oldest first.
-    pub fn take_download_offers(&mut self) -> Vec<(TabId, crate::DownloadOffer)> {
-        std::mem::take(&mut self.download_offers)
+    /// downloads: the top-level requests and the pages offered as downloads since the last
+    /// call, oldest first.
+    pub fn take_download_signals(&mut self) -> Vec<(TabId, crate::DownloadSignal)> {
+        std::mem::take(&mut self.download_signals)
     }
 
     fn open_blank_tab(&mut self, activation: TabActivation) -> TabId {

@@ -6,10 +6,15 @@
 //! `Document::mark_as_internal`), and tells the embedder nothing beyond the usual commit, an
 //! empty title and `Complete`. The check below asks the page itself, once it is complete and
 //! has no title: an opaque origin, a type other than HTML or XML, and exactly that one
-//! paragraph. A page cannot reach all three on its own except with an XML-free, opaque-origin
-//! document of its own making (a `Content-Security-Policy: sandbox` text response renders in a
-//! `<pre>`, not a `<p>`); at worst a page could so offer its own URL as a download, which a
-//! response of a non-displayable type does anyway.
+//! paragraph.
+//!
+//! **A page can imitate it.** Any page whose response makes its own origin opaque (for example
+//! with `Content-Security-Policy: sandbox`) and whose body is that one paragraph, in a type
+//! other than HTML or XML, passes the check — so can a same-origin page arrange it on its own
+//! URL. What it gains is nothing it could not get otherwise: Mercury offers *that page's own
+//! URL* as a download, under the same rules (a gesture, or the bar), exactly as a response of
+//! a type Servo cannot show would. No other URL, no request body and no other origin's data
+//! are involved.
 
 use url::Url;
 
@@ -35,11 +40,12 @@ pub(crate) fn parse_answer(answer: &str) -> Option<(String, Url)> {
     Some((mime_type.to_owned(), Url::parse(href.trim()).ok()?))
 }
 
-/// Whether the last top-level request of the web view, if it was for `url`, was not a GET:
-/// a form's POST, whose body the embedder never sees and must not send again.
-pub(crate) fn was_posted(last_request: Option<&(String, Url)>, url: &Url) -> bool {
-    last_request
-        .is_some_and(|(method, requested)| requested == url && !method.eq_ignore_ascii_case("GET"))
+/// Whether the request that fetched `url` used another method than GET: a form's POST, whose
+/// body the embedder never sees and must not send again. `None` when it is not known: the last
+/// top-level request seen was for another URL, or none was seen.
+pub(crate) fn was_posted(last_request: Option<&(String, Url)>, url: &Url) -> Option<bool> {
+    let (method, requested) = last_request?;
+    (requested == url).then(|| !method.eq_ignore_ascii_case("GET"))
 }
 
 #[cfg(test)]
@@ -64,10 +70,17 @@ mod tests {
     fn a_post_is_recognised_only_for_the_same_page() {
         let page = Url::parse("https://a.test/report").unwrap();
         let other = Url::parse("https://a.test/other").unwrap();
-        assert!(was_posted(Some(&("POST".to_owned(), page.clone())), &page));
-        assert!(!was_posted(Some(&("GET".to_owned(), page.clone())), &page));
-        assert!(!was_posted(Some(&("POST".to_owned(), other)), &page));
-        assert!(!was_posted(None, &page));
+        assert_eq!(
+            was_posted(Some(&("POST".to_owned(), page.clone())), &page),
+            Some(true)
+        );
+        assert_eq!(
+            was_posted(Some(&("GET".to_owned(), page.clone())), &page),
+            Some(false)
+        );
+        // Another URL, or nothing seen: unknown, never taken for a GET.
+        assert_eq!(was_posted(Some(&("GET".to_owned(), other)), &page), None);
+        assert_eq!(was_posted(None, &page), None);
     }
 
     #[test]

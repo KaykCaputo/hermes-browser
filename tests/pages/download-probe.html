@@ -15,6 +15,9 @@
 //   #a-download-text         <a download="saved.txt"> to text/plain
 //   #blob                    a script-made Blob saved through <a download>
 //   #data                    a data: URL saved through <a download>
+//   #other-host              <a download> to a file on another host (localhost)
+//   #then-leave              <a download>, then the page navigates elsewhere 2.5 s later
+//   #post-then-link          a form POST whose answer follows a link to a file
 const kind = location.hash.slice(1);
 document.getElementById("case").textContent = "case: " + kind;
 function click(href, name) {
@@ -37,6 +40,17 @@ setTimeout(() => {
       break;
     case "a-download-zip-big":
       click("/download/big.zip?type=application/zip&size=20000000&rate=2000000", "big.zip");
+      break;
+    case "other-host":
+      click("http://localhost:" + location.port + "/download/report.pdf?type=application/pdf", "report.pdf");
+      break;
+    case "then-leave":
+      click("/download/archive.zip?type=application/zip", "archive.zip");
+      setTimeout(() => { location.href = "/pages/colors.html"; }, 2500);
+      break;
+    case "post-then-link":
+      document.getElementById("post").action = "/form-result";
+      document.getElementById("post").submit();
       break;
     case "a-download-zip":
       click("/download/archive.zip?type=application/zip", "archive.zip");

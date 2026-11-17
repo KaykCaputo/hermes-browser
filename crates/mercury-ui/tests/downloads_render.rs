@@ -93,7 +93,8 @@ slint::slint! {
                 x: 0px;
                 y: 0px;
                 width: parent.width;
-                text: "127.0.0.1:8123 wants to download installer.dmg";
+                text: "shop.example.com wants to download installer.dmg";
+                detail: "From files.example.net";
                 download => {
                     root.bar-answer("download");
                 }

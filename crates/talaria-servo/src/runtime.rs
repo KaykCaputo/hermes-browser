@@ -345,16 +345,27 @@ struct BrowserDelegate {
 
 impl BrowserDelegate {
     // downloads
-    fn note_document_request(&self, request: &servo::WebResourceRequest) {
+    fn note_document_request(
+        &self,
+        web_view: &servo::WebView,
+        request: &servo::WebResourceRequest,
+    ) {
         if request.is_for_main_frame {
+            let url = request.url.clone().into_url();
             *self.last_document_request.borrow_mut() = Some((
                 request.method.to_string(),
-                request.url.clone().into_url(),
+                url.clone(),
                 request
                     .referrer_url
                     .clone()
                     .map(|referrer| referrer.into_url()),
             ));
+            // Sent as the request starts, so a gesture is matched before the server answers.
+            self.send_browser_event(BrowserEvent::DocumentRequestStarted {
+                url: url.to_string(),
+                redirect: request.is_redirect,
+                from: web_view.url().map(|from| from.to_string()),
+            });
         }
     }
 
@@ -426,7 +437,7 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn load_web_resource(&self, web_view: servo::WebView, load: servo::WebResourceLoad) {
-        self.note_document_request(&load.request); // downloads
+        self.note_document_request(&web_view, &load.request); // downloads
         self.content_blocker
             .handle_web_resource_load(Some(&web_view), load);
     }
