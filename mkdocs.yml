@@ -72,6 +72,7 @@ nav:
       - Servo integration: developer-guide/servo-integration.md
       - Saved logins: developer-guide/passwords.md
       - Testing and quality: developer-guide/testing.md
+      - Hands-on checklist: developer-guide/hands-on-checklist.md
       - Continuous integration: developer-guide/continuous-integration.md
       - Vendored patches: developer-guide/vendored-patches.md
       - Releases: developer-guide/releases.md
