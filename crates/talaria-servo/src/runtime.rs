@@ -14,16 +14,25 @@ use servo::{
     WebViewBuilder,
 };
 use talaria_core::{BrowserEvent, LoadState, PageIcon, PointerCursor, TabEvent, TabId};
+use talaria_core::{PageRequest, PageRequestKind};
 use url::Url;
 
 use crate::adblocker::ContentBlocker;
+use crate::embedder_controls::{ControlIds, EmbedderControls};
+use crate::exit_clearing::{EngineSwitches, ExitClearing, clear_at_exit};
 use crate::frame_ready::FrameReadySignal;
 use crate::http_disk_cache::{CacheCheck, http_disk_cache_database, repair_http_disk_cache};
 use crate::load_metrics::{LoadMilestone, PageLoadMetrics};
 use crate::page_defaults::page_defaults_user_content;
+use crate::page_requests::{
+    ClosesOnDrop, DocumentStartTracker, PendingEngineRequests, ServoPageRequest, page_permission,
+    simple_dialog_kind,
+};
 use crate::proxy::SystemProxySettings;
 use crate::screen::ScreenMetrics;
-use crate::session_data::{AfterEngineCleanup, clean_up_before_engine_start, end_session_cookies};
+use crate::session_data::{
+    AfterEngineCleanup, HandleThenCleanup, clean_up_before_engine_start, end_session_cookies,
+};
 use crate::{ServoWebView, ServoWebViewError};
 
 type WakeCallback = dyn Fn() + Send + Sync + 'static;
@@ -76,6 +85,12 @@ pub struct RuntimeOptions {
     /// Turn on servoshell's experimental web-platform features, except the async clipboard and
     /// WebGPU (see `EXCLUDED_EXPERIMENTAL_PREFS`).
     pub experimental_web_features: bool,
+    // settings
+    /// Block ads and trackers from the start; changed later through `ServoRuntime::switches`.
+    pub block_ads_and_trackers: bool,
+    /// What to clear at quit; also cleared before the engine starts, in case the last quit
+    /// never got to it. Changed later through `ServoRuntime::switches`.
+    pub clear_on_exit: ExitClearing,
     /// The system's proxy settings, read at start; used unless the proxy environment
     /// variables are set. Servo builds its HTTP clients once, so a change applies at the
     /// next start.
@@ -90,6 +105,8 @@ impl Default for RuntimeOptions {
             gpu_canvas: true,
             config_dir: None,
             experimental_web_features: true,
+            block_ads_and_trackers: true,
+            clear_on_exit: ExitClearing::default(),
             system_proxy: None,
             http_disk_cache_dir: None,
         }
@@ -101,13 +118,17 @@ pub struct ServoRuntime {
     redraw_waker: EventLoopWaker,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
+    // controls
+    control_ids: ControlIds,
     /// The user-origin style sheet every web view shares. Servo's `UserContentManager` holds a
     /// handle to Servo of its own, so this field must stay before `after_engine_cleanup`.
     user_content: Rc<servo::UserContentManager>,
     /// Declared after `inner` and `user_content`, the two fields that hold a handle to Servo,
-    /// so it is dropped after the last of them. Every web view's delegate holds a clone too;
-    /// see `AfterEngineCleanup`.
+    /// so it is dropped after the last of them. Every web view holds a clone too, released
+    /// after its own handle; see `AfterEngineCleanup`.
     after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
+    /// Content blocking and what to clear at quit, shared with the browser.
+    switches: EngineSwitches,
 }
 
 impl ServoRuntime {
@@ -115,11 +136,15 @@ impl ServoRuntime {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
+        let switches = EngineSwitches::new(
+            runtime_options.block_ads_and_trackers,
+            runtime_options.clear_on_exit,
+        );
         // Servo reads its saved files when it starts. Session cookies and HTTP credentials in
         // them belong to an earlier session that was not ended (killed, or cut short by the
         // shutdown watchdog); remove them from the files before Servo can load them.
         if let Some(config_dir) = &runtime_options.config_dir {
-            clean_up_before_engine_start(config_dir);
+            clean_up_before_engine_start(config_dir, runtime_options.clear_on_exit);
         }
         // Servo panics at start on some damaged caches; nothing has the file open yet.
         let cache_check = runtime_options
@@ -142,7 +167,7 @@ impl ServoRuntime {
         let after_engine_cleanup = runtime_options.config_dir.clone().map(|config_dir| {
             // Session cookies saved by a run that did not end them (it was killed) end now.
             end_session_cookies(&inner);
-            Rc::new(AfterEngineCleanup::new(config_dir))
+            Rc::new(AfterEngineCleanup::new(config_dir, switches.clone()))
         });
         if multiprocess_enabled {
             info!(
@@ -156,7 +181,7 @@ impl ServoRuntime {
         } else {
             info!("Servo single-process mode enabled; operating-system sandbox disabled");
         }
-        let content_blocker = Rc::new(ContentBlocker::new());
+        let content_blocker = Rc::new(ContentBlocker::new(switches.clone()));
         inner.set_delegate(Rc::new(BrowserServoDelegate {
             content_blocker: Rc::clone(&content_blocker),
         }));
@@ -167,9 +192,19 @@ impl ServoRuntime {
             redraw_waker,
             content_blocker,
             screen_metrics: Rc::default(),
+            control_ids: ControlIds::default(),
             user_content,
             after_engine_cleanup,
+            switches,
         }
+    }
+
+    // settings
+
+    /// The switches the browser changes while the engine runs; they share their state with
+    /// the engine, so keep the clone and set it directly.
+    pub fn switches(&self) -> EngineSwitches {
+        self.switches.clone()
     }
 
     /// What pages see as the screen and window geometry; `None` lets Servo use its defaults.
@@ -187,6 +222,9 @@ impl ServoRuntime {
     ) -> Result<ServoWebView, ServoWebViewError> {
         let initial_url = Url::parse(initial_url)?;
         let frame_ready = FrameReadySignal::default();
+        let controls = EmbedderControls::new(self.control_ids.clone());
+        let page_requests = ClosesOnDrop::new(PendingEngineRequests::default());
+        let document_start = Rc::new(RefCell::new(DocumentStartTracker::default()));
         let delegate = Rc::new(BrowserDelegate {
             tab_id,
             browser_event_sender: browser_event_sender.clone(),
@@ -194,7 +232,9 @@ impl ServoRuntime {
             load_metrics: RefCell::new(PageLoadMetrics::default()),
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
-            _after_engine_cleanup: self.after_engine_cleanup.clone(),
+            controls: controls.clone(),
+            page_requests: page_requests.shared(),
+            document_start: Rc::clone(&document_start),
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -208,7 +248,15 @@ impl ServoRuntime {
             let _send_result = browser_event_sender.send(TabEvent::new(tab_id, event));
         }
         info!("created Servo WebView for tab {}", tab_id.value());
-        Ok(ServoWebView::new(inner, frame_ready, tab_id, scale_factor))
+        Ok(ServoWebView::new(
+            HandleThenCleanup::new(inner, self.after_engine_cleanup.clone()),
+            frame_ready,
+            tab_id,
+            scale_factor,
+            controls,
+            page_requests,
+            document_start,
+        ))
     }
 
     pub fn spin_event_loop(&self) {
@@ -218,8 +266,13 @@ impl ServoRuntime {
 }
 
 impl Drop for ServoRuntime {
-    /// Ends the session cookies while Servo still runs, before it saves its cookie jar.
+    /// Clears what the user asked to have cleared at exit, then ends the session cookies,
+    /// while Servo still runs, before it saves its files.
     fn drop(&mut self) {
+        let clearing = self.switches.clear_on_exit();
+        if clearing.clears_anything() {
+            clear_at_exit(&self.inner, clearing);
+        }
         if self.after_engine_cleanup.is_some() {
             end_session_cookies(&self.inner);
         }
@@ -278,6 +331,10 @@ fn mercury_preferences(runtime_options: &RuntimeOptions) -> Preferences {
     // the embedder for permission (`mediadevices.rs`), so WebRTC must stay disabled until
     // Mercury can gate device access itself.
     preferences.dom_webrtc_enabled = false;
+    // controls: always off. With it on, a page can call `selectFiles()` on a file input and have
+    // Servo accept the paths it names without any file panel (`htmlinputelement.rs`); it exists
+    // for Servo's own tests.
+    preferences.dom_testing_html_input_element_select_files_enabled = false;
     preferences.user_agent = firefox_compatible_user_agent(&preferences.user_agent);
     apply_system_proxy(&mut preferences, runtime_options.system_proxy.as_ref());
     // Servo's size limit (`network_http_disk_cache_size`, 100 MB) is kept.
@@ -390,8 +447,13 @@ struct BrowserDelegate {
     load_metrics: RefCell<PageLoadMetrics>,
     content_blocker: Rc<ContentBlocker>,
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
-    /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
-    _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
+    // controls
+    controls: EmbedderControls,
+    /// Dialogs, leave prompts, sign-ins and permission prompts waiting for the user; shared with
+    /// the tab's `ServoWebView`, which answers them.
+    page_requests: Rc<RefCell<PendingEngineRequests<ServoPageRequest>>>,
+    /// Shared with the tab's `ServoWebView`, which arms it when it navigates.
+    document_start: Rc<RefCell<DocumentStartTracker>>,
 }
 
 impl BrowserDelegate {
@@ -399,6 +461,13 @@ impl BrowserDelegate {
         let _send_result = self
             .browser_event_sender
             .send(TabEvent::new(self.tab_id, event));
+    }
+
+    // controls
+    fn drop_controls(&self) {
+        for event in self.controls.drop_all() {
+            self.send_browser_event(event);
+        }
     }
 
     fn record_load_milestone(&self, milestone: LoadMilestone) {
@@ -431,6 +500,12 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn notify_url_changed(&self, _web_view: servo::WebView, url: Url) {
+        // dialogs: user info is left out; after a sign-in it holds the password.
+        log::debug!(
+            "tab {}: address changed to {}",
+            self.tab_id.value(),
+            talaria_core::strip_user_info(url.as_str()),
+        );
         self.send_browser_event(BrowserEvent::AddressChanged {
             url: display_url(&url),
         });
@@ -454,8 +529,14 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn notify_load_status_changed(&self, _web_view: servo::WebView, status: LoadStatus) {
+        // dialogs: a new document; the previous one's requests and page state no longer apply.
+        if self.document_start.borrow_mut().document_started(status) {
+            self.send_browser_event(BrowserEvent::PageLoadStarted);
+        }
         match status {
             LoadStatus::Started => {
+                // controls: requests of the page being left are dropped.
+                self.drop_controls();
                 self.load_metrics.borrow_mut().start(Instant::now());
                 info!("tab {}: page load started", self.tab_id.value());
             }
@@ -495,9 +576,98 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn notify_crashed(&self, web_view: servo::WebView, reason: String, _backtrace: Option<String>) {
+        // controls
+        self.drop_controls();
         for event in crash_feedback(reason, web_view.cursor(), web_view.status_text()) {
             self.send_browser_event(event);
         }
+    }
+
+    // controls, dialogs: simple dialogs are page requests; every other kind is a control.
+    fn show_embedder_control(&self, web_view: servo::WebView, control: servo::EmbedderControl) {
+        match control {
+            servo::EmbedderControl::SimpleDialog(dialog) => {
+                self.show_simple_dialog(&web_view, dialog);
+            }
+            control => {
+                if let Some(event) = self.controls.show(control) {
+                    self.send_browser_event(event);
+                }
+            }
+        }
+    }
+
+    // controls: Servo never sends a hide for simple dialogs.
+    fn hide_embedder_control(
+        &self,
+        _web_view: servo::WebView,
+        control_id: servo::EmbedderControlId,
+    ) {
+        if let Some(event) = self.controls.hide(control_id) {
+            self.send_browser_event(event);
+        }
+    }
+
+    fn request_unload(&self, web_view: servo::WebView, request: servo::AllowOrDenyRequest) {
+        self.forward_page_request(
+            web_view.url(),
+            PageRequestKind::LeavePage,
+            ServoPageRequest::Unload(request),
+        );
+    }
+
+    fn request_authentication(
+        &self,
+        _web_view: servo::WebView,
+        request: servo::AuthenticationRequest,
+    ) {
+        let url = Some(request.url().clone());
+        let kind = PageRequestKind::Authentication {
+            for_proxy: request.for_proxy(),
+        };
+        self.forward_page_request(url, kind, ServoPageRequest::Authentication(request));
+    }
+
+    fn request_permission(&self, web_view: servo::WebView, request: servo::PermissionRequest) {
+        // Servo does not say which frame asked; the request is shown for the tab's page.
+        let kind = PageRequestKind::Permission(page_permission(request.feature()));
+        self.forward_page_request(web_view.url(), kind, ServoPageRequest::Permission(request));
+    }
+}
+
+// dialogs
+impl BrowserDelegate {
+    fn show_simple_dialog(&self, web_view: &servo::WebView, dialog: servo::SimpleDialog) {
+        let kind = simple_dialog_kind(&dialog);
+        self.forward_page_request(web_view.url(), kind, ServoPageRequest::Dialog(dialog));
+    }
+
+    /// Keeps the engine's request and tells the browser about it. A request that arrives while
+    /// the web view is closing is dropped at once, which gives the engine's default answer.
+    fn forward_page_request(
+        &self,
+        url: Option<Url>,
+        kind: PageRequestKind,
+        request: ServoPageRequest,
+    ) {
+        let Some(id) = self.page_requests.borrow_mut().insert(request) else {
+            return;
+        };
+        log::debug!(
+            "tab {}: page request {} ({kind:?}) for {}",
+            self.tab_id.value(),
+            id.value(),
+            url.as_ref().map_or_else(
+                || "no address".to_owned(),
+                |url| talaria_core::strip_user_info(url.as_str())
+            ),
+        );
+        self.send_browser_event(BrowserEvent::PageRequested(PageRequest {
+            id,
+            url: url.map(String::from).unwrap_or_default(),
+            kind,
+            received_at: crate::page_request_clock(),
+        }));
     }
 }
 
@@ -777,6 +947,16 @@ mod tests {
                 preferences.get_value(name),
                 defaults.get_value(name),
                 "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn pages_cannot_choose_their_own_upload_files() {
+        for enabled in [true, false] {
+            assert!(
+                !preferences_with_experimental_web_features(enabled)
+                    .dom_testing_html_input_element_select_files_enabled
             );
         }
     }

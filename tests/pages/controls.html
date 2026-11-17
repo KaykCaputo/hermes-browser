@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Form controls and context menu</title>
+<style>
+  body { margin: 24px; font: 15px/1.5 sans-serif; color: #000; background: #fff; }
+  section { margin-bottom: 18px; }
+  label { display: inline-block; min-width: 190px; }
+  img { width: 64px; height: 64px; vertical-align: middle; background: #1e88e5; }
+</style>
+</head>
+<body>
+<!--
+  Manual checks for the "controls" lane. Open this page and try each control:
+  - The select lists open under the element (above it near the bottom), show the page's origin,
+    group headings, greyed disabled options and a check mark at the selection. Arrows, Home/End
+    and typing move the highlight; Return chooses, Escape and a click outside cancel. The
+    multiple list toggles and closes with Return or Done.
+  - The colour input opens the picker: swatches, the hue/lightness area, the hex field
+    (type digits, Backspace), Return or Done sets, Escape or Cancel keeps the old colour.
+  - The file inputs open the system panel as a sheet on the window (one file, several files,
+    PNG and JPEG only).
+  - Right-click (or Control-click on macOS) the link, the image, the linked image, the text
+    field and the page for the context menu.
+  - Type in the text field with an input method (for example Japanese): the candidate window
+    sits at the field.
+  Automatic: the text field takes focus on load, which sends the input-method request.
+  `#timer-click` calls `click()` on the file and colour inputs from a timer, with no gesture:
+  Servo 0.8.0 opens both pickers for such a click, and Mercury must drop both requests (no panel,
+  no picker; the log says "no recent user gesture"). Servo 0.8.0 has no `showPicker()`, so
+  `#open-select`, `#open-color` and `#open-long` only record the TypeError in the title.
+-->
+<section>
+  <label for="fruit">Single, with groups</label>
+  <select id="fruit">
+    <option>None</option>
+    <optgroup label="Fruit">
+      <option>Apple</option>
+      <option disabled>Banana (out of stock)</option>
+      <option selected>Blueberry</option>
+      <option>Cherry</option>
+    </optgroup>
+    <optgroup label="Other">
+      <option>Bread</option>
+      <option>A very long option label that does not fit in the list and has to be elided at the end</option>
+      <option disabled>Zucchini</option>
+    </optgroup>
+  </select>
+</section>
+<section>
+  <label for="many">Long list</label>
+  <select id="many"></select>
+</section>
+<section>
+  <label for="toppings">Multiple</label>
+  <select id="toppings" multiple size="1">
+    <option selected>Cheese</option>
+    <option>Olives</option>
+    <option>Peppers</option>
+  </select>
+</section>
+<section>
+  <label for="colour">Colour</label>
+  <input id="colour" type="color" value="#1e88e5">
+</section>
+<section>
+  <label for="one-file">One file</label>
+  <input id="one-file" type="file">
+</section>
+<section>
+  <label for="files">Several images</label>
+  <input id="files" type="file" multiple accept=".png,.jpg,image/png">
+</section>
+<section>
+  <label for="text">Text</label>
+  <input id="text" type="text" value="Select me">
+</section>
+<section>
+  <a href="https://servo.org/">A link to servo.org</a> ·
+  <img alt="A blue square" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Crect width='8' height='8' fill='%231e88e5'/%3E%3C/svg%3E"> ·
+  <a href="https://servo.org/"><img alt="A linked blue square" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8'%3E%3Crect width='8' height='8' fill='%2343a047'/%3E%3C/svg%3E"></a>
+</section>
+<script>
+  const many = document.getElementById("many");
+  for (let index = 1; index <= 60; index += 1) {
+    const option = document.createElement("option");
+    option.textContent = "Option " + index;
+    option.selected = index === 45;
+    many.append(option);
+  }
+  window.addEventListener("load", () => {
+    const target = { "#open-select": "fruit", "#open-color": "colour", "#open-long": "many" }[location.hash];
+    if (location.hash === "#timer-click") {
+      setTimeout(() => document.getElementById("one-file").click(), 200);
+      setTimeout(() => {
+        document.getElementById("colour").click();
+        document.title = "Clicked from a timer";
+      }, 800);
+      return;
+    }
+    if (target) {
+      try {
+        document.getElementById(target).showPicker();
+      } catch (error) {
+        // Servo 0.8.0 has no showPicker(): this is a TypeError.
+        document.title = "showPicker failed: " + error.name;
+      }
+    } else {
+      document.getElementById("text").focus();
+    }
+  });
+</script>
+</body>
+</html>

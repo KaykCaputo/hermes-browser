@@ -1,0 +1,190 @@
+// Shared pieces of the UI for requests a page makes: dialogs, the leave prompt, sign-in and
+// permission prompts. Colours come from the chrome theme, `ChromePalette`.
+
+import { ChromePalette } from "../theme/chrome-palette.slint";
+export enum PageRequestStyle {
+    none,
+    alert,
+    confirm,
+    prompt,
+    leave-page,
+    sign-in,
+    permission,
+}
+
+// What the browser shows for the active tab's pending request. Every string is prepared by the
+// browser; page-supplied text (the message, the prompt's default value) is plain text.
+export struct PageRequestView {
+    id: int,
+    style: PageRequestStyle,
+    heading: string,
+    message: string,
+    // Shown in a smaller, separate line: who asked, or that the connection is not secure.
+    detail: string,
+    // Shown in a warning colour (a sign-in over a connection that is not HTTPS).
+    warning: string,
+    // The prompt's default value, or a saved user name.
+    value: string,
+    // A saved password, if any.
+    secret: string,
+    accept-label: string,
+    // Empty for an alert, which has only one button.
+    decline-label: string,
+    // The checkbox under the message: "Don't allow this page to show more dialogs" or
+    // "Remember for this site". Empty for none.
+    choice-label: string,
+}
+
+export component RequestButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> primary;
+    callback clicked;
+
+    height: 30px;
+    min-width: 84px;
+    preferred-width: label-text.preferred-width + 32px;
+    border-radius: 7px;
+    // A focus ring when Tab has reached the button.
+    border-width: keys.has-focus ? 2px : root.primary ? 0px : 1px;
+    border-color: keys.has-focus ? ChromePalette.focus-ring : ChromePalette.field-border;
+    accessible-role: button;
+    accessible-label: root.label;
+    accessible-action-default => {
+        root.clicked();
+    }
+    background: root.primary
+        ? (touch.pressed
+            ? ChromePalette.primary-button-background.darker(15%)
+            : touch.has-hover
+                ? ChromePalette.primary-button-background.brighter(10%)
+                : ChromePalette.primary-button-background)
+        : (touch.pressed
+            ? ChromePalette.button-pressed
+            : touch.has-hover ? ChromePalette.button-hover : ChromePalette.field-background);
+
+    label-text := Text {
+        text: root.label;
+        color: root.primary ? ChromePalette.primary-button-text : ChromePalette.text;
+        font-size: 13px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    // Reached with Tab only: a click does not move the keyboard here, and nothing focuses it
+    // automatically. Return or Space presses it.
+    keys := FocusScope {
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+}
+
+export component RequestCheckBox inherits Rectangle {
+    in property <string> label;
+    in-out property <bool> checked;
+
+    min-height: 22px;
+
+    HorizontalLayout {
+        spacing: 8px;
+
+        VerticalLayout {
+            alignment: center;
+
+            Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border-width: 1px;
+                border-color: root.checked ? ChromePalette.accent : ChromePalette.field-border;
+                background: root.checked ? ChromePalette.accent : ChromePalette.field-background;
+
+                if root.checked: Text {
+                    text: "✓";
+                    color: ChromePalette.primary-button-text;
+                    font-size: 12px;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+
+        Text {
+            text: root.label;
+            color: ChromePalette.text;
+            font-size: 12px;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+        }
+    }
+}
+
+export component RequestField inherits Rectangle {
+    in-out property <string> text;
+    in property <string> placeholder;
+    in property <bool> password;
+    // Select the whole text whenever the field gains focus (Slint does not on Tab on macOS).
+    in property <bool> select-on-focus;
+    out property <bool> has-focus: input.has-focus;
+    callback accepted;
+
+    public function focus-and-select() {
+        input.focus();
+        input.select-all();
+    }
+
+    height: 32px;
+    border-radius: 7px;
+    border-width: 1px;
+    border-color: input.has-focus ? ChromePalette.accent : ChromePalette.field-border;
+    background: ChromePalette.field-background;
+
+    if root.text == "": Text {
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        text: root.placeholder;
+        color: ChromePalette.placeholder;
+        font-size: 13px;
+        vertical-alignment: center;
+    }
+
+    input := TextInput {
+        x: 10px;
+        width: parent.width - 20px;
+        height: parent.height;
+        text <=> root.text;
+        color: ChromePalette.text;
+        font-size: 13px;
+        vertical-alignment: center;
+        single-line: true;
+        input-type: root.password ? InputType.password : InputType.text;
+        accepted => {
+            root.accepted();
+        }
+        changed has-focus => {
+            if self.has-focus && root.select-on-focus {
+                self.select-all();
+            }
+        }
+    }
+}

@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::panic::AssertUnwindSafe;
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
@@ -44,10 +45,14 @@ pub(crate) fn release_in_order<W, R, C, D>(
 /// are destroyed only when its content process, closing the page, sends `RemoveContext`
 /// (servo-script-0.8.0/dom/webgl/webglrenderingcontext.rs:168-171). Dropping the last `Servo`
 /// handle right after closing the web views stops the constellation while that is still in
-/// flight. The WebGL thread's `recv()` then returns an error, its loop ends
-/// (servo-webgl-0.8.0/webgl_thread.rs:319-327) before `WebGLMsg::Exit` is ever sent, and the
-/// thread drops contexts that are still alive, which surfman turns into a panic
-/// (third_party/surfman/src/cgl/context.rs:46). The real fix belongs in that WebGL thread.
+/// flight. The WebGL thread's message loop (servo-webgl-0.8.0/webgl_thread.rs:319-327) then
+/// ends because its `recv()` fails, not because of `WebGLMsg::Exit`, and the thread drops
+/// contexts that are still alive, which surfman turns into a panic
+/// (third_party/surfman/src/cgl/context.rs:46). Servo's shutdown does send `Exit` afterwards,
+/// but the send fails because the thread's receiver is already gone ("Could not exit
+/// WebGLThread", servo-canvas-traits-0.8.0/webgl.rs:83-86). By which route the receive fails
+/// (ipc-channel's router forwarding an error, or dropping the route) was not confirmed. The
+/// real fix belongs in that WebGL thread.
 ///
 /// There is no signal to wait on instead: `WebViewDelegate::notify_closed` reports only
 /// `window.close()` from page content, the constellation's `WebViewClosed` and
@@ -75,13 +80,82 @@ pub(crate) fn spin_for(period: Duration, mut spin: impl FnMut()) {
     }
 }
 
+/// Lets Servo run for `settle`, calling `spin` with the runtime, then releases the runtime with
+/// `drop_runtime`; a panic in either is caught. Returns whether both finished cleanly.
+pub(crate) fn shut_down_runtime<R>(
+    runtime: R,
+    settle: Duration,
+    spin: impl FnMut(&R),
+    drop_runtime: impl FnOnce(R),
+) -> bool {
+    // `AssertUnwindSafe` is sound here because nothing the closure touches is observed after a
+    // caught panic: the closure owns the runtime (dropped while unwinding if the spin
+    // panicked), `spin` and `drop_runtime` are consumed with it, and the caller only logs the
+    // result and goes on to release parts the closure never saw.
+    std::panic::catch_unwind(AssertUnwindSafe(move || {
+        let mut spin = spin;
+        spin_for(settle, || spin(&runtime));
+        drop_runtime(runtime);
+    }))
+    .is_ok()
+}
+
 /// Drops `value`, catching a panic raised while dropping it. Returns whether the drop was clean.
 ///
 /// This is a last guard so that a panic in the engine's teardown does not replace the exit
 /// code; it fixes nothing. Its limit: a second panic raised while the first one unwinds
 /// aborts the process, and nothing can catch that.
 pub(crate) fn drop_catching_panic<T>(value: T) -> bool {
+    // Sound for the same reason as in `shut_down_runtime`: the value is consumed by the
+    // closure and nothing it reaches is used after a caught panic.
     std::panic::catch_unwind(AssertUnwindSafe(move || drop(value))).is_ok()
+}
+
+/// How long a watchdog's own clean-up may take before the process ends regardless. Removing
+/// the temporary profile took up to 0.8 s under heavy load in tests (and about 4 s once), so
+/// this leaves room for it.
+pub(crate) const STUCK_CLEAN_UP_GRACE: Duration = Duration::from_secs(5);
+
+/// What a watchdog does when the part of the quit it covers has not finished in time: removes
+/// the temporary profile (which holds this run's cookies) and ends the process with `_exit`,
+/// which skips the destructors the main thread is in the middle of running. The exit status is
+/// `exit_code`, or 128 + the signal if a quit signal started the quit.
+///
+/// The clean-up takes locks a stuck thread may hold (standard error's, the logger's, the
+/// profile's), so a backstop thread ends the process after `STUCK_CLEAN_UP_GRACE` whatever
+/// happens to it. Each step is noted on standard error with its time, to show where a slow
+/// clean-up spent it.
+pub(crate) fn exit_because_stuck(what: &str, exit_code: u8) -> ! {
+    let code =
+        crate::signals::received().map_or(i32::from(exit_code), crate::signals::exit_status_for);
+    let started = Instant::now();
+    let _backstop = thread::Builder::new()
+        .name("quit watchdog backstop".to_owned())
+        .spawn(move || {
+            thread::sleep(STUCK_CLEAN_UP_GRACE);
+            // SAFETY: `_exit` ends the process at once; nothing runs after it.
+            unsafe { libc::_exit(code) }
+        });
+    let note = |step: &str| {
+        let _ = writeln!(
+            std::io::stderr(),
+            "mercury-browser: {what} in time: {step} ({} ms)",
+            started.elapsed().as_millis()
+        );
+    };
+    note("exiting without waiting");
+    crate::profile::remove_temporary_profile();
+    note("temporary profile removed");
+    #[cfg(target_os = "macos")]
+    {
+        crate::media_buffers::remove_media_buffers();
+        note("media buffers removed");
+    }
+    log::error!("{what} in time; exiting with status {code} without waiting");
+    log::logger().flush();
+    note("log flushed");
+    // SAFETY: `_exit` ends the process at once; nothing runs after it.
+    unsafe { libc::_exit(code) }
 }
 
 /// Runs `on_timeout` on a separate thread unless `disarm` is called within `timeout`.
@@ -228,6 +302,137 @@ mod tests {
         spin_for(Duration::ZERO, || spins += 1);
 
         assert_eq!(spins, 0);
+    }
+
+    #[test]
+    fn the_runtime_is_spun_for_the_settle_period_and_then_dropped() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let spins = Rc::clone(&log);
+
+        let clean = shut_down_runtime(
+            recorded("runtime dropped", &log),
+            Duration::from_millis(30),
+            |_runtime| spins.borrow_mut().push("spin"),
+            drop,
+        );
+
+        let log = log.borrow();
+        assert!(clean);
+        assert!(log.len() >= 2, "{log:?}");
+        assert_eq!(log.last(), Some(&"runtime dropped"));
+        assert!(log[..log.len() - 1].iter().all(|entry| *entry == "spin"));
+    }
+
+    #[test]
+    fn without_a_settle_period_the_runtime_is_dropped_unspun() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let spins = Rc::clone(&log);
+
+        assert!(shut_down_runtime(
+            recorded("runtime dropped", &log),
+            Duration::ZERO,
+            |_runtime| spins.borrow_mut().push("spin"),
+            drop,
+        ));
+
+        assert_eq!(*log.borrow(), vec!["runtime dropped"]);
+    }
+
+    #[test]
+    fn a_panic_while_settling_is_caught_and_the_runtime_still_released() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+
+        let clean = shut_down_runtime(
+            recorded("runtime dropped", &log),
+            Duration::from_millis(30),
+            |_runtime| panic!("deliberate panic while settling"),
+            |_runtime| panic!("not reached: the spin panicked"),
+        );
+
+        assert!(!clean);
+        assert_eq!(*log.borrow(), vec!["runtime dropped"]);
+    }
+
+    #[test]
+    fn a_panic_while_dropping_the_runtime_is_caught() {
+        assert!(!shut_down_runtime(
+            PanicsOnDrop,
+            Duration::ZERO,
+            |_runtime| {},
+            drop
+        ));
+    }
+
+    /// Mirrors `EngineState`: fields declared in the wrong order, released in order by `Drop`.
+    struct Holder {
+        wgpu_device: Option<Recorded>,
+        rendering_context: Option<Recorded>,
+        runtime: Option<Recorded>,
+        web_views: Vec<Recorded>,
+    }
+
+    impl Drop for Holder {
+        fn drop(&mut self) {
+            release_in_order(
+                EngineParts {
+                    web_views: std::mem::take(&mut self.web_views),
+                    runtime: self.runtime.take(),
+                    rendering_context: self.rendering_context.take(),
+                    wgpu_device: self.wgpu_device.take(),
+                },
+                drop,
+            );
+        }
+    }
+
+    fn holder(log: &Rc<RefCell<Vec<&'static str>>>) -> Holder {
+        Holder {
+            wgpu_device: Some(recorded("wgpu device", log)),
+            rendering_context: Some(recorded("rendering context", log)),
+            runtime: Some(recorded("runtime", log)),
+            web_views: vec![recorded("web view", log)],
+        }
+    }
+
+    const IN_ORDER: [&str; 4] = ["web view", "runtime", "rendering context", "wgpu device"];
+
+    #[test]
+    fn a_holder_dropped_without_shutting_down_releases_in_order() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+
+        drop(holder(&log));
+
+        assert_eq!(*log.borrow(), IN_ORDER);
+    }
+
+    #[test]
+    fn a_holder_dropped_while_unwinding_releases_in_order() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let unwound = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            let _holder = holder(&log);
+            panic!("deliberate panic with the holder alive");
+        }));
+
+        assert!(unwound.is_err());
+        assert_eq!(*log.borrow(), IN_ORDER);
+    }
+
+    #[test]
+    fn a_holder_whose_parts_were_taken_releases_nothing_more() {
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let mut holder = holder(&log);
+        let parts = EngineParts {
+            web_views: std::mem::take(&mut holder.web_views),
+            runtime: holder.runtime.take(),
+            rendering_context: holder.rendering_context.take(),
+            wgpu_device: holder.wgpu_device.take(),
+        };
+
+        drop(holder);
+        assert!(log.borrow().is_empty());
+        release_in_order(parts, drop);
+
+        assert_eq!(*log.borrow(), IN_ORDER);
     }
 
     struct PanicsOnDrop;

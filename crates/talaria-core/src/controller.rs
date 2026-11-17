@@ -1,9 +1,20 @@
 use std::collections::VecDeque;
+use std::time::Duration;
 
-use crate::address::{AddressResolutionError, resolve_address};
+use crate::address::{AddressResolutionError, SearchUrlBuilder, resolve_address};
 use crate::browser::LoadState;
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
-use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, Tab, TabActivation, TabCommand, TabId};
+use crate::page_request::decision_to_remember;
+use crate::{
+    ColorScheme, ControlAnswer, ControlId, ControlRequest, DEFAULT_ZOOM_PERCENT, Tab,
+    TabActivation, TabCommand, TabId,
+};
+use crate::{
+    PageRequestAnswer, PageRequestId, PageRequestReply, PendingPageRequest, PermissionDecisions,
+    SessionPermissionDecisions,
+};
+
+const NO_SEARCH: &str = "no search engine is set";
 
 #[derive(Debug)]
 pub struct BrowserController {
@@ -12,6 +23,14 @@ pub struct BrowserController {
     next_tab_id: u64,
     command_queue: VecDeque<TabCommand>,
     color_scheme: ColorScheme,
+    // settings
+    /// The system's scheme, as last reported; `color_scheme` is what pages see.
+    system_color_scheme: ColorScheme,
+    forced_color_scheme: Option<ColorScheme>,
+    default_zoom_percent: u16,
+    search: Option<SearchUrlBuilder>,
+    // dialogs
+    permission_decisions: Box<dyn PermissionDecisions>,
 }
 
 impl BrowserController {
@@ -24,6 +43,11 @@ impl BrowserController {
             next_tab_id: 2,
             command_queue: VecDeque::new(),
             color_scheme: ColorScheme::default(),
+            system_color_scheme: ColorScheme::default(),
+            forced_color_scheme: None,
+            default_zoom_percent: DEFAULT_ZOOM_PERCENT,
+            search: None,
+            permission_decisions: Box::new(SessionPermissionDecisions::default()),
         }
     }
 
@@ -31,7 +55,7 @@ impl BrowserController {
     /// cannot navigate it, so the pending page is replaced instead: the URL becomes the tab's
     /// initial URL again and the engine recreates the tab's web view with it.
     pub fn queue_navigation(&mut self, input: &str) -> Result<(), AddressResolutionError> {
-        let url = resolve_address(input)?.to_string();
+        let url = self.resolve_address(input)?.to_string();
         let tab_id = self.active_tab_id;
         let tab = self
             .tab_mut(tab_id)
@@ -81,7 +105,7 @@ impl BrowserController {
         activation: TabActivation,
     ) -> Result<TabId, AddressResolutionError> {
         let initial_url = initial_address
-            .map(|address| resolve_address(address).map(|url| url.to_string()))
+            .map(|address| self.resolve_address(address).map(|url| url.to_string()))
             .transpose()?;
         let tab_id = self.open_blank_tab(activation);
 
@@ -102,7 +126,7 @@ impl BrowserController {
         tab_id: TabId,
         address: &str,
     ) -> Result<bool, AddressResolutionError> {
-        let url = resolve_address(address)?.to_string();
+        let url = self.resolve_address(address)?.to_string();
         Ok(self
             .tab_mut(tab_id)
             .is_some_and(|tab| set_tab_initial_url(tab, url)))
@@ -114,6 +138,8 @@ impl BrowserController {
     pub fn take_initial_url(&mut self, tab_id: TabId) -> Option<String> {
         let tab = self.tab_mut(tab_id)?;
         let url = tab.take_initial_url()?;
+        // controls: the new web view has asked for nothing yet.
+        tab.state_mut().forget_controls();
         show_loading(tab, url.clone());
         Some(url)
     }
@@ -168,7 +194,7 @@ impl BrowserController {
     }
 
     pub fn reset_zoom(&mut self) {
-        self.set_active_zoom(DEFAULT_ZOOM_PERCENT);
+        self.set_active_zoom(self.default_zoom_percent);
     }
 
     /// The colour scheme pages should see; the engine gives it to every new web view.
@@ -178,7 +204,16 @@ impl BrowserController {
 
     /// Records the scheme and queues it for every tab. Tabs that are not engine-ready hold it
     /// until they are, like other non-pointer commands.
+    /// While a scheme is forced (`set_forced_color_scheme`), the system's is only remembered.
     pub fn set_color_scheme(&mut self, scheme: ColorScheme) {
+        self.system_color_scheme = scheme;
+        if self.forced_color_scheme.is_some() {
+            return;
+        }
+        self.send_color_scheme(scheme);
+    }
+
+    fn send_color_scheme(&mut self, scheme: ColorScheme) {
         self.color_scheme = scheme;
         let tab_ids = self.tabs.iter().map(Tab::id).collect::<Vec<_>>();
         for tab_id in tab_ids {
@@ -245,6 +280,8 @@ impl BrowserController {
         if !tab.is_engine_ready() && command.is_discarded_before_engine_ready() {
             return true;
         }
+        // dialogs
+        self.observe_command_for_page_requests(tab_id, &command);
 
         if let Some(last_command) = self.command_queue.back_mut() {
             if last_command.tab_id() != tab_id {
@@ -322,7 +359,7 @@ impl BrowserController {
         let index = self
             .command_queue
             .iter()
-            .position(|queued| self.is_engine_ready(queued.tab_id()))?;
+            .position(|queued| self.is_dispatchable(queued))?;
         self.command_queue.remove(index)
     }
 
@@ -330,10 +367,17 @@ impl BrowserController {
     pub fn has_pending_commands(&self) -> bool {
         self.command_queue
             .iter()
-            .any(|queued| self.is_engine_ready(queued.tab_id()))
+            .any(|queued| self.is_dispatchable(queued))
     }
 
     pub fn handle_event(&mut self, tab_id: TabId, event: BrowserEvent) -> bool {
+        // dialogs
+        self.observe_event_for_page_requests(tab_id, &event);
+        // controls
+        let event = match self.route_control_request(tab_id, event) {
+            Some(event) => event,
+            None => return true,
+        };
         let Some(tab) = self.tab_mut(tab_id) else {
             return false;
         };
@@ -345,14 +389,143 @@ impl BrowserController {
         true
     }
 
+    // controls
+    /// Answers the active tab's pending control. Returns false, and sends nothing, unless `id`
+    /// is that control: every request is answered at most once.
+    pub fn answer_control(&mut self, id: ControlId, answer: ControlAnswer) -> bool {
+        let tab_id = self.active_tab_id;
+        let Some(tab) = self.tab_mut(tab_id) else {
+            return false;
+        };
+        if tab
+            .state()
+            .pending_control()
+            .map(|(pending_id, _)| pending_id)
+            != Some(id)
+        {
+            return false;
+        }
+        tab.state_mut().take_pending_control();
+        self.queue_command_for(tab_id, BrowserCommand::AnswerControl { id, answer })
+    }
+
+    /// Drops the tab's pending control, if any, with the engine's default answer. Called when
+    /// the tab stops being shown: pickers are interactive, and a stale one makes no sense.
+    pub fn dismiss_control(&mut self, tab_id: TabId) {
+        let Some(id) = self
+            .tab_mut(tab_id)
+            .and_then(|tab| tab.state_mut().take_pending_control())
+        else {
+            return;
+        };
+        self.queue_command_for(
+            tab_id,
+            BrowserCommand::AnswerControl {
+                id,
+                answer: ControlAnswer::Dismiss,
+            },
+        );
+    }
+
+    /// A control for a background tab, or one asked for while the tab's file chooser is up, is
+    /// dropped at once; otherwise one that replaces a pending control drops the older one. Returns the event to apply, or None if it was consumed.
+    fn route_control_request(
+        &mut self,
+        tab_id: TabId,
+        event: BrowserEvent,
+    ) -> Option<BrowserEvent> {
+        let BrowserEvent::ControlShown { id, .. } = &event else {
+            return Some(event);
+        };
+        let id = *id;
+        if !self.tabs.iter().any(|tab| tab.id() == tab_id) {
+            return Some(event);
+        }
+        // The file chooser is a sheet on the whole window: while it is up, newer requests of
+        // the tab are dropped rather than the chooser.
+        let file_chooser_up = self.tabs.iter().any(|tab| {
+            tab.id() == tab_id
+                && matches!(
+                    tab.state().pending_control(),
+                    Some((_, ControlRequest::File { .. }))
+                )
+        });
+        if tab_id != self.active_tab_id || file_chooser_up {
+            self.queue_command_for(
+                tab_id,
+                BrowserCommand::AnswerControl {
+                    id,
+                    answer: ControlAnswer::Dismiss,
+                },
+            );
+            return None;
+        }
+        self.dismiss_control(tab_id);
+        Some(event)
+    }
+
     fn open_blank_tab(&mut self, activation: TabActivation) -> TabId {
         let tab_id = TabId::new(self.next_tab_id);
         self.next_tab_id += 1;
-        self.tabs.push(Tab::new(tab_id, BrowserState::default()));
+        let mut state = BrowserState::default();
+        state.set_zoom_percent(self.default_zoom_percent);
+        self.tabs.push(Tab::new(tab_id, state));
         if activation == TabActivation::Foreground {
             self.active_tab_id = tab_id;
         }
         tab_id
+    }
+
+    // settings
+
+    /// The URL address-bar input stands for, with searches built by this controller's search
+    /// builder (keywords included), without navigating anywhere. Until a builder is set, text
+    /// that is not an address is refused rather than searched for anywhere.
+    pub fn resolve_address(&self, input: &str) -> Result<url::Url, AddressResolutionError> {
+        match &self.search {
+            Some(search) => resolve_address(input, search),
+            None => resolve_address(input, &SearchUrlBuilder::new(|_| Err(NO_SEARCH.to_owned()))),
+        }
+    }
+
+    /// Searches typed in the address bar are built by `search` from now on.
+    pub fn set_search_url_builder(&mut self, search: SearchUrlBuilder) {
+        self.search = Some(search);
+    }
+
+    /// The zoom of a tab that has no zoom of its own.
+    pub const fn default_zoom_percent(&self) -> u16 {
+        self.default_zoom_percent
+    }
+
+    /// New tabs open at `percent`, and every tab still at the old default moves to it.
+    pub fn set_default_zoom_percent(&mut self, percent: u16) {
+        let old = std::mem::replace(&mut self.default_zoom_percent, percent);
+        if old == percent {
+            return;
+        }
+        let at_old_default = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.state().zoom_percent() == old)
+            .map(Tab::id)
+            .collect::<Vec<_>>();
+        for tab_id in at_old_default {
+            if let Some(tab) = self.tab_mut(tab_id) {
+                tab.state_mut().set_zoom_percent(percent);
+            }
+            self.queue_command_for(tab_id, BrowserCommand::SetPageZoom { percent });
+        }
+    }
+
+    /// Makes pages see `scheme` whatever the system's is, or follow the system again with
+    /// `None`. Tabs are told only when what they see changes.
+    pub fn set_forced_color_scheme(&mut self, scheme: Option<ColorScheme>) {
+        self.forced_color_scheme = scheme;
+        let effective = scheme.unwrap_or(self.system_color_scheme);
+        if effective != self.color_scheme {
+            self.send_color_scheme(effective);
+        }
     }
 
     fn is_engine_ready(&self, tab_id: TabId) -> bool {
@@ -367,6 +540,145 @@ impl BrowserController {
 
     fn active_tab(&self) -> Option<&Tab> {
         self.tabs.iter().find(|tab| tab.id() == self.active_tab_id)
+    }
+
+    fn is_dispatchable(&self, queued: &TabCommand) -> bool {
+        self.is_engine_ready(queued.tab_id())
+            || queued.command().is_dispatched_before_engine_ready()
+    }
+}
+
+// dialogs
+impl BrowserController {
+    /// The request the tab shows now: the oldest one it has not answered.
+    pub fn pending_page_request(&self, tab_id: TabId) -> Option<PendingPageRequest> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id() == tab_id)?
+            .page_requests()
+            .front()
+    }
+
+    /// Answers one of the tab's requests and queues the answer for the engine. `now` is on the
+    /// clock of `PageRequest::received_at`. Returns false if the tab has no such request (it was
+    /// answered or discarded already).
+    pub fn answer_page_request(
+        &mut self,
+        tab_id: TabId,
+        id: PageRequestId,
+        reply: PageRequestReply,
+        now: Duration,
+    ) -> bool {
+        let Some(tab) = self.tab_mut(tab_id) else {
+            return false;
+        };
+        let Some((answered, discarded)) = tab.page_requests_mut().answer(id, &reply, now) else {
+            return false;
+        };
+        let remembered = decision_to_remember(&answered, &reply);
+        self.queue_page_request_answers(tab_id, &discarded, PageRequestAnswer::Discard);
+        self.queue_command_for(
+            tab_id,
+            BrowserCommand::AnswerPageRequest {
+                id,
+                answer: reply.into_answer(),
+            },
+        );
+
+        if let Some((origin, permission, decision)) = remembered {
+            self.permission_decisions
+                .remember(&origin, permission, decision);
+            let decided = self
+                .tabs
+                .iter_mut()
+                .map(|tab| {
+                    let ids = tab.page_requests_mut().take_decided(&origin, permission);
+                    (tab.id(), ids)
+                })
+                .collect::<Vec<_>>();
+            for (tab_id, ids) in decided {
+                self.queue_page_request_answers(tab_id, &ids, decision.answer());
+            }
+        }
+        true
+    }
+
+    /// Replaces where remembered permission decisions are kept (by default, for the session).
+    pub fn set_permission_decisions(&mut self, decisions: Box<dyn PermissionDecisions>) {
+        self.permission_decisions = decisions;
+    }
+
+    fn observe_event_for_page_requests(&mut self, tab_id: TabId, event: &BrowserEvent) {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id() == tab_id) else {
+            return;
+        };
+        let awaiting_replacement = tab.is_awaiting_replacement();
+        let requests = tab.page_requests_mut();
+        match event {
+            // Sent by the web view that is being replaced: it never reaches the new page.
+            BrowserEvent::PageRequested(request) if awaiting_replacement => {
+                self.queue_page_request_answers(tab_id, &[request.id], PageRequestAnswer::Discard);
+            }
+            BrowserEvent::PageRequested(request) => {
+                let id = request.id;
+                if let Some(answer) =
+                    requests.receive(request.clone(), self.permission_decisions.as_ref())
+                {
+                    self.queue_page_request_answers(tab_id, &[id], answer);
+                }
+            }
+            BrowserEvent::PageLoadStarted => {
+                let discarded = requests.start_new_document();
+                self.queue_page_request_answers(tab_id, &discarded, PageRequestAnswer::Discard);
+            }
+            BrowserEvent::LoadStateChanged {
+                state: LoadState::Failed { .. },
+            } => {
+                let discarded = requests.discard_all();
+                self.queue_page_request_answers(tab_id, &discarded, PageRequestAnswer::Discard);
+            }
+            _ => {}
+        }
+    }
+
+    fn observe_command_for_page_requests(&mut self, tab_id: TabId, command: &BrowserCommand) {
+        let Some(tab) = self.tab_mut(tab_id) else {
+            return;
+        };
+        match command {
+            // The user is leaving the page: its questions no longer matter. Answering them first
+            // also unblocks the page's script, which the navigation may need.
+            command if command.targets_the_current_page() => {
+                let reload = matches!(command, BrowserCommand::Reload);
+                let discarded = tab.page_requests_mut().note_user_navigation(reload);
+                self.queue_page_request_answers(tab_id, &discarded, PageRequestAnswer::Discard);
+            }
+            BrowserCommand::PointerButton {
+                action: crate::PointerButtonAction::Down,
+                ..
+            } => tab.page_requests_mut().note_user_activation(),
+            BrowserCommand::KeyboardInput(input) if input.state == crate::KeyState::Down => {
+                tab.page_requests_mut().note_user_activation();
+            }
+            _ => {}
+        }
+    }
+
+    fn queue_page_request_answers(
+        &mut self,
+        tab_id: TabId,
+        ids: &[PageRequestId],
+        answer: PageRequestAnswer,
+    ) {
+        for &id in ids {
+            self.queue_command_for(
+                tab_id,
+                BrowserCommand::AnswerPageRequest {
+                    id,
+                    answer: answer.clone(),
+                },
+            );
+        }
     }
 }
 
