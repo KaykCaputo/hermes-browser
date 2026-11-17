@@ -4,7 +4,7 @@
 // enforces what .opencode/skills/mercury-build-hygiene/SKILL.md describes, whatever an agent does:
 //
 // - every shell command gets smaller-build settings (no debug info, no incremental files);
-// - every build command runs through scripts/dev/build-slot.sh: at most five builds at once, the
+// - every build command runs through scripts/dev/build-slot.sh: at most three builds at once, the
 //   cores shared between them, and none while less than 40 GB is free;
 // - copying a build folder (`cp ... target`) is refused;
 // - a worktree's build output (`target/`, `dist/`) is removed as soon as the agent working in it
@@ -54,7 +54,28 @@ const BUILD_COMMAND = new RegExp(
 const COPIES_BUILD_OUTPUT = new RegExp(
   `${AT_COMMAND.replace(String.raw`[\n;&|('"]`, String.raw`[\n;&|(]`)}(?:cp|rsync|ditto)\\s[^;&|\\n]*\\/target(?:\\/|\\s|$)`,
 )
+// Running a script file counts as a build when the script itself contains a build command.
+const RUNS_SCRIPT =
+  /(?:^|[\n;&|(]|\b(?:then|do|else)\b)\s*(?:(?:time|nice|env|exec|nohup)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*(?:(?:sh|bash|zsh|source|\.)\s+(?:-\w+\s+)*)?([^\s;&|'"()]+\.(?:sh|bash|zsh))(?=$|[\s;&|)])/g
 const PUSHES = /\bgit\b[^;&|\n]*\bpush\b/
+// The pinned checking tools (cargo-deny, shellcheck, actionlint; `make ci-tools`) are shared by every
+// worktree here instead of living in each target/, which is deleted after every round.
+const CI_TOOLS = path.join(HOME, "Library", "Caches", "mercury-browser", "ci-tools")
+const KEPT_IN_CACHE = new Set(["gstreamer", "ci-tools"])
+
+function runsBuildScript(command: string, cwd: string | undefined): boolean {
+  for (const match of command.matchAll(RUNS_SCRIPT)) {
+    const file = path.resolve(cwd ?? REPO, match[1].replace(/^~(?=\/)/, HOME).replace(/^\$HOME(?=\/)/, HOME))
+    if (file === SLOT_SCRIPT) continue
+    try {
+      const text = fs.readFileSync(file, "utf8")
+      if (text.length < 2_000_000 && BUILD_COMMAND.test(text)) return true
+    } catch {
+      // not a readable file
+    }
+  }
+  return false
+}
 
 function log(message: string) {
   try {
@@ -220,7 +241,7 @@ function sweep() {
   if (!mercuryRunning()) {
     try {
       for (const entry of fs.readdirSync(MERCURY_CACHE)) {
-        if (entry === "gstreamer") continue
+        if (KEPT_IN_CACHE.has(entry)) continue
         fs.rmSync(path.join(MERCURY_CACHE, entry), { recursive: true, force: true })
         log(`removed ${path.join(MERCURY_CACHE, entry)}`)
       }
@@ -263,6 +284,10 @@ export default {
       event.env.CARGO_PROFILE_TEST_DEBUG = "0"
       event.env.CARGO_PROFILE_RELEASE_DEBUG = "0"
       event.env.MERCURY_DISK_GUARD = "1"
+      event.env.CI_TOOLS_DIR = CI_TOOLS
+      // One profile per round: `make lint` and `make test` build in release like `make build-release`,
+      // so a cold round compiles Servo once instead of twice (CI's macOS job tests in release too).
+      if (!event.env.CARGO_FLAGS) event.env.CARGO_FLAGS = "--release"
       const command: string = event.command ?? ""
       if (command.includes(SLOT_SCRIPT)) return
       if (COPIES_BUILD_OUTPUT.test(command)) {
@@ -271,7 +296,7 @@ export default {
           "echo 'mercury-disk-guard: copying build output is not allowed; build output is removed after every round (see the mercury-build-hygiene skill)' >&2; exit 1"
         return
       }
-      if (!BUILD_COMMAND.test(command)) return
+      if (!BUILD_COMMAND.test(command) && !runsBuildScript(command, event.cwd)) return
       const worktrees = worktreesOf(command, event.cwd)
       event.env.MERCURY_GUARDED_COMMAND = command
       event.env.MERCURY_GUARDED_SHELL = event.shell || "/bin/zsh"
