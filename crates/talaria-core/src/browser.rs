@@ -1,3 +1,5 @@
+use url::Url;
+
 use crate::{
     ClipboardCommand, ColorScheme, ControlAnswer, ControlId, ControlRect, ControlRequest,
     DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon, PointerCursor,
@@ -6,6 +8,68 @@ use crate::{PageRequest, PageRequestAnswer, PageRequestId};
 
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
 const INITIAL_ADDRESS: &str = "";
+
+/// Longest placeholder title made from a whole URL, ellipsis included.
+const MAX_URL_TITLE_CHARS: usize = 80;
+
+/// Title shown until a document supplies its own: the URL's host (a `blob:` URL's inner host),
+/// else the URL shortened to `MAX_URL_TITLE_CHARS`, else "New Tab". A `data:` URL shows only
+/// its scheme, since the rest is the document itself.
+pub fn placeholder_title(url: &str) -> String {
+    if url.is_empty() {
+        return DEFAULT_PAGE_TITLE.to_owned();
+    }
+    let Ok(parsed) = Url::parse(url) else {
+        return shortened(url);
+    };
+    let host = match parsed.scheme() {
+        "data" => return "data:".to_owned(),
+        "blob" => match parsed.origin() {
+            url::Origin::Tuple(_, host, _) => Some(host.to_string()),
+            url::Origin::Opaque(_) => None,
+        },
+        _ => parsed.host_str().map(str::to_owned),
+    };
+    host.filter(|host| !host.is_empty())
+        .unwrap_or_else(|| shortened(url))
+}
+
+/// The origin a page's request is shown and remembered under: `scheme://host[:port]` for web
+/// pages, `file://` for local files, None for anything else (opaque origins).
+pub fn display_origin(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    if parsed.scheme() == "file" {
+        return Some("file://".to_owned());
+    }
+    match parsed.origin() {
+        url::Origin::Tuple(..) => Some(parsed.origin().ascii_serialization()),
+        url::Origin::Opaque(_) => None,
+    }
+}
+
+fn shortened(text: &str) -> String {
+    if text.chars().count() <= MAX_URL_TITLE_CHARS {
+        return text.to_owned();
+    }
+    let mut short = text
+        .chars()
+        .take(MAX_URL_TITLE_CHARS - 1)
+        .collect::<String>();
+    short.push('…');
+    short
+}
+
+/// Whether two addresses differ at most in their fragment, which keeps the same document.
+fn same_document(current: &str, next: &str) -> bool {
+    match (Url::parse(current), Url::parse(next)) {
+        (Ok(mut current), Ok(mut next)) => {
+            current.set_fragment(None);
+            next.set_fragment(None);
+            current == next
+        }
+        _ => current == next,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadState {
@@ -147,6 +211,9 @@ pub enum BrowserEvent {
     FullscreenChanged {
         fullscreen: bool,
     },
+    // tabs opened and closed by pages
+    /// The page closed its own tab (`window.close()`).
+    CloseRequested,
     // controls
     /// The engine asks for a `<select>` popup, a picker or a context menu. It waits for exactly
     /// one `BrowserCommand::AnswerControl` with this id.
@@ -249,6 +316,10 @@ impl BrowserState {
         self.fullscreen
     }
 
+    pub(crate) fn set_page_title(&mut self, title: String) {
+        self.page_title = title;
+    }
+
     pub(crate) fn set_zoom_percent(&mut self, percent: u16) {
         self.zoom_percent = percent;
     }
@@ -284,14 +355,17 @@ impl BrowserState {
                 // reports changes against its own cached values, so the engine's notifications
                 // must stay the only source of both.
                 if self.url != url {
+                    if !same_document(&self.url, &url) {
+                        self.page_title = placeholder_title(&url);
+                        self.page_icon = None;
+                    }
                     self.url = url;
-                    self.page_icon = None;
                 }
             }
             BrowserEvent::PageTitleChanged { title } => {
                 self.page_title = title
                     .filter(|title| !title.trim().is_empty())
-                    .unwrap_or_else(|| DEFAULT_PAGE_TITLE.to_owned());
+                    .unwrap_or_else(|| placeholder_title(&self.url));
             }
             BrowserEvent::PageIconChanged { icon } => {
                 self.page_icon = icon;
@@ -325,6 +399,8 @@ impl BrowserState {
             BrowserEvent::FullscreenChanged { fullscreen } => {
                 self.fullscreen = fullscreen;
             }
+            // Closing is the controller's business; the tab's own state does not change.
+            BrowserEvent::CloseRequested => {}
             BrowserEvent::ControlShown { id, request } => {
                 self.pending_control = Some((id, request));
             }

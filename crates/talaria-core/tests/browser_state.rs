@@ -1,4 +1,7 @@
-use talaria_core::{BrowserEvent, BrowserState, LoadState, PageIcon, PointerCursor};
+use talaria_core::{
+    BrowserEvent, BrowserState, LoadState, PageIcon, PointerCursor, display_origin,
+    placeholder_title,
+};
 
 #[test]
 fn default_state_describes_the_initial_page() {
@@ -288,4 +291,171 @@ fn the_same_address_keeps_cursor_and_status_text() {
 
     assert_eq!(state.cursor(), PointerCursor::Text);
     assert_eq!(state.status_text(), Some("x"));
+}
+
+fn titled_page(url: &str, title: &str) -> BrowserState {
+    let mut state = BrowserState::default();
+    state.apply(BrowserEvent::AddressChanged {
+        url: url.to_owned(),
+    });
+    state.apply(BrowserEvent::PageTitleChanged {
+        title: Some(title.to_owned()),
+    });
+    state.apply(BrowserEvent::PageIconChanged {
+        icon: Some(test_icon()),
+    });
+    state
+}
+
+fn test_icon() -> PageIcon {
+    PageIcon::from_rgba(1, 1, vec![10, 20, 30, 255]).expect("the test icon should be valid")
+}
+
+#[test]
+fn navigating_to_another_document_replaces_the_title_with_its_host() {
+    let mut state = titled_page("https://a.test/x", "A");
+
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://b.test/y".to_owned(),
+    });
+
+    assert_eq!(state.page_title(), "b.test");
+    assert_eq!(state.page_icon(), None);
+}
+
+#[test]
+fn fragment_navigation_keeps_title_and_icon() {
+    let mut state = titled_page("https://a.test/x", "A");
+
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/x#part".to_owned(),
+    });
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/x#other".to_owned(),
+    });
+
+    assert_eq!(state.url(), "https://a.test/x#other");
+    assert_eq!(state.page_title(), "A");
+    assert_eq!(state.page_icon(), Some(&test_icon()));
+}
+
+#[test]
+fn same_url_keeps_title() {
+    let mut state = titled_page("https://a.test/x", "A");
+
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/x".to_owned(),
+    });
+
+    assert_eq!(state.page_title(), "A");
+    assert_eq!(state.page_icon(), Some(&test_icon()));
+}
+
+#[test]
+fn a_query_change_is_another_document() {
+    let mut state = titled_page("https://a.test/x?page=1", "A");
+
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://a.test/x?page=2".to_owned(),
+    });
+
+    assert_eq!(state.page_title(), "a.test");
+    assert_eq!(state.page_icon(), None);
+}
+
+#[test]
+fn later_title_replaces_the_placeholder() {
+    let mut state = titled_page("https://a.test/x", "A");
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://b.test/y".to_owned(),
+    });
+
+    state.apply(BrowserEvent::PageTitleChanged {
+        title: Some("B".to_owned()),
+    });
+
+    assert_eq!(state.page_title(), "B");
+}
+
+#[test]
+fn empty_title_falls_back_to_the_host() {
+    let mut state = titled_page("https://a.test/x", "A");
+
+    state.apply(BrowserEvent::PageTitleChanged {
+        title: Some("  ".to_owned()),
+    });
+    assert_eq!(state.page_title(), "a.test");
+
+    state.apply(BrowserEvent::PageTitleChanged {
+        title: Some("A".to_owned()),
+    });
+    state.apply(BrowserEvent::PageTitleChanged { title: None });
+    assert_eq!(state.page_title(), "a.test");
+}
+
+#[test]
+fn blank_tab_is_titled_new_tab() {
+    let mut state = titled_page("https://a.test/x", "A");
+
+    // The engine reports the blank page as an empty address.
+    state.apply(BrowserEvent::AddressChanged { url: String::new() });
+    assert_eq!(state.page_title(), "New Tab");
+
+    state.apply(BrowserEvent::PageTitleChanged { title: None });
+    assert_eq!(state.page_title(), "New Tab");
+}
+
+#[test]
+fn placeholder_title_is_the_host_else_the_url_else_new_tab() {
+    assert_eq!(placeholder_title("https://example.com/a"), "example.com");
+    assert_eq!(placeholder_title("about:blank"), "about:blank");
+    assert_eq!(placeholder_title(""), "New Tab");
+    assert_eq!(
+        placeholder_title("file:///tmp/page.html"),
+        "file:///tmp/page.html"
+    );
+    assert_eq!(placeholder_title("not a url"), "not a url");
+}
+
+#[test]
+fn a_data_url_is_titled_by_its_scheme_only() {
+    assert_eq!(placeholder_title("data:text/html,<p>secret</p>"), "data:");
+}
+
+#[test]
+fn a_blob_url_is_titled_by_its_inner_host() {
+    assert_eq!(
+        placeholder_title("blob:https://a.test/4f8c1a52-7c1e-4c1a-9c55-0d3d3b9e2a10"),
+        "a.test"
+    );
+}
+
+#[test]
+fn a_long_url_fallback_is_shortened() {
+    let long = format!("file:///{}", "x".repeat(300));
+
+    let title = placeholder_title(&long);
+
+    assert_eq!(title.chars().count(), 80);
+    assert!(title.ends_with('…'));
+    assert!(long.starts_with(title.trim_end_matches('…')));
+}
+
+#[test]
+fn display_origins_name_the_scheme_host_and_port_or_local_files() {
+    assert_eq!(
+        display_origin("https://a.test/path?q#f"),
+        Some("https://a.test".to_owned())
+    );
+    assert_eq!(
+        display_origin("http://a.test:8080/"),
+        Some("http://a.test:8080".to_owned())
+    );
+    assert_eq!(
+        display_origin("file:///Users/me/page.html"),
+        Some("file://".to_owned())
+    );
+    assert_eq!(display_origin("data:text/html,x"), None);
+    assert_eq!(display_origin("about:blank"), None);
+    assert_eq!(display_origin(""), None);
 }

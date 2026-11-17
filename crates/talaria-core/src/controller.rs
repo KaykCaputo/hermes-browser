@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use crate::address::{AddressResolutionError, SearchUrlBuilder, resolve_address};
 use crate::browser::LoadState;
-use crate::browser::{BrowserCommand, BrowserEvent, BrowserState};
+use crate::browser::{BrowserCommand, BrowserEvent, BrowserState, placeholder_title};
 use crate::page_request::decision_to_remember;
 use crate::{
     ColorScheme, ControlAnswer, ControlId, ControlRequest, DEFAULT_ZOOM_PERCENT, Tab,
@@ -15,6 +15,16 @@ use crate::{
 };
 
 const NO_SEARCH: &str = "no search engine is set";
+
+/// What `close_tab` did.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseTabOutcome {
+    Closed,
+    NotFound,
+    /// The tab is the only one and stays open; closing it means quitting.
+    LastTab,
+}
 
 #[derive(Debug)]
 pub struct BrowserController {
@@ -236,14 +246,14 @@ impl BrowserController {
         self.queue_command(BrowserCommand::SetPageZoom { percent });
     }
 
-    pub fn close_tab(&mut self, tab_id: TabId) -> bool {
-        if self.tabs.len() == 1 {
-            return false;
-        }
-
+    /// Closes a tab. The only tab is never closed; `LastTab` tells the caller to quit instead.
+    pub fn close_tab(&mut self, tab_id: TabId) -> CloseTabOutcome {
         let Some(index) = self.tabs.iter().position(|tab| tab.id() == tab_id) else {
-            return false;
+            return CloseTabOutcome::NotFound;
         };
+        if self.tabs.len() == 1 {
+            return CloseTabOutcome::LastTab;
+        }
 
         let was_active = self.active_tab_id == tab_id;
         self.tabs.remove(index);
@@ -255,12 +265,12 @@ impl BrowserController {
             self.active_tab_id = self.tabs[replacement_index].id();
         }
 
-        true
+        CloseTabOutcome::Closed
     }
 
-    pub fn close_tab_at(&mut self, index: usize) -> bool {
+    pub fn close_tab_at(&mut self, index: usize) -> CloseTabOutcome {
         let Some(tab_id) = self.tabs.get(index).map(Tab::id) else {
-            return false;
+            return CloseTabOutcome::NotFound;
         };
 
         self.close_tab(tab_id)
@@ -370,6 +380,8 @@ impl BrowserController {
             .any(|queued| self.is_dispatchable(queued))
     }
 
+    /// Applies an engine event to its tab. `CloseRequested` changes nothing here: whether and
+    /// how the tab closes is the embedder's decision.
     pub fn handle_event(&mut self, tab_id: TabId, event: BrowserEvent) -> bool {
         // dialogs
         self.observe_event_for_page_requests(tab_id, &event);
@@ -387,6 +399,26 @@ impl BrowserController {
         }
         tab.state_mut().apply(event);
         true
+    }
+
+    /// Reserves a tab for a web view the engine is creating itself. The tab is inserted
+    /// directly after `opener`, is selected if `activation` says so, has no initial URL, and is
+    /// titled after the opener's host until its page reports. Like any other tab it becomes
+    /// engine-ready on its first address or history event.
+    /// Returns None if `opener` does not exist.
+    pub fn adopt_tab(&mut self, opener: TabId, activation: TabActivation) -> Option<TabId> {
+        let opener_index = self.tabs.iter().position(|tab| tab.id() == opener)?;
+        let title = placeholder_title(self.tabs[opener_index].state().url());
+        let tab_id = TabId::new(self.next_tab_id);
+        self.next_tab_id += 1;
+        let mut state = BrowserState::default();
+        state.set_page_title(title);
+        self.tabs
+            .insert(opener_index + 1, Tab::opened_by_page(tab_id, state));
+        if activation == TabActivation::Foreground {
+            self.active_tab_id = tab_id;
+        }
+        Some(tab_id)
     }
 
     // controls

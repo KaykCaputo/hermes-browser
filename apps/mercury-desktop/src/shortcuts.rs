@@ -285,8 +285,9 @@ pub(crate) fn run_shortcut(
         }
         ShortcutAction::CloseTab => {
             let active_tab_id = controller.borrow().active_tab_id();
-            controller.borrow_mut().close_tab(active_tab_id);
-            sync_ui(window, &controller.borrow());
+            let outcome = controller.borrow_mut().close_tab(active_tab_id);
+            // tabs: closing the last tab quits
+            crate::tab_close::finish_closing_tab(window, &controller.borrow(), outcome);
         }
         ShortcutAction::NextTab | ShortcutAction::PreviousTab => {
             controller

@@ -1,12 +1,71 @@
+use std::cell::Cell;
+
 use mercury_ui::{BrowserTab, MainWindow, WebViewCursor, WebViewPointerButton};
 use slint::{ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel};
-use talaria_core::{BrowserController, LoadState, PageIcon, PointerButton, PointerCursor};
+use talaria_core::{BrowserController, LoadState, PageIcon, PointerButton, PointerCursor, TabId};
+
+thread_local! {
+    // tabs: the active tab at the previous sync, so a tab switch replaces the address draft.
+    static SYNCED_TAB: SyncedTab = const { SyncedTab(Cell::new(None)) };
+}
+
+/// The active tab as of the previous sync.
+#[derive(Debug, Default)]
+pub(crate) struct SyncedTab(Cell<Option<TabId>>);
+
+impl SyncedTab {
+    /// Records `active` and reports whether it differs from the previous sync's tab.
+    pub(crate) fn tab_changed(&self, active: TabId) -> bool {
+        self.0.replace(Some(active)) != Some(active)
+    }
+
+    /// `tab_id` was selected without the user switching (a page opened it): the address
+    /// field keeps the user's draft.
+    pub(crate) fn treat_as_synced(&self, tab_id: TabId) {
+        self.0.set(Some(tab_id));
+    }
+}
+
+/// A page-opened tab became active: keep the address draft. See `SyncedTab::treat_as_synced`.
+pub(crate) fn keep_address_draft_for(tab_id: TabId) {
+    SYNCED_TAB.with(|synced| synced.treat_as_synced(tab_id));
+}
+
+/// What the page area shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PageArea {
+    pub(crate) is_new_tab: bool,
+    pub(crate) web_view_visible: bool,
+}
+
+/// A tab a page opened never shows the new-tab page, whose search field would look like the
+/// user's own tab: until its page reports, the area stays blank.
+pub(crate) fn page_area(
+    url_is_empty: bool,
+    failed: bool,
+    opened_by_page: bool,
+    engine_ready: bool,
+) -> PageArea {
+    PageArea {
+        is_new_tab: url_is_empty && !opened_by_page,
+        web_view_visible: (!url_is_empty || (opened_by_page && engine_ready)) && !failed,
+    }
+}
 
 pub(crate) fn sync_ui(window: &MainWindow, controller: &BrowserController) {
     let state = controller.active_state();
     window.set_page_title(state.page_title().into());
-    window.set_address(state.url().into());
-    window.set_is_new_tab(state.url().is_empty());
+    // tabs: keep what the user is typing unless the active tab changed.
+    let tab_changed = SYNCED_TAB.with(|synced| synced.tab_changed(controller.active_tab_id()));
+    window.set_committed_address(state.url().into());
+    if let Some(address) =
+        address_bar_update(state.url(), window.get_address_has_focus(), tab_changed)
+    {
+        window.invoke_reset_address(address.into());
+    }
+    // tabs: a tab opened by a page never shows the new-tab page
+    let area = active_page_area(controller);
+    window.set_is_new_tab(area.is_new_tab);
     window.set_can_go_back(state.can_go_back());
     window.set_can_go_forward(state.can_go_forward());
     window.set_is_loading(matches!(state.load_state(), LoadState::Loading));
@@ -14,8 +73,12 @@ pub(crate) fn sync_ui(window: &MainWindow, controller: &BrowserController) {
     window.set_web_view_cursor(web_view_cursor(state.cursor()));
     window.set_status_text(single_line(state.status_text().unwrap_or_default()).into());
     sync_fullscreen(window, state.is_fullscreen());
-    window.set_web_view_visible(
-        !state.url().is_empty() && !matches!(state.load_state(), LoadState::Failed { .. }),
+    window.set_web_view_visible(area.web_view_visible);
+    // tabs: the "Pop-up blocked" indicator
+    window.set_pop_up_blocked_origin(
+        crate::page_tabs::blocked_pop_up_origin(controller.active_tab_id(), state.url())
+            .unwrap_or_default()
+            .into(),
     );
 
     let active_tab_id = controller.active_tab_id();
@@ -50,7 +113,8 @@ pub(crate) fn sync_ui(window: &MainWindow, controller: &BrowserController) {
     let new_tab_hint = crate::settings::new_tab_hint(&window.get_search_engine_name());
     let content_message = match state.load_state() {
         LoadState::Failed { message } => message.as_str(),
-        _ if state.url().is_empty() => new_tab_hint.as_str(),
+        _ if area.is_new_tab => new_tab_hint.as_str(),
+        _ if state.url().is_empty() => "",
         LoadState::Idle => "Servo runtime initialized. Waiting for WebView.",
         LoadState::Loading => "The page is loading.",
         LoadState::Loaded => "",
@@ -74,6 +138,28 @@ fn sync_fullscreen(window: &MainWindow, page_fullscreen: bool) {
     // fullscreen also ends window fullscreen that the user had turned on before; this matches
     // servoshell and is deliberate.
     window.window().set_fullscreen(page_fullscreen);
+}
+
+fn active_page_area(controller: &BrowserController) -> PageArea {
+    let state = controller.active_state();
+    let active = controller
+        .tabs()
+        .find(|tab| tab.id() == controller.active_tab_id());
+    page_area(
+        state.url().is_empty(),
+        matches!(state.load_state(), LoadState::Failed { .. }),
+        active.is_some_and(|tab| tab.is_opened_by_page()),
+        active.is_some_and(|tab| tab.is_engine_ready()),
+    )
+}
+
+/// What the address field should show. `None` means leave the user's text alone.
+pub(crate) fn address_bar_update(
+    committed: &str,
+    field_has_focus: bool,
+    tab_changed: bool,
+) -> Option<String> {
+    (tab_changed || !field_has_focus).then(|| committed.to_owned())
 }
 
 fn single_line(text: &str) -> String {
@@ -185,6 +271,88 @@ mod tests {
             WebViewCursor::NwseResize
         );
         assert_eq!(web_view_cursor(PointerCursor::None), WebViewCursor::None);
+    }
+
+    #[test]
+    fn address_is_written_when_the_field_is_idle() {
+        assert_eq!(
+            address_bar_update("https://a.test/", false, false),
+            Some("https://a.test/".to_owned())
+        );
+    }
+
+    #[test]
+    fn address_is_left_alone_while_the_user_is_typing() {
+        assert_eq!(address_bar_update("https://a.test/", true, false), None);
+    }
+
+    #[test]
+    fn tab_change_overrides_typing() {
+        assert_eq!(
+            address_bar_update("https://b.test/", true, true),
+            Some("https://b.test/".to_owned())
+        );
+        assert_eq!(address_bar_update("", false, true), Some(String::new()));
+    }
+
+    #[test]
+    fn the_address_field_keeps_focus_and_draft_when_a_pop_up_opens() {
+        let synced = SyncedTab::default();
+        assert!(synced.tab_changed(TabId::new(1)));
+        assert!(!synced.tab_changed(TabId::new(1)));
+
+        // The user is typing in the address field when a page opens a tab in front.
+        synced.treat_as_synced(TabId::new(2));
+        let tab_changed = synced.tab_changed(TabId::new(2));
+
+        assert!(!tab_changed);
+        assert_eq!(
+            address_bar_update("https://pop.test/", true, tab_changed),
+            None
+        );
+        // A switch the user makes afterwards replaces the draft as usual.
+        assert!(synced.tab_changed(TabId::new(1)));
+    }
+
+    #[test]
+    fn a_tab_opened_by_a_page_never_shows_the_new_tab_page() {
+        assert_eq!(
+            page_area(true, false, false, true),
+            PageArea {
+                is_new_tab: true,
+                web_view_visible: false
+            }
+        );
+        // Not ready yet: a blank area.
+        assert_eq!(
+            page_area(true, false, true, false),
+            PageArea {
+                is_new_tab: false,
+                web_view_visible: false
+            }
+        );
+        // Ready at about:blank: the page itself is shown.
+        assert_eq!(
+            page_area(true, false, true, true),
+            PageArea {
+                is_new_tab: false,
+                web_view_visible: true
+            }
+        );
+        assert_eq!(
+            page_area(false, true, true, true),
+            PageArea {
+                is_new_tab: false,
+                web_view_visible: false
+            }
+        );
+        assert_eq!(
+            page_area(false, false, false, true),
+            PageArea {
+                is_new_tab: false,
+                web_view_visible: true
+            }
+        );
     }
 
     #[test]

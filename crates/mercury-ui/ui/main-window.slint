@@ -7,6 +7,7 @@ export { SearchEngineRow, SettingsWindow } from "settings/settings-window.slint"
 import { PageRequestSheet, PageRequestStyle, PageRequestView, PermissionPrompt } from "dialogs/page-requests.slint";
 // controls
 import { ColorPicker, ContextMenuPopup, ContextMenuRow, PopupBackdrop, SelectPopup, SelectPopupRow } from "controls/controls.slint";
+import { PopUpBlockedIndicator } from "tabs/pop-up-blocked.slint";
 // menus
 import { AddressBarEdit, BrowserMenu, BrowserMenuCommand, BrowserMenuEntry } from "menus/browser-menu.slint";
 export { AboutLink, AboutWindow } from "about/about-window.slint";
@@ -386,6 +387,20 @@ export component MainWindow inherits Window {
         );
     }
 
+    // --- tabs ---
+    out property <bool> address-has-focus: address-input.has-focus;
+    // The active tab's committed address; Escape in the address field restores it.
+    in property <string> committed-address: "";
+
+    public function reset-address(text: string) {
+        root.address = text;
+    }
+
+    // The origin whose pop-up was blocked in the active tab; empty hides the indicator.
+    in property <string> pop-up-blocked-origin: "";
+    callback allow-pop-ups();
+    callback dismiss-pop-up-blocked();
+    // --- end tabs ---
     // --- dialogs ---
     // The active tab's oldest unanswered page request (style none when there is none).
     in property <PageRequestView> page-request;
@@ -467,7 +482,7 @@ export component MainWindow inherits Window {
                         for tab[index] in root.tabs: BrowserTabButton {
                             width: 184px;
                             tab: tab;
-                            closable: root.tabs.length > 1;
+                            closable: true;
 
                             selected => {
                                 root.select-tab(index);
@@ -552,8 +567,42 @@ export component MainWindow inherits Window {
                         vertical-alignment: center;
                         single-line: true;
                         accepted => {
+                            // tabs: the page takes focus, so the field shows the committed URL
+                            web-view-focus.focus();
+                            if self.has-focus {
+                                self.clear-focus();
+                            }
                             root.navigate(self.text);
                         }
+                        // tabs: Escape drops the draft and returns focus to the page
+                        key-pressed(event) => {
+                            if event.text != Key.Escape {
+                                return reject;
+                            }
+                            // An input method's composition handles its own Escape.
+                            if self.preedit-text != "" {
+                                return reject;
+                            }
+                            // history lane: close the suggestion list here first, and accept.
+                            root.reset-address(root.committed-address);
+                            if root.web-view-visible {
+                                web-view-focus.focus();
+                            } else {
+                                self.clear-focus();
+                            }
+                            accept
+                        }
+                    }
+                }
+
+                // tabs: a page's pop-up was blocked
+                if root.pop-up-blocked-origin != "": PopUpBlockedIndicator {
+                    origin: root.pop-up-blocked-origin;
+                    allow => {
+                        root.allow-pop-ups();
+                    }
+                    dismiss => {
+                        root.dismiss-pop-up-blocked();
                     }
                 }
 

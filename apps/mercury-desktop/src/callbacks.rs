@@ -8,6 +8,7 @@ use talaria_core::{
     BrowserCommand, BrowserController, BrowserEvent, LoadState, PointerButtonAction,
 };
 
+use crate::tab_close::finish_closing_tab;
 use crate::ui_sync::{pointer_button_from_ui, sync_ui};
 
 pub(crate) fn connect_ui_callbacks(
@@ -111,10 +112,10 @@ pub(crate) fn connect_ui_callbacks(
         let Ok(index) = usize::try_from(index) else {
             return;
         };
-        if close_tab_controller.borrow_mut().close_tab_at(index)
-            && let Some(window) = close_tab_window.upgrade()
-        {
-            sync_ui(&window, &close_tab_controller.borrow());
+        let outcome = close_tab_controller.borrow_mut().close_tab_at(index);
+        if let Some(window) = close_tab_window.upgrade() {
+            // tabs: closing the last tab quits
+            finish_closing_tab(&window, &close_tab_controller.borrow(), outcome);
             window.window().request_redraw();
         }
     });
@@ -135,15 +136,15 @@ pub(crate) fn connect_ui_callbacks(
     let pointer_button_window = window.as_weak();
     window.on_web_view_pointer_button(move |button, pressed, x, y| {
         let _slint = crate::callback_scope::InSlintCallback::enter();
+        let tab_id = pointer_button_controller.borrow().active_tab_id();
+        if crate::activation::is_activating_pointer_event(pressed) {
+            crate::activation::note_user_activation(tab_id, std::time::Instant::now()); // activation (tabs lane)
+        }
         let action = if pressed {
             PointerButtonAction::Down
         } else {
             PointerButtonAction::Up
         };
-        let tab_id = pointer_button_controller.borrow().active_tab_id();
-        if is_activation_press(action) {
-            crate::activation::note_user_activation(tab_id, std::time::Instant::now()); // activation (tabs lane)
-        }
         pointer_button_controller
             .borrow_mut()
             .queue_command(BrowserCommand::PointerButton {
@@ -204,19 +205,12 @@ pub(crate) fn connect_ui_callbacks(
     });
 }
 
-/// Only a press counts as a gesture (HTML's activation-triggering events are `mousedown` and
-/// `pointerdown`), so one click is one activation.
-fn is_activation_press(action: PointerButtonAction) -> bool {
-    action == PointerButtonAction::Down
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
 
     use talaria_core::TabId;
 
-    use super::*;
     use crate::activation::{consume_user_activation, note_user_activation};
 
     /// The page's `mousedown` handler uses the press's activation; the release must not give
@@ -226,8 +220,8 @@ mod tests {
         let tab = TabId::new(77);
         let now = Instant::now();
         let mut consumed = Vec::new();
-        for action in [PointerButtonAction::Down, PointerButtonAction::Up] {
-            if is_activation_press(action) {
+        for pressed in [true, false] {
+            if crate::activation::is_activating_pointer_event(pressed) {
                 note_user_activation(tab, now);
             }
             consumed.push(consume_user_activation(tab, now));
