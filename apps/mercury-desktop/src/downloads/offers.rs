@@ -54,6 +54,18 @@ pub(crate) enum Decision {
     Refuse(Refusal),
 }
 
+/// Whether a decision is carried out without a word to the user (and without taking the tab
+/// back): only a refusal of a download the page is known to have started. A download the user
+/// started, or one whose navigation was not seen (unknown), always gets a bar or a list note.
+pub(crate) fn is_silent(decision: &Decision, user_started: bool, navigation_known: bool) -> bool {
+    navigation_known
+        && !user_started
+        && matches!(
+            decision,
+            Decision::Refuse(Refusal::Background | Refusal::Blocked | Refusal::RateLimited)
+        )
+}
+
 /// One offer, as the decision sees it.
 #[derive(Debug, Clone)]
 pub(crate) struct OfferFacts<'a> {
@@ -552,6 +564,21 @@ mod tests {
         assert!(same_address("http://a.test/x", "https://a.test/x"));
         assert!(!same_address("http://a.test/x", "https://a.test/y"));
         assert!(!same_address("file:///x", "https:///x"));
+    }
+
+    #[test]
+    fn only_a_page_started_download_is_refused_without_a_word() {
+        let quiet = [Refusal::Background, Refusal::Blocked, Refusal::RateLimited];
+        for refusal in quiet {
+            let decision = Decision::Refuse(refusal);
+            assert!(is_silent(&decision, false, true), "{decision:?}");
+            // The user's own download, or one whose navigation was not seen: said out loud.
+            assert!(!is_silent(&decision, true, true), "{decision:?}");
+            assert!(!is_silent(&decision, false, false), "{decision:?}");
+        }
+        assert!(!is_silent(&Decision::Refuse(Refusal::Posted), false, true));
+        assert!(!is_silent(&Decision::Ask, false, true));
+        assert!(!is_silent(&Decision::Download, false, true));
     }
 
     #[test]

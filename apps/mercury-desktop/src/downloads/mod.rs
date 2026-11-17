@@ -46,9 +46,9 @@ use self::model::{DownloadList, FileFacts, NewItem, RecordOp, file_still_matches
 use self::offers::{BarWatch, Decision, Navigations, OfferFacts, OfferPolicy, Refusal};
 pub(crate) use self::request::SaveError;
 use self::request::{RequestContext, build_request, referrer_for, savable_url};
-use crate::callback_scope::InSlintCallback;
 use self::stop::Inbox;
 use self::view::item_view;
+use crate::callback_scope::InSlintCallback;
 
 /// How many downloads the popover shows.
 const RECENT_ROWS: usize = 6;
@@ -609,11 +609,7 @@ impl Downloads {
         // back to the page before, if it still shows the offered page. Only a download the page
         // is known to have started can be refused without a word.
         let audible = user_started || !known;
-        let silent = !audible
-            && matches!(
-                decision,
-                Decision::Refuse(Refusal::Background | Refusal::Blocked | Refusal::RateLimited)
-            );
+        let silent = offers::is_silent(&decision, user_started, known);
         let went_back = !silent && {
             let mut controller = controller.borrow_mut();
             let on_offer = controller.tabs().any(|candidate| {
@@ -739,7 +735,10 @@ impl Downloads {
         }
         let outcome = borrowed.close_tab(tab);
         drop(borrowed);
-        log::info!("tab {}: closed, opened only for a file ({outcome:?})", tab.value());
+        log::info!(
+            "tab {}: closed, opened only for a file ({outcome:?})",
+            tab.value()
+        );
         if let Some(window) = self.window.upgrade() {
             crate::ui_sync::sync_ui(&window, &controller.borrow());
         }

@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use crate::address::{AddressResolutionError, SearchUrlBuilder, resolve_address};
 use crate::browser::LoadState;
-use crate::visits::{NavigationOrigin, VisitTracker, VisitUpdate};
 use crate::browser::{BrowserCommand, BrowserEvent, BrowserState, placeholder_title};
 use crate::page_request::decision_to_remember;
+use crate::visits::{NavigationOrigin, VisitTracker, VisitUpdate};
 use crate::{
     ColorScheme, ControlAnswer, ControlId, ControlRequest, DEFAULT_ZOOM_PERCENT, Tab,
     TabActivation, TabCommand, TabId,

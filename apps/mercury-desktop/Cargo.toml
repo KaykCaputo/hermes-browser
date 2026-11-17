@@ -33,12 +33,6 @@ talaria-servo = { path = "../../crates/talaria-servo" }
 thiserror.workspace = true
 url.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true
-# downloads-ui lane: a headless window for the quit question's keyboard test. Dev-only, so the
-# application's Slint features are unchanged.
-slint = { workspace = true, features = ["renderer-software"] }
-
 [target.'cfg(target_os = "linux")'.dependencies]
 ash.workspace = true
 
@@ -110,6 +104,9 @@ signal-hook-registry.workspace = true
 i-slint-backend-testing.workspace = true
 mercury-ui = { path = "../../crates/mercury-ui", features = ["test-support"] }
 tempfile.workspace = true
+# downloads-ui lane: a headless window for the quit question's keyboard test. Dev-only, so the
+# application's Slint features are unchanged.
+slint = { workspace = true, features = ["renderer-software"] }
 
 [features]
 # `--exit-by logout`: the browser sends itself the quit Apple event of a log-out. For tests

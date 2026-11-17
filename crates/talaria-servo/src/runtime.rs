@@ -45,7 +45,6 @@ type WakeCallback = dyn Fn() + Send + Sync + 'static;
 
 pub const NEW_TAB_URL: &str = "about:blank";
 
-
 #[derive(Clone)]
 pub struct EventLoopWaker {
     callback: Arc<WakeCallback>,
