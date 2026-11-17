@@ -109,15 +109,20 @@ pub(crate) fn sync_ui(window: &MainWindow, controller: &BrowserController) {
     window.set_active_tab_index(i32::try_from(active_tab_index).unwrap_or(i32::MAX));
     window.invoke_reveal_active_tab();
 
+    // settings-ui: the new-tab hint names the chosen search engine.
+    let new_tab_hint = crate::settings::new_tab_hint(&window.get_search_engine_name());
     let content_message = match state.load_state() {
         LoadState::Failed { message } => message.as_str(),
-        _ if area.is_new_tab => "Search privately with DuckDuckGo.",
+        _ if area.is_new_tab => new_tab_hint.as_str(),
         _ if state.url().is_empty() => "",
         LoadState::Idle => "Servo runtime initialized. Waiting for WebView.",
         LoadState::Loading => "The page is loading.",
         LoadState::Loaded => "",
     };
     window.set_content_message(content_message.into());
+    crate::page_requests::sync_page_request(window, controller); // dialogs
+    // controls
+    crate::controls::sync(window, controller);
 }
 
 /// Only page-requested fullscreen is mirrored, so a window the user made fullscreen is left

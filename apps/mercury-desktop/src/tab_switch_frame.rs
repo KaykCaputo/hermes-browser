@@ -54,6 +54,7 @@ impl TabSwitchFrame {
         let state = Rc::clone(&self.state);
         let window = window.as_weak();
         Timer::single_shot(PREVIOUS_FRAME_GRACE, move || {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
             if state.expire(generation)
                 && let Some(window) = window.upgrade()
             {

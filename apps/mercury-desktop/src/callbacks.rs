@@ -16,9 +16,11 @@ pub(crate) fn connect_ui_callbacks(
     controller: Rc<RefCell<BrowserController>>,
     web_view_focused: Rc<Cell<bool>>,
 ) {
+    crate::page_requests::connect_page_request_callbacks(window, Rc::clone(&controller)); // dialogs
     let navigate_controller = Rc::clone(&controller);
     let navigate_window = window.as_weak();
     window.on_navigate(move |address| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let result = navigate_controller
             .borrow_mut()
             .queue_navigation(address.as_str());
@@ -44,6 +46,7 @@ pub(crate) fn connect_ui_callbacks(
     let back_controller = Rc::clone(&controller);
     let back_window = window.as_weak();
     window.on_go_back(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         back_controller
             .borrow_mut()
             .queue_command(BrowserCommand::GoBack);
@@ -55,6 +58,7 @@ pub(crate) fn connect_ui_callbacks(
     let forward_controller = Rc::clone(&controller);
     let forward_window = window.as_weak();
     window.on_go_forward(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         forward_controller
             .borrow_mut()
             .queue_command(BrowserCommand::GoForward);
@@ -66,6 +70,7 @@ pub(crate) fn connect_ui_callbacks(
     let reload_controller = Rc::clone(&controller);
     let reload_window = window.as_weak();
     window.on_reload(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         reload_controller
             .borrow_mut()
             .queue_command(BrowserCommand::Reload);
@@ -77,6 +82,7 @@ pub(crate) fn connect_ui_callbacks(
     let new_tab_controller = Rc::clone(&controller);
     let new_tab_window = window.as_weak();
     window.on_new_tab(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         new_tab_controller.borrow_mut().open_tab();
         if let Some(window) = new_tab_window.upgrade() {
             sync_ui(&window, &new_tab_controller.borrow());
@@ -87,6 +93,7 @@ pub(crate) fn connect_ui_callbacks(
     let select_tab_controller = Rc::clone(&controller);
     let select_tab_window = window.as_weak();
     window.on_select_tab(move |index| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let Ok(index) = usize::try_from(index) else {
             return;
         };
@@ -101,6 +108,7 @@ pub(crate) fn connect_ui_callbacks(
     let close_tab_controller = Rc::clone(&controller);
     let close_tab_window = window.as_weak();
     window.on_close_tab(move |index| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let Ok(index) = usize::try_from(index) else {
             return;
         };
@@ -115,6 +123,7 @@ pub(crate) fn connect_ui_callbacks(
     let pointer_moved_controller = Rc::clone(&controller);
     let pointer_moved_window = window.as_weak();
     window.on_web_view_pointer_moved(move |x, y| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         pointer_moved_controller
             .borrow_mut()
             .queue_command(BrowserCommand::PointerMoved { x, y });
@@ -126,6 +135,7 @@ pub(crate) fn connect_ui_callbacks(
     let pointer_button_controller = Rc::clone(&controller);
     let pointer_button_window = window.as_weak();
     window.on_web_view_pointer_button(move |button, pressed, x, y| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let tab_id = pointer_button_controller.borrow().active_tab_id();
         if crate::activation::is_activating_pointer_event(pressed) {
             crate::activation::note_user_activation(tab_id, std::time::Instant::now()); // activation (tabs lane)
@@ -139,7 +149,8 @@ pub(crate) fn connect_ui_callbacks(
             .borrow_mut()
             .queue_command(BrowserCommand::PointerButton {
                 action,
-                button: pointer_button_from_ui(button),
+                // controls: a macOS Control-click becomes a secondary click.
+                button: crate::controls::pointer_button(pointer_button_from_ui(button), action),
                 x,
                 y,
             });
@@ -151,6 +162,7 @@ pub(crate) fn connect_ui_callbacks(
     let scroll_controller = Rc::clone(&controller);
     let scroll_window = window.as_weak();
     window.on_web_view_scrolled(move |delta_x, delta_y, x, y| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         scroll_controller
             .borrow_mut()
             .queue_command(BrowserCommand::Scrolled {
@@ -167,6 +179,7 @@ pub(crate) fn connect_ui_callbacks(
     let pointer_left_controller = Rc::clone(&controller);
     let pointer_left_window = window.as_weak();
     window.on_web_view_pointer_left(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         pointer_left_controller
             .borrow_mut()
             .queue_command(BrowserCommand::PointerLeft);
@@ -178,6 +191,7 @@ pub(crate) fn connect_ui_callbacks(
     let focus_controller = controller;
     let focus_window = window.as_weak();
     window.on_web_view_focus_changed(move |focused| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         web_view_focused.set(focused);
         focus_controller
             .borrow_mut()
@@ -189,4 +203,30 @@ pub(crate) fn connect_ui_callbacks(
             window.window().request_redraw();
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use talaria_core::TabId;
+
+    use crate::activation::{consume_user_activation, note_user_activation};
+
+    /// The page's `mousedown` handler uses the press's activation; the release must not give
+    /// its `click` handler another one.
+    #[test]
+    fn one_click_is_one_activation() {
+        let tab = TabId::new(77);
+        let now = Instant::now();
+        let mut consumed = Vec::new();
+        for pressed in [true, false] {
+            if crate::activation::is_activating_pointer_event(pressed) {
+                note_user_activation(tab, now);
+            }
+            consumed.push(consume_user_activation(tab, now));
+        }
+
+        assert_eq!(consumed, vec![true, false]);
+    }
 }

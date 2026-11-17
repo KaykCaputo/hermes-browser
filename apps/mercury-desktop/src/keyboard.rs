@@ -30,6 +30,7 @@ pub(crate) fn connect_native_keyboard_input(
     window
         .window()
         .on_winit_window_event(move |_slint_window, event| {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
             let Some(window) = weak_window.upgrade() else {
                 return EventResult::Propagate;
             };
@@ -37,12 +38,19 @@ pub(crate) fn connect_native_keyboard_input(
             match event {
                 WindowEvent::ModifiersChanged(changed) => {
                     modifiers = changed.state();
+                    // controls: Control-click opens the context menu on macOS.
+                    crate::controls::set_control_key(modifiers.control_key());
                 }
                 WindowEvent::KeyboardInput {
                     event,
                     is_synthetic,
                     ..
                 } => {
+                    // controls: an open popup takes the keys; the page keeps its focus.
+                    if crate::controls::handle_key(&window, event, modifiers) {
+                        window.window().request_redraw();
+                        return EventResult::PreventDefault;
+                    }
                     if handle_browser_shortcut(
                         &window,
                         &controller,
@@ -75,6 +83,10 @@ pub(crate) fn connect_native_keyboard_input(
                             .queue_command(BrowserCommand::KeyboardInput(keyboard_input));
                         window.window().request_redraw();
                     }
+                }
+                // dialogs: a page under a sheet gets no IME input; its composition ends.
+                WindowEvent::Ime(_) if crate::page_requests::sheet_shown(&controller.borrow()) => {
+                    dismiss_composition(&controller, &mut composition_tab_id);
                 }
                 WindowEvent::Ime(ime) if web_view_focused.get() || composition_tab_id.is_some() => {
                     queue_ime_input(&controller, &mut composition_tab_id, ime);
@@ -116,8 +128,13 @@ pub(crate) fn connect_native_keyboard_input(
                     controller
                         .borrow_mut()
                         .set_color_scheme(color_scheme_from_winit(*theme));
+                    // settings-ui: the settings window follows the system under "Follow the system".
+                    crate::settings::system_theme_changed();
                     window.window().request_redraw();
                 }
+                // settings-ui: the settings window closes with the browser window, so the
+                // event loop can end.
+                WindowEvent::CloseRequested => crate::settings::main_window_closing(),
                 WindowEvent::Focused(false) => {
                     // Key-ups that happen while another window has focus never arrive.
                     shortcut_keys.clear();

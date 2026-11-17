@@ -11,39 +11,78 @@ use servo::{
     MouseMoveEvent, NamedKey, Theme, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use talaria_core::{
-    ColorScheme, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
-    PointerButtonAction, TabId, WebView as TalariaWebView,
+    ColorScheme, CompositionState, ControlAnswer, ControlId, ImeInput, KeyLocation, KeyState,
+    KeyboardInput, PointerButton, PointerButtonAction, TabId, WebView as TalariaWebView,
 };
+use talaria_core::{PageRequestAnswer, PageRequestId};
 use url::Url;
 
+use crate::document_starts::DocumentStarts;
+use crate::embedder_controls::EmbedderControls;
 use crate::frame_ready::FrameReadySignal;
 use crate::page_feedback::{DOCUMENT_TITLE_SCRIPT, PageFeedback};
+use crate::page_requests::{ClosesOnDrop, EngineRequest, Navigation, ServoPageRequest};
+use crate::session_data::{AfterEngineCleanup, HandleThenCleanup};
 use crate::{ServoWebViewError, ViewportSize};
 
 pub struct ServoWebView {
-    inner: servo::WebView,
+    /// Servo's `WebView` holds handles to Servo (its own and its user-content manager's); the
+    /// share of the after-engine clean-up beside it is released only after them.
+    inner: HandleThenCleanup<servo::WebView, AfterEngineCleanup>,
     frame_ready: FrameReadySignal,
     tab_id: TabId,
     /// Device pixels per logical pixel; pointer positions arrive in logical pixels.
     scale_factor: Cell<f32>,
+    // controls
+    controls: EmbedderControls,
+    // dialogs: closes the delegate's store when the web view goes, which gives every
+    // unanswered request the engine's default.
+    page_requests: ClosesOnDrop<ServoPageRequest>,
+    document_start: Rc<DocumentStarts>,
+    // tabs
     page_feedback: Rc<PageFeedback>,
+}
+
+/// What a tab's web view shares with its delegate.
+pub(crate) struct TabParts {
+    pub(crate) frame_ready: FrameReadySignal,
+    pub(crate) controls: EmbedderControls,
+    pub(crate) page_requests: ClosesOnDrop<ServoPageRequest>,
+    pub(crate) document_start: Rc<DocumentStarts>,
+    pub(crate) page_feedback: Rc<PageFeedback>,
 }
 
 impl ServoWebView {
     pub(crate) fn new(
-        inner: servo::WebView,
-        frame_ready: FrameReadySignal,
+        inner: HandleThenCleanup<servo::WebView, AfterEngineCleanup>,
         tab_id: TabId,
         scale_factor: f32,
-        page_feedback: Rc<PageFeedback>,
+        parts: TabParts,
     ) -> Self {
+        let TabParts {
+            frame_ready,
+            controls,
+            page_requests,
+            document_start,
+            page_feedback,
+        } = parts;
         Self {
             inner,
             frame_ready,
             tab_id,
             scale_factor: Cell::new(scale_factor),
+            controls,
+            page_requests,
+            document_start,
             page_feedback,
         }
+    }
+
+    // dialogs: the navigation's document may start without a `Started` Servo reports.
+    // tabs: the tab's user activation is forgotten as the navigation is sent.
+    fn arm_document_start(&self, navigation: Navigation) {
+        self.document_start
+            .navigation_sent(navigation, self.inner.load_status());
     }
 
     /// Starts a title read that was owed while another was in flight. Cheap when none is owed;
@@ -102,6 +141,8 @@ impl ServoWebView {
 impl Drop for ServoWebView {
     fn drop(&mut self) {
         log::info!("closing Servo WebView for tab {}", self.tab_id.value());
+        // controls: requests of a closed or replaced web view get the engine's default answer.
+        let _hidden = self.controls.drop_all();
     }
 }
 
@@ -110,21 +151,25 @@ impl TalariaWebView for ServoWebView {
 
     fn navigate(&mut self, url: &str) -> Result<(), Self::Error> {
         let url = Url::parse(url)?;
+        self.arm_document_start(Navigation::Load); // dialogs
         self.inner.load(url);
         Ok(())
     }
 
     fn go_back(&mut self) -> Result<(), Self::Error> {
+        self.arm_document_start(Navigation::Traverse); // dialogs
         let _traversal_id = self.inner.go_back(1);
         Ok(())
     }
 
     fn go_forward(&mut self) -> Result<(), Self::Error> {
+        self.arm_document_start(Navigation::Traverse); // dialogs
         let _traversal_id = self.inner.go_forward(1);
         Ok(())
     }
 
     fn reload(&mut self) -> Result<(), Self::Error> {
+        self.arm_document_start(Navigation::Reload); // dialogs
         self.inner.reload();
         Ok(())
     }
@@ -233,6 +278,37 @@ impl TalariaWebView for ServoWebView {
         let _event_id = self.inner.notify_input_event(InputEvent::MouseLeftViewport(
             MouseLeftViewportEvent::default(),
         ));
+        Ok(())
+    }
+
+    // controls
+    fn answer_control(&mut self, id: ControlId, answer: ControlAnswer) -> Result<(), Self::Error> {
+        self.controls.answer(id, answer);
+        Ok(())
+    }
+
+    // dialogs
+    fn answer_page_request(
+        &mut self,
+        id: PageRequestId,
+        answer: PageRequestAnswer,
+    ) -> Result<(), Self::Error> {
+        // Taken out first, so answering never runs while the store is borrowed.
+        let request = self.page_requests.take(id);
+        // Staying on a page that asked before it was left: no new document follows.
+        if matches!(request, Some(ServoPageRequest::Unload(_)))
+            && answer == PageRequestAnswer::Decline
+        {
+            self.document_start.navigation_cancelled();
+        }
+        match request {
+            Some(request) => request.respond(answer),
+            None => log::debug!(
+                "tab {}: page request {} is gone",
+                self.tab_id.value(),
+                id.value()
+            ),
+        }
         Ok(())
     }
 }

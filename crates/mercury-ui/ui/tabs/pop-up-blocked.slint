@@ -1,5 +1,8 @@
+import { ChromePalette } from "../theme/chrome-palette.slint";
+
 // Shown in the toolbar when the active tab's page tried to open a pop-up without a click or
 // key press. It is part of the browser's chrome, never of the page area, and names the origin.
+// Colours come from the chrome palette's information-bar roles.
 export component PopUpBlockedIndicator inherits Rectangle {
     in property <string> origin;
     callback allow;
@@ -9,8 +12,8 @@ export component PopUpBlockedIndicator inherits Rectangle {
     max-width: 420px;
     border-radius: 8px;
     border-width: 1px;
-    border-color: #3a4552;
-    background: #19222c;
+    border-color: ChromePalette.info-border;
+    background: ChromePalette.info-background;
 
     HorizontalLayout {
         padding-left: 10px;
@@ -19,7 +22,7 @@ export component PopUpBlockedIndicator inherits Rectangle {
 
         Text {
             text: "Pop-up blocked";
-            color: #edf4fa;
+            color: ChromePalette.info-text;
             font-size: 12px;
             font-weight: 600;
             vertical-alignment: center;
@@ -32,15 +35,15 @@ export component PopUpBlockedIndicator inherits Rectangle {
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
             background: allow-touch.pressed
-                ? #2b3744
-                : allow-touch.has-hover ? #222c37 : #1f2832;
+                ? ChromePalette.button-pressed
+                : allow-touch.has-hover ? ChromePalette.button-hover : transparent;
 
             Text {
                 x: 8px;
                 width: parent.width - 16px;
                 height: parent.height;
                 text: "Allow pop-ups from " + root.origin;
-                color: #71c5ff;
+                color: ChromePalette.accent;
                 font-size: 12px;
                 vertical-alignment: center;
                 overflow: elide;
@@ -58,11 +61,11 @@ export component PopUpBlockedIndicator inherits Rectangle {
             height: 24px;
             y: (parent.height - self.height) / 2;
             border-radius: 6px;
-            background: dismiss-touch.has-hover ? #222c37 : transparent;
+            background: dismiss-touch.has-hover ? ChromePalette.button-hover : transparent;
 
             Text {
                 text: "×";
-                color: #9aa6b5;
+                color: ChromePalette.button-label;
                 font-size: 15px;
                 horizontal-alignment: center;
                 vertical-alignment: center;

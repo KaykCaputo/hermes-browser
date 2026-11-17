@@ -148,18 +148,35 @@ pub(crate) fn blocks_pop_ups(automated: bool, allow_pop_ups_variable: Option<&st
     !(automated && allow_pop_ups_variable == Some("1"))
 }
 
-/// Applies `blocks_pop_ups` to this run's policy; warns when blocking is off.
-pub(crate) fn configure_pop_up_blocking(automated: bool) {
+/// Where the "Block pop-ups" switch is read: the settings lane's `block_popups()`, on every
+/// decision, so a change in the settings window applies at once.
+type BlockPopUpsSetting = Rc<dyn Fn() -> bool>;
+
+/// Connects the switch to the user's setting (`block_popups`). `MERCURY_ALLOW_POP_UPS=1` in an
+/// automated run overrides it to off; a warning is logged whenever it does, or is ignored.
+pub(crate) fn configure_pop_up_blocking(
+    automated: bool,
+    block_popups_setting: impl Fn() -> bool + 'static,
+) {
     let variable = std::env::var(ALLOW_POP_UPS_VARIABLE).ok();
-    let block = blocks_pop_ups(automated, variable.as_deref());
-    if !block {
+    let setting: BlockPopUpsSetting = if blocks_pop_ups(automated, variable.as_deref()) {
+        if variable.is_some() {
+            log::warn!(
+                "{ALLOW_POP_UPS_VARIABLE} is ignored outside --screenshot and --background runs"
+            );
+        }
+        Rc::new(block_popups_setting)
+    } else {
         log::warn!("{ALLOW_POP_UPS_VARIABLE}=1: pop-ups are not blocked in this automated run");
-    } else if variable.is_some() {
-        log::warn!(
-            "{ALLOW_POP_UPS_VARIABLE} is ignored outside --screenshot and --background runs"
-        );
-    }
-    POP_UPS.with(|policy| policy.borrow_mut().block_pop_ups = block);
+        Rc::new(|| false)
+    };
+    BLOCK_POP_UPS_SETTING.with(|current| current.replace(Some(setting)));
+}
+
+/// The switch now: the setting, or on until one is connected.
+fn block_pop_ups_now() -> bool {
+    let setting = BLOCK_POP_UPS_SETTING.with(|current| current.borrow().clone());
+    setting.is_none_or(|setting| setting())
 }
 
 /// Where a tab the policy allowed opens. While the user types in the address field it never
@@ -173,6 +190,7 @@ pub(crate) fn placement(decision: PopUpDecision, address_has_focus: bool) -> Opt
 }
 
 thread_local! {
+    static BLOCK_POP_UPS_SETTING: RefCell<Option<BlockPopUpsSetting>> = const { RefCell::new(None) };
     /// Blocking is on until `configure_pop_up_blocking` says otherwise.
     static POP_UPS: RefCell<PopUpPolicy> = RefCell::new(PopUpPolicy::new(
         true,
@@ -187,10 +205,12 @@ pub(crate) fn pages_may_open_tabs(
     opener_origin: Option<&str>,
     now: Instant,
 ) -> PopUpDecision {
+    let block_pop_ups = block_pop_ups_now();
     POP_UPS.with(|policy| {
         policy
             .try_borrow_mut()
             .map_or(PopUpDecision::Blocked, |mut policy| {
+                policy.block_pop_ups = block_pop_ups;
                 policy.decide(opener, opener_origin, || {
                     consume_user_activation(opener, now)
                 })
@@ -217,6 +237,7 @@ pub(crate) fn connect_pop_up_indicator(
     let allow_controller = Rc::clone(controller);
     let allow_window = window.as_weak();
     window.on_allow_pop_ups(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let tab_id = allow_controller.borrow().active_tab_id();
         POP_UPS.with(|policy| policy.borrow_mut().allow_blocked(tab_id));
         if let Some(window) = allow_window.upgrade() {
@@ -226,6 +247,7 @@ pub(crate) fn connect_pop_up_indicator(
     let dismiss_controller = Rc::clone(controller);
     let dismiss_window = window.as_weak();
     window.on_dismiss_pop_up_blocked(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let tab_id = dismiss_controller.borrow().active_tab_id();
         POP_UPS.with(|policy| policy.borrow_mut().dismiss_blocked(tab_id));
         if let Some(window) = dismiss_window.upgrade() {
@@ -645,6 +667,25 @@ mod tests {
         // Without a new document, the same click lets the page open its tab.
         crate::activation::note_user_activation(opener, Instant::now());
         assert!(allocator(opener).is_some());
+    }
+
+    #[test]
+    fn the_switch_follows_the_users_setting_at_each_decision() {
+        POP_UPS.with(|current| *current.borrow_mut() = policy());
+        let setting = Rc::new(std::cell::Cell::new(true));
+        let read = Rc::clone(&setting);
+        configure_pop_up_blocking(false, move || read.get());
+        let opener = TabId::new(88);
+
+        assert_eq!(
+            pages_may_open_tabs(opener, ORIGIN, Instant::now()),
+            PopUpDecision::Blocked
+        );
+        setting.set(false);
+        assert_eq!(
+            pages_may_open_tabs(opener, ORIGIN, Instant::now()),
+            PopUpDecision::Foreground
+        );
     }
 
     fn ready_controller() -> (BrowserController, TabId) {

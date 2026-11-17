@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Two dialogs test page</title>
+<style>
+  html, body { margin: 0; background: #ffffff; }
+  body { padding: 24px; font: 22px/1.5 sans-serif; color: #000000; }
+  h1 { margin: 0 0 12px; font-size: 32px; }
+  iframe { width: 300px; height: 80px; border: 1px solid #888; }
+</style>
+</head>
+<body>
+  <h1>Two dialogs test page</h1>
+  <p>This page and the page it embeds (on another host, so another script thread) each call
+  alert() once loaded, so two dialogs wait at the same time without anyone answering.</p>
+  <iframe id="frame"></iframe>
+<script>
+  // Open through scripts/serve-tests.py as http://127.0.0.1:PORT/pages/dialog-twice.html; the
+  // frame is loaded from localhost:PORT.
+  document.getElementById("frame").src =
+    location.protocol + "//localhost:" + location.port + "/pages/dialog-iframe-alert.html";
+  window.addEventListener("load", () => setTimeout(() => {
+    alert("First dialog, from the page itself.");
+  }, 0));
+</script>
+</body>
+</html>

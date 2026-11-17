@@ -1,3 +1,4 @@
+use crate::page_request::PageRequests;
 use crate::{BrowserCommand, BrowserEvent, BrowserState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,6 +35,8 @@ pub struct Tab {
     initial_url: InitialUrl,
     engine_ready: bool,
     opened_by_page: bool,
+    // dialogs
+    page_requests: PageRequests,
 }
 
 impl Tab {
@@ -44,6 +47,7 @@ impl Tab {
             initial_url: InitialUrl::Pending(None),
             engine_ready: false,
             opened_by_page: false,
+            page_requests: PageRequests::default(),
         }
     }
 
@@ -97,6 +101,8 @@ impl Tab {
     /// replaces the tab's web view with a new one.
     pub(crate) fn replace_initial_url(&mut self, url: String) {
         self.initial_url = InitialUrl::Pending(Some(url));
+        // dialogs: the web view that asked is about to be replaced.
+        self.page_requests.forget_all();
     }
 
     /// Hands the initial URL to the engine, which creates a fresh web view for it; that web
@@ -107,7 +113,23 @@ impl Tab {
             InitialUrl::Taken => None,
         }?;
         self.engine_ready = false;
+        // dialogs: requests belonged to the web view being replaced.
+        self.page_requests.forget_all();
         Some(initial_url)
+    }
+
+    // dialogs
+    /// The tab's web view is about to be replaced; requests still arriving come from the old one.
+    pub(crate) const fn is_awaiting_replacement(&self) -> bool {
+        matches!(self.initial_url, InitialUrl::Pending(Some(_)))
+    }
+
+    pub(crate) const fn page_requests(&self) -> &PageRequests {
+        &self.page_requests
+    }
+
+    pub(crate) fn page_requests_mut(&mut self) -> &mut PageRequests {
+        &mut self.page_requests
     }
 }
 

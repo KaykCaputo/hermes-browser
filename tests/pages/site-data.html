@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>site data: checking</title>
+<style>
+  body { font: 20px system-ui, sans-serif; margin: 40px; color: #111; background: #fff; }
+  .found { color: #a00; }
+  .empty { color: #070; }
+</style>
+</head>
+<body>
+<h1>Site data</h1>
+<p>Reports what an earlier visit left in IndexedDB, local storage and cookies, then stores
+fresh values for the next visit. Serve it over HTTP (for example
+<code>python3 scripts/serve-tests.py</code>): file URLs have no storage of their own.</p>
+<ul>
+  <li>IndexedDB: <span id="idb">checking</span></li>
+  <li>Local storage: <span id="local">checking</span></li>
+  <li>Cookie: <span id="cookie">checking</span></li>
+</ul>
+<script>
+function show(id, value) {
+  const element = document.getElementById(id);
+  element.textContent = value === null ? "empty" : "found " + value;
+  element.className = value === null ? "empty" : "found";
+}
+
+const stamp = "run-" + Date.now();
+const cookie = document.cookie.split("; ").find((entry) => entry.startsWith("sitedata="));
+show("cookie", cookie ? cookie.slice("sitedata=".length) : null);
+document.cookie = "sitedata=" + stamp + "; max-age=86400; path=/";
+
+show("local", localStorage.getItem("sitedata"));
+localStorage.setItem("sitedata", stamp);
+
+const request = indexedDB.open("mercury-site-data", 1);
+request.onupgradeneeded = () => request.result.createObjectStore("values");
+request.onerror = () => {
+  document.getElementById("idb").textContent = "error: " + request.error;
+  document.title = "site data: indexeddb error";
+};
+request.onsuccess = () => {
+  const database = request.result;
+  const read = database.transaction("values").objectStore("values").get("stamp");
+  read.onsuccess = () => {
+    const earlier = read.result === undefined ? null : read.result;
+    show("idb", earlier);
+    const write = database.transaction("values", "readwrite");
+    write.objectStore("values").put(stamp, "stamp");
+    write.oncomplete = () => {
+      document.title = "site data: indexeddb " + (earlier === null ? "empty" : "found");
+      console.log("site-data: indexeddb " + (earlier === null ? "empty" : "found " + earlier));
+    };
+  };
+};
+</script>
+</body>
+</html>

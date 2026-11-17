@@ -1,0 +1,93 @@
+// Shared look of the popups a page opens (select lists, the colour picker, the context menu).
+import { ChromePalette } from "../theme/chrome-palette.slint";
+
+export struct PopupColors {
+    background: color,
+    border: color,
+    text: color,
+    muted: color,
+    disabled: color,
+    highlight: color,
+    highlight-text: color,
+    separator: color,
+    button: color,
+    button-text: color,
+    primary-button: color,
+    primary-button-text: color,
+    shadow: color,
+    // The border of a hex field holding an incomplete value.
+    invalid: color,
+    // The border of the hex field otherwise.
+    focus: color,
+    // The colour-area marker over light and over dark colours.
+    marker-on-light: color,
+    marker-on-dark: color,
+}
+
+// The page-popup colours, by `ChromePalette` role, so the popups follow the user's appearance
+// setting like the rest of the browser. Background and border come from the "page popups"
+// roles, neutral where the chrome is blue-grey, so a page's popup never passes for the
+// browser's own.
+export global PopupStyle {
+    out property <PopupColors> colors: {
+        background: ChromePalette.page-popup-background,
+        border: ChromePalette.page-popup-border,
+        text: ChromePalette.text,
+        muted: ChromePalette.page-popup-caption,
+        disabled: ChromePalette.disabled-text,
+        highlight: ChromePalette.item-selected,
+        highlight-text: ChromePalette.item-selected-text,
+        separator: ChromePalette.page-popup-border,
+        button: ChromePalette.item-hover,
+        button-text: ChromePalette.text,
+        primary-button: ChromePalette.primary-button-background,
+        primary-button-text: ChromePalette.primary-button-text,
+        shadow: ChromePalette.shadow,
+        invalid: ChromePalette.danger,
+        focus: ChromePalette.focus-ring,
+        // Content, not theme: the marker must contrast with the colour under it.
+        marker-on-light: #000000,
+        marker-on-dark: #ffffff,
+    };
+}
+
+// Catches presses outside an open popup; the popup is drawn above it.
+export component PopupBackdrop inherits TouchArea {
+    callback dismissed();
+
+    pointer-event(event) => {
+        if event.kind == PointerEventKind.down {
+            root.dismissed();
+        }
+    }
+
+    scroll-event(event) => {
+        accept
+    }
+}
+
+export component PopupButton inherits Rectangle {
+    in property <string> label;
+    in property <PopupColors> colors;
+    in property <bool> primary: false;
+    callback clicked;
+
+    height: 28px;
+    border-radius: 6px;
+    background: root.primary ? root.colors.primary-button : root.colors.button;
+    opacity: touch.pressed ? 0.8 : 1;
+
+    Text {
+        text: root.label;
+        color: root.primary ? root.colors.primary-button-text : root.colors.button-text;
+        font-size: 13px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    touch := TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}

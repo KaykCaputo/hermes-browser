@@ -19,6 +19,7 @@ glow.workspace = true
 image.workspace = true
 libc.workspace = true
 log.workspace = true
+mercury-settings = { path = "../../crates/mercury-settings" }
 mercury-ui = { path = "../../crates/mercury-ui" }
 servo.workspace = true
 slint.workspace = true
@@ -33,12 +34,25 @@ ash.workspace = true
 # The same objc2 generation as wgpu-hal 29's Metal backend (not winit's objc2 0.5 / objc2-metal 0.2).
 # `objc2-app-kit` and `objc2-foundation`: `NSScreen.visibleFrame`, the screen area outside the menu
 # bar and Dock (`window.screen.avail*`), and `deviceDescription` to find the monitor's screen.
+# `NSOpenPanel` and the features after it, with `block2` and `NSURL`: the file chooser of
+# `<input type=file>` (`src/controls/file_panel.rs`), shown as a sheet with a completion block.
 [target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6.2"
 objc2 = "0.6.3"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
+    "NSApplication",
     "NSGraphics",
+    "NSResponder",
     "NSScreen",
+    "NSOpenPanel",
+    "NSSavePanel",
+    "NSPanel",
+    "NSWindow",
+    "NSResponder",
+    "NSView",
+    "NSApplication",
+    "block2",
 ] }
 objc2-foundation = { workspace = true, features = [
     "std",
@@ -46,6 +60,7 @@ objc2-foundation = { workspace = true, features = [
     "NSDictionary",
     "NSEnumerator",
     "NSString",
+    "NSURL",
     "NSValue",
 ] }
 objc2-metal = { version = "0.3.2", default-features = false, features = [
@@ -61,6 +76,16 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
 # The crash handler is compiled on macOS and Linux only, as in servoshell.
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 signal-hook-registry.workspace = true
+
+[dev-dependencies]
+i-slint-backend-testing.workspace = true
+mercury-ui = { path = "../../crates/mercury-ui", features = ["test-support"] }
+tempfile.workspace = true
+
+[features]
+# `--exit-by logout`: the browser sends itself the quit Apple event of a log-out. For tests
+# only; never in a released build. `make lint` and `make check` turn it on (`--all-features`).
+quit-diagnostics = []
 
 [build-dependencies]
 gl_generator = "0.14"

@@ -6,6 +6,8 @@ use talaria_core::{TabEvent, TabId};
 
 use crate::ServoWebView;
 use crate::adblocker::ContentBlocker;
+use crate::document_starts::SharedDocumentStartedListener;
+use crate::embedder_controls::ControlIds;
 use crate::screen::ScreenMetrics;
 use crate::session_data::AfterEngineCleanup;
 
@@ -28,7 +30,9 @@ pub type AdoptedWebView = (TabId, ServoWebView, Receiver<TabEvent>);
 pub(crate) struct PageTabs {
     pub(crate) adopted: RefCell<Vec<AdoptedWebView>>,
     pub(crate) allocator: RefCell<Option<NewTabAllocator>>,
-    pub(crate) document_started_listener: RefCell<Option<DocumentStartedListener>>,
+    /// Shared with every tab's `DocumentStarts`.
+    pub(crate) document_started_listener: SharedDocumentStartedListener,
+    pub(crate) control_ids: ControlIds,
     pub(crate) content_blocker: Rc<ContentBlocker>,
     pub(crate) screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
     pub(crate) user_content: Rc<servo::UserContentManager>,
@@ -39,14 +43,5 @@ impl PageTabs {
     /// The allocator, cloned so that it is not borrowed while it runs.
     pub(crate) fn allocator(&self) -> Option<NewTabAllocator> {
         self.allocator.borrow().clone()
-    }
-
-    /// Tells the listener, if any, that `tab_id` started a new document. The listener is
-    /// cloned first, so it may install another.
-    pub(crate) fn document_started(&self, tab_id: TabId) {
-        let listener = self.document_started_listener.borrow().clone();
-        if let Some(listener) = listener {
-            listener(tab_id);
-        }
     }
 }
