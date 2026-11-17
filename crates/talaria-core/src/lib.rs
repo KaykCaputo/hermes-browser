@@ -24,7 +24,8 @@ pub use controls::{
 };
 pub use cursor::{ColorScheme, PointerCursor};
 pub use input::{
-    CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, KeyboardModifiers,
+    ClipboardCommand, CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput,
+    KeyboardModifiers,
 };
 pub use page_icon::PageIcon;
 pub use page_request::{

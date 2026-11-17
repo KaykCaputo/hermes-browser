@@ -16,9 +16,10 @@ pub struct ExitClearing {
     /// Every cookie, and all site storage: local and session storage, IndexedDB and Cache
     /// Storage.
     pub cookies_and_site_data: bool,
-    /// The HTTP cache. Servo 0.8.0 keeps it in memory only (Mercury sets no
-    /// `network_http_disk_cache`), so it never outlives the run; it is cleared anyway, so this
-    /// stays true if a disk cache is ever turned on.
+    /// The HTTP cache: in memory, and on disk in the profile's HTTP cache directory
+    /// (`network_http_disk_cache`). Servo empties both at quit; the disk cache's files are
+    /// then removed once the engine has gone, and again at the next start in case that quit
+    /// never got there (`remove_http_disk_cache`).
     pub cache: bool,
 }
 

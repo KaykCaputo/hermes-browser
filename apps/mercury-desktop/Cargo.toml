@@ -45,13 +45,17 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSGraphics",
     "NSResponder",
     "NSScreen",
+    # controls lane: the file panel; menus lane: the native menu bar (features muda already
+    # enables in this build).
+    "NSCell",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
     "NSOpenPanel",
-    "NSSavePanel",
     "NSPanel",
-    "NSWindow",
-    "NSResponder",
+    "NSSavePanel",
     "NSView",
-    "NSApplication",
+    "NSWindow",
     "block2",
 ] }
 objc2-foundation = { workspace = true, features = [
@@ -72,6 +76,20 @@ objc2-metal = { version = "0.3.2", default-features = false, features = [
     "MTLTexture",
     "objc2-io-surface",
 ] }
+# The system proxy settings (`SCDynamicStoreCopyProxies`), read once at start.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+objc2-system-configuration = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "SCDynamicStore",
+    "SCDynamicStoreCopySpecific",
+    "SCSchemaDefinitions",
+] }
 
 # The crash handler is compiled on macOS and Linux only, as in servoshell.
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
@@ -86,6 +104,10 @@ tempfile.workspace = true
 # `--exit-by logout`: the browser sends itself the quit Apple event of a log-out. For tests
 # only; never in a released build. `make lint` and `make check` turn it on (`--all-features`).
 quit-diagnostics = []
+# menus lane: `MERCURY_MENU_DIAGNOSTICS`, a read-back of the macOS menu bar for checks without
+# input (docs/developer-guide/testing.md). Off in `make build-release` and the app bundle;
+# `make check` and `make lint` compile it (`--all-features`).
+menu-diagnostics = []
 
 [build-dependencies]
 gl_generator = "0.14"

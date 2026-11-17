@@ -908,6 +908,13 @@ mod tests {
         ) -> Result<(), Self::Error> {
             Ok(())
         }
+        // menus
+        fn clipboard(
+            &mut self,
+            _command: talaria_core::ClipboardCommand,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
     }
 
     fn mark_engine_ready(controller: &RefCell<BrowserController>, tab_id: TabId) {

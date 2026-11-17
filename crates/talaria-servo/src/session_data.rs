@@ -17,6 +17,7 @@ use std::rc::Rc;
 use serde_json::Value;
 
 use crate::exit_clearing::{EngineSwitches, ExitClearing, remove_site_data_files};
+use crate::http_disk_cache::remove_http_disk_cache;
 
 /// Servo's HTTP-authentication cache: user names and passwords, in plain text.
 const SAVED_CREDENTIALS_FILE: &str = "auth_cache.json";
@@ -183,11 +184,21 @@ fn write_privately_and_atomically(path: &Path, value: &Value) -> std::io::Result
 /// shutdown watchdog, before it could end its session; its session cookies and credentials
 /// must not come back.
 ///
-/// If the user asked for cookies and site data to be cleared at quit, they are removed here too,
-/// in case that quit never ran its clean-up.
-pub(crate) fn clean_up_before_engine_start(config_dir: &Path, clearing: ExitClearing) {
+/// If the user asked for cookies and site data, or cached files, to be cleared at quit, they are
+/// removed here too, in case that quit never ran its clean-up. The HTTP disk cache lives in
+/// `http_cache_dir`, outside `config_dir`.
+pub(crate) fn clean_up_before_engine_start(
+    config_dir: &Path,
+    http_cache_dir: Option<&Path>,
+    clearing: ExitClearing,
+) {
     if clearing.cookies_and_site_data {
         remove_site_data_files(config_dir);
+    }
+    if clearing.cache
+        && let Some(http_cache_dir) = http_cache_dir
+    {
+        remove_http_disk_cache(http_cache_dir);
     }
     strip_session_cookies_from_saved_jar(config_dir);
     remove_saved_credentials(config_dir);
@@ -199,18 +210,26 @@ pub(crate) fn clean_up_before_engine_start(config_dir: &Path, clearing: ExitClea
 /// web view through `HandleThenCleanup`), so the last one goes after Servo has shut down — the
 /// point after which nothing can write the files again.
 ///
-/// If the user asked for cookies and site data to be cleared at quit (read from `switches` at
-/// this moment, so the last choice counts), their files are removed here, when no engine can
-/// write them again.
+/// If the user asked for cookies and site data, or cached files, to be cleared at quit (read from
+/// `switches` at this moment, so the last choice counts), their files are removed here, when no
+/// engine can write them again. Servo's own `clear_cache` at quit empties the disk cache's
+/// table, but SQLite keeps the deleted bytes in the file until they are reused, so the files go.
 pub(crate) struct AfterEngineCleanup {
     config_dir: PathBuf,
+    /// The HTTP disk cache's directory, if the engine keeps one.
+    http_cache_dir: Option<PathBuf>,
     switches: EngineSwitches,
 }
 
 impl AfterEngineCleanup {
-    pub(crate) fn new(config_dir: PathBuf, switches: EngineSwitches) -> Self {
+    pub(crate) fn new(
+        config_dir: PathBuf,
+        http_cache_dir: Option<PathBuf>,
+        switches: EngineSwitches,
+    ) -> Self {
         Self {
             config_dir,
+            http_cache_dir,
             switches,
         }
     }
@@ -218,8 +237,14 @@ impl AfterEngineCleanup {
 
 impl Drop for AfterEngineCleanup {
     fn drop(&mut self) {
-        if self.switches.clear_on_exit().cookies_and_site_data {
+        let clearing = self.switches.clear_on_exit();
+        if clearing.cookies_and_site_data {
             remove_site_data_files(&self.config_dir);
+        }
+        if clearing.cache
+            && let Some(http_cache_dir) = &self.http_cache_dir
+        {
+            remove_http_disk_cache(http_cache_dir);
         }
         strip_session_cookies_from_saved_jar(&self.config_dir);
         remove_saved_credentials(&self.config_dir);
@@ -591,6 +616,7 @@ mod tests {
 
         drop(AfterEngineCleanup::new(
             directory.clone(),
+            None,
             EngineSwitches::default(),
         ));
         let saved = std::fs::read_to_string(directory.join(COOKIE_JAR_FILE)).expect("the jar");
@@ -606,7 +632,7 @@ mod tests {
     fn before_the_engine_starts_session_cookies_and_credentials_are_removed() {
         let directory = jar_directory("before-start", FIXTURE_JAR);
 
-        clean_up_before_engine_start(&directory, ExitClearing::default());
+        clean_up_before_engine_start(&directory, None, ExitClearing::default());
         let saved = std::fs::read_to_string(directory.join(COOKIE_JAR_FILE)).expect("the jar");
         let leftovers = remaining_files(&directory);
         let _ = std::fs::remove_dir_all(&directory);
@@ -642,7 +668,7 @@ mod tests {
     #[test]
     fn the_remover_deletes_the_credentials_when_dropped() {
         let directory = config_dir_with_files("drop");
-        let remover = AfterEngineCleanup::new(directory.clone(), EngineSwitches::default());
+        let remover = AfterEngineCleanup::new(directory.clone(), None, EngineSwitches::default());
 
         let present_before = directory.join(SAVED_CREDENTIALS_FILE).exists();
         drop(remover);
@@ -662,7 +688,7 @@ mod tests {
     fn site_data_is_cleared_at_start_when_asked_in_case_the_last_quit_did_not() {
         let directory = crate::exit_clearing::tests::servo_directory_with_site_data();
 
-        clean_up_before_engine_start(directory.path(), CLEAR_SITE_DATA);
+        clean_up_before_engine_start(directory.path(), None, CLEAR_SITE_DATA);
 
         assert_eq!(
             crate::exit_clearing::tests::remaining(directory.path()),
@@ -674,7 +700,7 @@ mod tests {
     fn site_data_is_kept_at_start_when_not_asked() {
         let directory = crate::exit_clearing::tests::servo_directory_with_site_data();
 
-        clean_up_before_engine_start(directory.path(), ExitClearing::default());
+        clean_up_before_engine_start(directory.path(), None, ExitClearing::default());
 
         let left = crate::exit_clearing::tests::remaining(directory.path());
         assert!(left.contains(&"clientstorage/default_v1/reg.sqlite".to_owned()));
@@ -685,7 +711,7 @@ mod tests {
     fn after_the_engine_the_last_choice_decides_what_is_removed() {
         let directory = crate::exit_clearing::tests::servo_directory_with_site_data();
         let switches = EngineSwitches::default();
-        let cleanup = AfterEngineCleanup::new(directory.path().to_owned(), switches.clone());
+        let cleanup = AfterEngineCleanup::new(directory.path().to_owned(), None, switches.clone());
 
         switches.set_clear_on_exit(CLEAR_SITE_DATA);
         drop(cleanup);
@@ -694,5 +720,76 @@ mod tests {
             crate::exit_clearing::tests::remaining(directory.path()),
             vec!["hsts_list.json"]
         );
+    }
+
+    const CLEAR_CACHE: ExitClearing = ExitClearing {
+        cookies_and_site_data: false,
+        cache: true,
+    };
+
+    /// A Servo directory and an HTTP cache directory holding a cache database and its log.
+    fn directories_with_a_disk_cache() -> (tempfile::TempDir, tempfile::TempDir) {
+        let config_dir = tempfile::tempdir().expect("a directory");
+        let cache_dir = tempfile::tempdir().expect("a directory");
+        for name in ["cache.sqlite3", "cache.sqlite3-wal", "cache.sqlite3-shm"] {
+            std::fs::write(cache_dir.path().join(name), "cached").expect("a cache file");
+        }
+        (config_dir, cache_dir)
+    }
+
+    fn cache_files(cache_dir: &Path) -> usize {
+        std::fs::read_dir(cache_dir)
+            .expect("the cache directory")
+            .count()
+    }
+
+    #[test]
+    fn the_disk_cache_is_removed_at_start_when_asked_in_case_the_last_quit_did_not() {
+        let (config_dir, cache_dir) = directories_with_a_disk_cache();
+
+        clean_up_before_engine_start(config_dir.path(), Some(cache_dir.path()), CLEAR_CACHE);
+
+        assert_eq!(cache_files(cache_dir.path()), 0);
+    }
+
+    #[test]
+    fn the_disk_cache_is_kept_at_start_when_not_asked() {
+        let (config_dir, cache_dir) = directories_with_a_disk_cache();
+
+        clean_up_before_engine_start(config_dir.path(), Some(cache_dir.path()), CLEAR_SITE_DATA);
+
+        assert_eq!(cache_files(cache_dir.path()), 3);
+    }
+
+    #[test]
+    fn after_the_engine_the_disk_cache_is_removed_when_the_last_choice_asks() {
+        let (config_dir, cache_dir) = directories_with_a_disk_cache();
+        let switches = EngineSwitches::default();
+        let cleanup = AfterEngineCleanup::new(
+            config_dir.path().to_owned(),
+            Some(cache_dir.path().to_owned()),
+            switches.clone(),
+        );
+
+        switches.set_clear_on_exit(CLEAR_CACHE);
+        drop(cleanup);
+
+        assert_eq!(cache_files(cache_dir.path()), 0);
+    }
+
+    #[test]
+    fn after_the_engine_the_disk_cache_is_kept_when_not_asked() {
+        let (config_dir, cache_dir) = directories_with_a_disk_cache();
+        let switches = EngineSwitches::default();
+        let cleanup = AfterEngineCleanup::new(
+            config_dir.path().to_owned(),
+            Some(cache_dir.path().to_owned()),
+            switches.clone(),
+        );
+
+        switches.set_clear_on_exit(CLEAR_SITE_DATA);
+        drop(cleanup);
+
+        assert_eq!(cache_files(cache_dir.path()), 3);
     }
 }

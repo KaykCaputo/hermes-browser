@@ -243,8 +243,8 @@ impl EndOfRun for Steps {
     }
 
     fn release_window(&mut self) {
-        // Slot (menus): drops the About window and the menus' handle on the controller.
-        // crate::menus::release();
+        // menus: drops the About window and the menus' handle on the controller.
+        crate::menus::release();
         drop(self.window.take());
     }
 
