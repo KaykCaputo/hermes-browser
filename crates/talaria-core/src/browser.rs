@@ -1,7 +1,75 @@
-use crate::{ColorScheme, DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon, PointerCursor};
+use url::Url;
+
+use crate::{
+    ClipboardCommand, ColorScheme, ControlAnswer, ControlId, ControlRect, ControlRequest,
+    DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon, PointerCursor,
+};
+use crate::{PageRequest, PageRequestAnswer, PageRequestId};
 
 const DEFAULT_PAGE_TITLE: &str = "New Tab";
 const INITIAL_ADDRESS: &str = "";
+
+/// Longest placeholder title made from a whole URL, ellipsis included.
+const MAX_URL_TITLE_CHARS: usize = 80;
+
+/// Title shown until a document supplies its own: the URL's host (a `blob:` URL's inner host),
+/// else the URL shortened to `MAX_URL_TITLE_CHARS`, else "New Tab". A `data:` URL shows only
+/// its scheme, since the rest is the document itself.
+pub fn placeholder_title(url: &str) -> String {
+    if url.is_empty() {
+        return DEFAULT_PAGE_TITLE.to_owned();
+    }
+    let Ok(parsed) = Url::parse(url) else {
+        return shortened(url);
+    };
+    let host = match parsed.scheme() {
+        "data" => return "data:".to_owned(),
+        "blob" => match parsed.origin() {
+            url::Origin::Tuple(_, host, _) => Some(host.to_string()),
+            url::Origin::Opaque(_) => None,
+        },
+        _ => parsed.host_str().map(str::to_owned),
+    };
+    host.filter(|host| !host.is_empty())
+        .unwrap_or_else(|| shortened(url))
+}
+
+/// The origin a page's request is shown and remembered under: `scheme://host[:port]` for web
+/// pages, `file://` for local files, None for anything else (opaque origins).
+pub fn display_origin(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    if parsed.scheme() == "file" {
+        return Some("file://".to_owned());
+    }
+    match parsed.origin() {
+        url::Origin::Tuple(..) => Some(parsed.origin().ascii_serialization()),
+        url::Origin::Opaque(_) => None,
+    }
+}
+
+fn shortened(text: &str) -> String {
+    if text.chars().count() <= MAX_URL_TITLE_CHARS {
+        return text.to_owned();
+    }
+    let mut short = text
+        .chars()
+        .take(MAX_URL_TITLE_CHARS - 1)
+        .collect::<String>();
+    short.push('…');
+    short
+}
+
+/// Whether two addresses differ at most in their fragment, which keeps the same document.
+fn same_document(current: &str, next: &str) -> bool {
+    match (Url::parse(current), Url::parse(next)) {
+        (Ok(mut current), Ok(mut next)) => {
+            current.set_fragment(None);
+            next.set_fragment(None);
+            current == next
+        }
+        _ => current == next,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadState {
@@ -68,6 +136,21 @@ pub enum BrowserCommand {
     ExitFullscreen,
     /// The pointer left the web view, or the tab stopped being shown.
     PointerLeft,
+    // controls
+    /// Answers (or drops) a control the engine asked for; see `BrowserEvent::ControlShown`.
+    AnswerControl {
+        id: ControlId,
+        answer: ControlAnswer,
+    },
+    // dialogs
+    /// Answers a page request (see `page_request`); `Discard` gives the engine's default.
+    AnswerPageRequest {
+        id: PageRequestId,
+        answer: PageRequestAnswer,
+    },
+    // menus
+    /// Cut, Copy or Paste chosen in the Edit menu while the page has focus.
+    Clipboard(ClipboardCommand),
 }
 
 impl BrowserCommand {
@@ -101,6 +184,12 @@ impl BrowserCommand {
             Self::GoBack | Self::GoForward => Some(crate::NavigationOrigin::History),
             _ => None,
         }
+    }
+
+    /// Answers go to the web view that asked even before its first page has committed: a
+    /// sign-in for that page holds the commit until it is answered.
+    pub(crate) const fn is_dispatched_before_engine_ready(&self) -> bool {
+        matches!(self, Self::AnswerPageRequest { .. })
     }
 }
 
@@ -170,6 +259,30 @@ pub enum BrowserEvent {
         from: Option<String>,
         user_started: bool,
     },
+    // tabs opened and closed by pages
+    /// The page closed its own tab (`window.close()`).
+    CloseRequested,
+    // controls
+    /// The engine asks for a `<select>` popup, a picker or a context menu. It waits for exactly
+    /// one `BrowserCommand::AnswerControl` with this id.
+    ControlShown {
+        id: ControlId,
+        request: ControlRequest,
+    },
+    /// An editable element has focus; the input-method window belongs at `rect`.
+    InputMethodShown {
+        id: ControlId,
+        rect: ControlRect,
+    },
+    /// The engine closed a control or the input method itself; no answer is expected.
+    ControlHidden {
+        id: ControlId,
+    },
+    // dialogs
+    /// The page asks the user something; see `page_request`.
+    PageRequested(PageRequest),
+    /// A new document started loading in the tab (not a same-document navigation).
+    PageLoadStarted,
 }
 
 /// A page the engine could not show, offered to the browser as a download.
@@ -218,6 +331,9 @@ pub struct BrowserState {
     cursor: PointerCursor,
     status_text: Option<String>,
     fullscreen: bool,
+    // controls
+    pending_control: Option<(ControlId, ControlRequest)>,
+    input_method: Option<(ControlId, ControlRect)>,
 }
 
 impl Default for BrowserState {
@@ -233,6 +349,8 @@ impl Default for BrowserState {
             cursor: PointerCursor::Default,
             status_text: None,
             fullscreen: false,
+            pending_control: None,
+            input_method: None,
         }
     }
 }
@@ -270,25 +388,56 @@ impl BrowserState {
         self.fullscreen
     }
 
+    pub(crate) fn set_page_title(&mut self, title: String) {
+        self.page_title = title;
+    }
+
     pub(crate) fn set_zoom_percent(&mut self, percent: u16) {
         self.zoom_percent = percent;
+    }
+
+    /// The control waiting for the user's answer, if any.
+    pub fn pending_control(&self) -> Option<(ControlId, &ControlRequest)> {
+        self.pending_control
+            .as_ref()
+            .map(|(id, request)| (*id, request))
+    }
+
+    /// Where the focused editable element is, while the input method is active.
+    pub fn input_method(&self) -> Option<ControlRect> {
+        self.input_method.map(|(_, rect)| rect)
+    }
+
+    pub(crate) fn forget_controls(&mut self) {
+        self.pending_control = None;
+        self.input_method = None;
+    }
+
+    pub(crate) fn take_pending_control(&mut self) -> Option<ControlId> {
+        self.pending_control.take().map(|(id, _)| id)
     }
 
     pub fn apply(&mut self, event: BrowserEvent) {
         match event {
             BrowserEvent::AddressChanged { url } => {
+                // dialogs: Servo writes credentials typed into a sign-in into the request URL,
+                // and so into the page's address; they are never shown or kept.
+                let url = crate::strip_user_info(&url);
                 // Cursor and status text are deliberately not reset here: the engine only
                 // reports changes against its own cached values, so the engine's notifications
                 // must stay the only source of both.
                 if self.url != url {
+                    if !same_document(&self.url, &url) {
+                        self.page_title = placeholder_title(&url);
+                        self.page_icon = None;
+                    }
                     self.url = url;
-                    self.page_icon = None;
                 }
             }
             BrowserEvent::PageTitleChanged { title } => {
                 self.page_title = title
                     .filter(|title| !title.trim().is_empty())
-                    .unwrap_or_else(|| DEFAULT_PAGE_TITLE.to_owned());
+                    .unwrap_or_else(|| placeholder_title(&self.url));
             }
             BrowserEvent::PageIconChanged { icon } => {
                 self.page_icon = icon;
@@ -300,6 +449,9 @@ impl BrowserState {
                     // web view still caches its old cursor and reports it again.
                     self.fullscreen = false;
                     self.status_text = None;
+                    // The engine dropped every request of the crashed page.
+                    self.pending_control = None;
+                    self.input_method = None;
                 }
                 self.load_state = state;
             }
@@ -323,6 +475,31 @@ impl BrowserState {
             BrowserEvent::PageCommitted { .. } | BrowserEvent::PageTitleAt { .. } => {}
             // downloads: queued by the controller, not shown.
             BrowserEvent::DownloadOffered { .. } | BrowserEvent::DocumentRequestStarted { .. } => {}
+            // Closing is the controller's business; the tab's own state does not change.
+            BrowserEvent::CloseRequested => {}
+            BrowserEvent::ControlShown { id, request } => {
+                self.pending_control = Some((id, request));
+            }
+            BrowserEvent::InputMethodShown { id, rect } => {
+                self.input_method = Some((id, rect));
+            }
+            BrowserEvent::ControlHidden { id } => {
+                if self
+                    .pending_control
+                    .as_ref()
+                    .is_some_and(|(pending_id, _)| *pending_id == id)
+                {
+                    self.pending_control = None;
+                }
+                if self
+                    .input_method
+                    .is_some_and(|(input_method_id, _)| input_method_id == id)
+                {
+                    self.input_method = None;
+                }
+            }
+            // dialogs: kept by the tab's page requests, not here.
+            BrowserEvent::PageRequested(_) | BrowserEvent::PageLoadStarted => {}
         }
     }
 }

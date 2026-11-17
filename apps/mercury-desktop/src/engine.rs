@@ -17,12 +17,13 @@ use talaria_servo::{
 };
 
 use crate::keyboard::system_color_scheme;
-use crate::rendering::BrowserRenderingContext;
+use crate::rendering::{BrowserRenderingContext, RenderingBridgeError, ReportOncePerKind};
 use crate::screen_metrics::screen_metrics;
 use crate::shutdown::{
     ENGINE_SHUTDOWN_TIMEOUT, EngineParts, Watchdog, drop_catching_panic, release_in_order,
-    settle_period, spin_for,
+    settle_period, shut_down_runtime,
 };
+use crate::tab_switch_frame::TabSwitchFrame;
 use crate::ui_sync::sync_ui;
 
 pub(crate) const MAX_COMMANDS_PER_FRAME: usize = 128;
@@ -46,8 +47,12 @@ struct Engine {
     bootstrap_failure_logged: Cell<bool>,
 }
 
+/// Dropped any way other than `shut_down` (an early return during start-up, unwinding), its
+/// `Drop` still releases the web views, the runtime, the rendering context and the device in
+/// that order; see `take_parts`.
 struct EngineState {
-    runtime: ServoRuntime,
+    /// `None` only once `take_parts` has run.
+    runtime: Option<ServoRuntime>,
     controller: Rc<RefCell<BrowserController>>,
     web_view_focused: Rc<Cell<bool>>,
     rendering_context: Option<Rc<BrowserRenderingContext>>,
@@ -62,7 +67,21 @@ struct EngineState {
     web_view_created: bool,
     /// What pages were last told about the screen and window.
     screen_metrics: Option<ScreenMetrics>,
+    /// tabs: bounds how long the previous tab's frame stays up after a switch.
+    tab_switch_frame: TabSwitchFrame,
+    frame_import_errors: ReportOncePerKind<RenderingBridgeError>,
 }
+
+/// The parts of `EngineState` that are released in order.
+type OwnedEngineParts = EngineParts<
+    (
+        HashMap<TabId, ServoWebView>,
+        HashMap<TabId, Receiver<TabEvent>>,
+    ),
+    ServoRuntime,
+    Option<Rc<BrowserRenderingContext>>,
+    Option<slint::wgpu_29::wgpu::Device>,
+>;
 
 enum GraphicsStatus {
     Ready,
@@ -83,15 +102,17 @@ pub(crate) fn connect_servo_runtime(
         let _queued = slint::invoke_from_event_loop(pump_after_wake);
     });
 
+    // tabs opened by pages
+    let allocator_window = window.as_weak();
+    let new_tab_allocator = crate::page_tabs::new_tab_allocator(&controller, move || {
+        allocator_window
+            .upgrade()
+            .is_some_and(|window| window.get_address_has_focus())
+    });
     let engine = Rc::new(Engine {
         window: window.as_weak(),
         state: RefCell::new(Some(EngineState {
-            runtime: {
-                let runtime = ServoRuntime::new(event_loop_waker, runtime_options);
-                runtime
-                    .set_document_request_listener(crate::downloads::document_request_listener()); // downloads-ui lane
-                runtime
-            },
+            runtime: Some(ServoRuntime::new(event_loop_waker, runtime_options)),
             controller,
             web_view_focused,
             rendering_context: None,
@@ -103,9 +124,24 @@ pub(crate) fn connect_servo_runtime(
             current_scale_factor: None,
             web_view_created: false,
             screen_metrics: None,
+            tab_switch_frame: TabSwitchFrame::default(),
+            frame_import_errors: ReportOncePerKind::default(),
         })),
         bootstrap_failure_logged: Cell::new(false),
     });
+    // tabs opened by pages
+    if let Some(runtime) = engine
+        .state
+        .borrow()
+        .as_ref()
+        .and_then(|state| state.runtime.as_ref())
+    {
+        runtime.set_new_tab_allocator(new_tab_allocator);
+        // activation (tabs lane): a new document does not inherit the last one's activation
+        runtime.set_document_started_listener(crate::page_tabs::document_started_listener());
+        // downloads-ui lane: decides, as each top-level request starts, whether the user started it
+        runtime.set_document_request_listener(crate::downloads::document_request_listener());
+    }
     ENGINE.with(|current| *current.borrow_mut() = Rc::downgrade(&engine));
     schedule_graphics_bootstrap(Rc::downgrade(&engine), GRAPHICS_BOOTSTRAP_DELAY);
 
@@ -113,8 +149,25 @@ pub(crate) fn connect_servo_runtime(
     window
         .window()
         .set_rendering_notifier(move |state, graphics_api| {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
             rendering_engine.on_rendering_state(state, graphics_api);
         })
+}
+
+// settings-ui: lets the settings reach the engine's switches (content blocking, clearing at exit).
+/// Runs `work` with the engine's runtime; false if the engine is gone or busy.
+pub(crate) fn with_runtime(work: impl FnOnce(&ServoRuntime)) -> bool {
+    let Some(engine) = ENGINE.with(|current| current.borrow().upgrade()) else {
+        return false;
+    };
+    let Ok(state) = engine.state.try_borrow() else {
+        return false;
+    };
+    let Some(runtime) = state.as_ref().and_then(|state| state.runtime.as_ref()) else {
+        return false;
+    };
+    work(runtime);
+    true
 }
 
 /// Shuts the engine down in order. Call once, after the event loop has ended and before the
@@ -135,9 +188,9 @@ pub(crate) fn shut_down_engine(exit_code_if_stuck: u8) {
     };
     let window = engine.window.upgrade();
     if let Some(window) = &window {
-        // Quitting looks instant while the engine winds down. `run()` has usually hidden the
-        // window already. The state is taken first because hiding can tear rendering down
-        // (Wayland destroys the window), and that teardown must not touch the engine now.
+        // Quitting looks instant while the engine winds down. The state is taken first because
+        // hiding can tear rendering down (Wayland destroys the window), and that teardown must
+        // not touch the engine now.
         if let Err(error) = window.hide() {
             log::warn!("could not hide the window before shutting down: {error}");
         }
@@ -145,16 +198,19 @@ pub(crate) fn shut_down_engine(exit_code_if_stuck: u8) {
     state.shut_down(window.as_ref(), exit_code_if_stuck);
 }
 
-/// Runs `work` with the engine, if it is running and not busy (downloads lane: cookies and the
-/// user agent for a download). `None` before it starts, after it shut down, or while a pump has
-/// it borrowed.
-pub(crate) fn with_runtime<R>(work: impl FnOnce(&ServoRuntime) -> R) -> Option<R> {
-    let engine = ENGINE.with(|current| current.borrow().upgrade())?;
-    let state = engine.state.try_borrow().ok()?;
-    state.as_ref().map(|state| work(&state.runtime))
+/// Whether the engine's state is borrowed right now (a pump or a render is running).
+#[cfg(target_os = "macos")]
+pub(crate) fn engine_busy() -> bool {
+    ENGINE.with(|current| {
+        current
+            .borrow()
+            .upgrade()
+            .is_some_and(|engine| engine.state.try_borrow_mut().is_err())
+    })
 }
 
 fn pump_after_wake() {
+    let _slint = crate::callback_scope::InSlintCallback::enter();
     let Some(engine) = ENGINE.with(|current| current.borrow().upgrade()) else {
         return;
     };
@@ -171,6 +227,7 @@ fn pump_after_wake() {
 /// into an offscreen snapshot target instead; `take_snapshot` bypasses the occlusion check.
 fn schedule_graphics_bootstrap(engine: Weak<Engine>, delay: Duration) {
     Timer::single_shot(delay, move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let Some(strong_engine) = engine.upgrade() else {
             return;
         };
@@ -267,7 +324,7 @@ impl Engine {
                 state.present(&window);
             }
             RenderingState::RenderingTeardown => {
-                state.tear_down_rendering(&window);
+                state.tear_down_rendering();
                 drop(state_slot);
                 // A later setup needs bootstrapping again if the window is covered by then.
                 let engine = ENGINE.with(|current| current.borrow().clone());
@@ -284,6 +341,8 @@ impl EngineState {
             return;
         }
 
+        // A texture left from before a `RenderingTeardown` belongs to the device Slint gave up.
+        window.set_web_view_texture(Image::default());
         window.set_web_view_visible(false);
 
         let GraphicsAPI::WGPU29 { device, queue, .. } = graphics_api else {
@@ -329,18 +388,33 @@ impl EngineState {
     fn pump(&mut self, window: &MainWindow) {
         // Before spinning, so that a page's first query after the window moved is current.
         self.update_screen_metrics(window);
-        self.runtime.spin_event_loop();
+        let Some(runtime) = &self.runtime else {
+            return;
+        };
+        runtime.spin_event_loop();
 
         let ready_before = {
             let controller = self.controller.borrow();
             is_engine_ready(&controller, controller.active_tab_id())
         };
-        let mut state_changed = false;
+        // tabs opened by pages: before the events, so the new tabs' first events are applied
+        let adoption = crate::page_tabs::adopt_page_web_views(
+            runtime,
+            &self.controller,
+            &mut self.web_views,
+            &mut self.event_receivers,
+        );
+        self.web_view_created |= adoption.web_views_added;
+        let mut state_changed = adoption.ui_changed;
         for receiver in self.event_receivers.values() {
             state_changed |= apply_pending_browser_events(&self.controller, receiver);
         }
         crate::profile_data::record_visits(&mut self.controller.borrow_mut()); // history lane
         crate::downloads::take_download_offers(&self.controller); // downloads-ui lane
+        // tabs: title reads owed while another was in flight
+        for web_view in self.web_views.values() {
+            web_view.refresh_page_feedback();
+        }
         let active_became_ready = !ready_before && {
             let controller = self.controller.borrow();
             is_engine_ready(&controller, controller.active_tab_id())
@@ -368,6 +442,15 @@ impl EngineState {
             let tab_ids = controller.tabs().map(|tab| tab.id()).collect::<Vec<_>>();
             (active_tab_id, tab_ids)
         };
+        // activation (tabs lane): closed tabs forget their activation
+        for closed in self
+            .web_views
+            .keys()
+            .filter(|tab_id| !tab_ids.contains(tab_id))
+        {
+            crate::activation::forget_tab(*closed);
+            crate::page_tabs::forget_tab(*closed);
+        }
         self.web_views.retain(|tab_id, _| tab_ids.contains(tab_id));
         self.event_receivers
             .retain(|tab_id, _| tab_ids.contains(tab_id));
@@ -392,7 +475,7 @@ impl EngineState {
             };
 
             let (event_sender, event_receiver) = mpsc::channel::<TabEvent>();
-            let create_result = self.runtime.create_web_view(
+            let create_result = runtime.create_web_view(
                 rendering_context.clone(),
                 &url,
                 scale_factor,
@@ -436,8 +519,15 @@ impl EngineState {
                 // Servo 0.8 couples visibility and throttling: show() resumes the active
                 // pipeline and hide() throttles background tabs.
                 active_web_view.show();
+                // tabs: only a frame announced after show() shows this tab; painting without
+                // importing ends the repaint Servo still owes for the earlier scene, which
+                // would otherwise announce it to every web view again
+                active_web_view.paint();
+                active_web_view.discard_ready_frame();
                 let _focus_result = active_web_view.set_focus(self.web_view_focused.get());
             }
+            // tabs: keep the previous frame briefly instead of flashing the background
+            self.tab_switch_frame.begin(window);
             self.visible_tab_id = Some(active_tab_id);
         }
 
@@ -482,8 +572,10 @@ impl EngineState {
 
     fn update_screen_metrics(&mut self, window: &MainWindow) {
         let metrics = window.window().with_winit_window(screen_metrics).flatten();
-        if metrics != self.screen_metrics {
-            self.runtime.set_screen_metrics(metrics);
+        if metrics != self.screen_metrics
+            && let Some(runtime) = &self.runtime
+        {
+            runtime.set_screen_metrics(metrics);
             self.screen_metrics = metrics;
         }
     }
@@ -505,11 +597,18 @@ impl EngineState {
         }
 
         match rendering_context.current_frame_as_image(device) {
-            Ok(image) => window.set_web_view_texture(image),
+            Ok(image) => {
+                window.set_web_view_texture(image);
+                // tabs: the new tab's frame is up
+                self.tab_switch_frame.frame_shown();
+            }
             Err(error) => {
-                log::error!("failed to import Servo frame into Slint: {error}");
-                window
-                    .set_content_message(format!("Failed to display Servo frame: {error}").into());
+                if self.frame_import_errors.first(&error) {
+                    log::error!("failed to import Servo frame into Slint: {error}");
+                    window.set_content_message(
+                        format!("Failed to display Servo frame: {error}").into(),
+                    );
+                }
             }
         }
     }
@@ -517,8 +616,15 @@ impl EngineState {
     /// Slint is giving up its device (the window is suspended or its renderer destroyed). The
     /// runtime stays, so this never starts Servo's shutdown from inside the renderer; the web
     /// views close while the context and the device they paint through are still alive.
-    fn tear_down_rendering(&mut self, window: &MainWindow) {
-        window.set_web_view_texture(Image::default());
+    ///
+    /// Nothing here may call into the window. Slint runs this notifier from
+    /// `WinitWindowAdapter::suspend`, which holds the adapter's window cell mutably borrowed;
+    /// setting a property marks the window dirty, and its redraw request borrows that cell
+    /// again and panics unless a redraw is already pending
+    /// (i-slint-backend-winit-1.17.1/winitwindowadapter.rs:628-632, 1282-1288). The texture
+    /// imported from the old device is released by the next `set_up_rendering`, before
+    /// anything renders with the new device, or by `shut_down`.
+    fn tear_down_rendering(&mut self) {
         release_in_order(
             EngineParts {
                 web_views: (
@@ -538,52 +644,52 @@ impl EngineState {
 
     /// Closes the web views, then the runtime, then the rendering context, then the device.
     /// The order is spelled out in `release_in_order` rather than left to field order.
-    fn shut_down(self, window: Option<&MainWindow>, exit_code_if_stuck: u8) {
+    fn shut_down(mut self, window: Option<&MainWindow>, exit_code_if_stuck: u8) {
         if let Some(window) = window {
-            // The window's texture was imported from Servo's frames; let it go first.
+            // The window's texture was imported from Servo's frames; let it go first. Safe
+            // here: the event loop has ended, so Slint holds nothing borrowed.
             window.set_web_view_texture(Image::default());
         }
-        let EngineState {
-            runtime,
-            rendering_context,
-            wgpu_device,
-            web_views,
-            event_receivers,
-            web_view_created,
-            ..
-        } = self;
+        let settle = settle_period(self.web_view_created);
 
-        release_in_order(
-            EngineParts {
-                web_views: (web_views, event_receivers),
-                runtime: Some(runtime),
-                rendering_context,
-                wgpu_device,
-            },
-            |runtime| {
-                let watchdog = Watchdog::start(ENGINE_SHUTDOWN_TIMEOUT, move || {
-                    log::error!(
-                        "Servo did not shut down within {} seconds; exiting without it",
-                        ENGINE_SHUTDOWN_TIMEOUT.as_secs()
-                    );
-                    // `process::exit` skips destructors; the temporary profile holds this
-                    // run's cookies.
-                    crate::profile::remove_temporary_profile();
-                    std::process::exit(i32::from(exit_code_if_stuck));
-                });
-                // Let content processes release their WebGL contexts before the constellation
-                // is told to exit; see `WEBGL_SETTLE_PERIOD` for the race this works around.
-                spin_for(settle_period(web_view_created), || {
-                    runtime.spin_event_loop()
-                });
-                // Dropping the last `Servo` handle exits the constellation and the WebGL
-                // thread and waits for them.
-                if !drop_catching_panic(runtime) {
-                    log::error!("the engine did not shut down cleanly (it panicked while exiting)");
-                }
-                watchdog.disarm();
-            },
-        );
+        release_in_order(self.take_parts(), |runtime| {
+            let watchdog = Watchdog::start(ENGINE_SHUTDOWN_TIMEOUT, move || {
+                crate::shutdown::exit_because_stuck("Servo did not shut down", exit_code_if_stuck)
+            });
+            // Let content processes release their WebGL contexts before the constellation is
+            // told to exit (see `WEBGL_SETTLE_PERIOD`); dropping the last `Servo` handle then
+            // exits the constellation and the WebGL thread and waits for them.
+            if !shut_down_runtime(runtime, settle, ServoRuntime::spin_event_loop, drop) {
+                log::error!("the engine did not shut down cleanly (it panicked while exiting)");
+            }
+            watchdog.disarm();
+        });
+        // `self` is dropped here with its parts already taken; its `Drop` finds nothing.
+    }
+
+    /// Takes the parts that must be released in order, leaving the state without them.
+    fn take_parts(&mut self) -> OwnedEngineParts {
+        EngineParts {
+            web_views: (
+                std::mem::take(&mut self.web_views),
+                std::mem::take(&mut self.event_receivers),
+            ),
+            runtime: self.runtime.take(),
+            rendering_context: self.rendering_context.take(),
+            wgpu_device: self.wgpu_device.take(),
+        }
+    }
+}
+
+impl Drop for EngineState {
+    /// Finds the parts still here only when the state was not shut down: an early return during
+    /// start-up, or unwinding. There is no settle period and no watchdog on these paths.
+    fn drop(&mut self) {
+        release_in_order(self.take_parts(), |runtime| {
+            if !drop_catching_panic(runtime) {
+                log::error!("the engine did not shut down cleanly (it panicked while exiting)");
+            }
+        });
     }
 }
 
@@ -637,8 +743,14 @@ pub(crate) fn apply_pending_browser_events(
 
     for tab_event in receiver.try_iter() {
         let tab_id = tab_event.tab_id();
+        let event = tab_event.into_event();
+        if event == BrowserEvent::CloseRequested {
+            // tabs closed by pages: a page never quits the browser
+            state_changed |= crate::page_tabs::close_page_tab(&mut controller, tab_id);
+            continue;
+        }
         let was_engine_ready = is_engine_ready(&controller, tab_id);
-        state_changed |= controller.handle_event(tab_id, tab_event.into_event());
+        state_changed |= controller.handle_event(tab_id, event);
         if !was_engine_ready && is_engine_ready(&controller, tab_id) {
             log::info!("tab {} is ready for commands", tab_id.value());
         }
@@ -665,6 +777,8 @@ pub(crate) fn resting_pointer_move(
 /// cursor and status text), and a fullscreen page leaves fullscreen.
 pub(crate) fn queue_leaving_tab(controller: &mut BrowserController, tab_id: TabId) {
     controller.queue_command_for(tab_id, BrowserCommand::PointerLeft);
+    // controls: a picker or menu left open in the tab gets the engine's default answer.
+    controller.dismiss_control(tab_id);
     let is_fullscreen = controller
         .tabs()
         .any(|tab| tab.id() == tab_id && tab.state().is_fullscreen());
@@ -713,6 +827,7 @@ mod tests {
     use talaria_core::{
         ColorScheme, ImeInput, KeyboardInput, PointerButton, PointerButtonAction, TabCommand,
     };
+    use talaria_core::{PageRequestAnswer, PageRequestId};
 
     use super::*;
 
@@ -780,6 +895,28 @@ mod tests {
             Ok(())
         }
         fn pointer_left(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn answer_control(
+            &mut self,
+            _id: talaria_core::ControlId,
+            _answer: talaria_core::ControlAnswer,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        // dialogs
+        fn answer_page_request(
+            &mut self,
+            _id: PageRequestId,
+            _answer: PageRequestAnswer,
+        ) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        // menus
+        fn clipboard(
+            &mut self,
+            _command: talaria_core::ClipboardCommand,
+        ) -> Result<(), Self::Error> {
             Ok(())
         }
     }
@@ -898,6 +1035,27 @@ mod tests {
             .map(|tab| tab.state().page_title())
             .collect::<Vec<_>>();
         assert_eq!(titles, vec!["First", "Second"]);
+    }
+
+    #[test]
+    fn a_close_request_from_a_page_closes_its_tab() {
+        let controller = RefCell::new(BrowserController::default());
+        let opener = controller.borrow().active_tab_id();
+        mark_engine_ready(&controller, opener);
+        let adopted = controller
+            .borrow_mut()
+            .adopt_tab(opener, talaria_core::TabActivation::Foreground)
+            .expect("the opener exists");
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(TabEvent::new(adopted, BrowserEvent::CloseRequested))
+            .expect("the event receiver should be connected");
+
+        assert!(apply_pending_browser_events(&controller, &receiver));
+
+        let controller = controller.borrow();
+        assert_eq!(controller.tabs().len(), 1);
+        assert_eq!(controller.active_tab_id(), opener);
     }
 
     #[test]

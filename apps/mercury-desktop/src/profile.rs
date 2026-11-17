@@ -10,6 +10,13 @@ pub(crate) const APP_DIR_NAME: &str = "Mercury Browser";
 pub(crate) const APP_DIR_NAME: &str = "mercury-browser";
 
 const DEFAULT_PROFILE_NAME: &str = "Default";
+/// Mercury's directory inside the platform's cache directory (`~/Library/Caches` on macOS,
+/// named by the bundle identifier as in `media_isolation`; `~/.cache` on Linux).
+#[cfg(target_os = "macos")]
+const APP_CACHE_DIR_NAME: &str = "io.github.thepigdestroyer.mercury-browser";
+#[cfg(not(target_os = "macos"))]
+const APP_CACHE_DIR_NAME: &str = "mercury-browser";
+const HTTP_CACHE_DIRECTORY_NAME: &str = "http-cache";
 const LOCK_FILE_NAME: &str = "lock";
 const SERVO_DIRECTORY_NAME: &str = "servo";
 /// The file that marks a directory as a Mercury Browser profile, and its first line.
@@ -274,10 +281,47 @@ fn absolute_profile_root(root: &Path) -> io::Result<PathBuf> {
     std::path::absolute(root)
 }
 
+/// Where a profile's HTTP disk cache goes. The user's default profile keeps it with the
+/// platform's caches (`~/Library/Caches/<bundle id>/Default/http-cache`), where backups skip
+/// it; a profile given with `--profile-dir`, a temporary profile, or a default profile on a
+/// system with no cache directory keeps it inside the profile (`<profile>/http-cache`), so a
+/// temporary profile's cache is removed with it.
+fn http_cache_dir(root: &Path, default_profile_cache_root: Option<&Path>) -> PathBuf {
+    match default_profile_cache_root {
+        Some(cache_root) => cache_root
+            .join(APP_CACHE_DIR_NAME)
+            .join(DEFAULT_PROFILE_NAME)
+            .join(HTTP_CACHE_DIRECTORY_NAME),
+        None => root.join(HTTP_CACHE_DIRECTORY_NAME),
+    }
+}
+
+/// Creates the HTTP cache directory (mode 0700), or checks an existing one: a real directory
+/// of this user, made private if it was not, and writable. A symbolic link is refused.
+fn prepare_http_cache_dir(directory: &Path) -> io::Result<()> {
+    match std::fs::symlink_metadata(directory) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            create_private_directory(directory)?;
+        }
+        Err(error) => return Err(error),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err(io::Error::other(
+                "it is not a directory (or is a symbolic link)",
+            ));
+        }
+        Ok(_) => {
+            tighten_directory(directory)?;
+        }
+    }
+    check_writable(directory)
+}
+
 /// The profile this run uses. Keep it alive until the engine has shut down: it holds the
 /// profile's lock, and a temporary profile is deleted when it is dropped.
 pub(crate) struct ActiveProfile {
     pub paths: Option<ProfilePaths>,
+    /// The HTTP disk cache's directory, if it could be prepared.
+    http_cache_dir: Option<PathBuf>,
     _lock: Option<ProfileLock>,
     _temporary: Option<TemporaryProfile>,
 }
@@ -288,6 +332,11 @@ impl ActiveProfile {
         self.paths
             .as_ref()
             .map(|paths| paths.servo_config_dir.clone())
+    }
+
+    /// Where Servo should keep its HTTP disk cache, if anywhere.
+    pub(crate) fn http_cache_dir(&self) -> Option<PathBuf> {
+        self.http_cache_dir.clone()
     }
 }
 
@@ -306,6 +355,7 @@ pub(crate) fn open_profile(
         eprintln!("mercury-browser: removed {swept} temporary profile(s) left by earlier runs");
     }
     let mut temporary = None;
+    let mut default_profile_cache_root = None;
     // Servo's logger is not installed yet, so errors go to standard error directly.
     let paths = if let Some(root) = override_root {
         match absolute_profile_root(root) {
@@ -329,6 +379,7 @@ pub(crate) fn open_profile(
         }
     } else {
         let paths = ProfilePaths::resolve(dirs::data_dir().as_deref(), None);
+        default_profile_cache_root = dirs::cache_dir();
         if paths.is_none() {
             eprintln!(
                 "mercury-browser: no data directory is known for this user; site data will not be kept"
@@ -370,8 +421,24 @@ pub(crate) fn open_profile(
         }
     });
 
+    let http_cache_dir = paths.as_ref().and_then(|paths| {
+        let directory = http_cache_dir(&paths.root, default_profile_cache_root.as_deref());
+        match prepare_http_cache_dir(&directory) {
+            Ok(()) => Some(directory),
+            Err(error) => {
+                eprintln!(
+                    "mercury-browser: could not use the HTTP cache directory {}: {error}; \
+                     pages will be cached in memory only",
+                    directory.display()
+                );
+                None
+            }
+        }
+    });
+
     Ok(ActiveProfile {
         paths,
+        http_cache_dir,
         _lock: lock,
         _temporary: temporary,
     })
@@ -1445,5 +1512,107 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
 
         assert!(kept);
+    }
+
+    #[test]
+    fn the_default_profiles_http_cache_is_with_the_platforms_caches() {
+        let directory = http_cache_dir(
+            Path::new("/data/Mercury/Default"),
+            Some(Path::new("/caches")),
+        );
+
+        assert_eq!(
+            directory,
+            Path::new("/caches")
+                .join(APP_CACHE_DIR_NAME)
+                .join("Default")
+                .join("http-cache")
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            directory,
+            Path::new("/caches/io.github.thepigdestroyer.mercury-browser/Default/http-cache")
+        );
+    }
+
+    #[test]
+    fn other_profiles_keep_their_http_cache_inside() {
+        assert_eq!(
+            http_cache_dir(Path::new("/x"), None),
+            Path::new("/x/http-cache")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_explicit_profile_gets_a_private_http_cache_inside_it() {
+        let area = TestArea::new("an_explicit_profile_gets_a_private_http");
+        let root = unique_temporary_directory("http-cache");
+
+        let profile =
+            open_profile(Some(&root), true, area.get()).expect("the profile is not in use");
+        let directory = profile.http_cache_dir();
+        let private = directory.as_deref().map(mode);
+        drop(profile);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(directory, Some(root.join("http-cache")));
+        assert_eq!(private, Some(0o700));
+    }
+
+    #[test]
+    fn a_temporary_profiles_http_cache_is_removed_with_it() {
+        let area = TestArea::new("a_temporary_profiles_http_cache_is_remo");
+        let profile =
+            open_profile(None, true, area.get()).expect("temporary profiles are never locked");
+        let root = profile
+            .paths
+            .as_ref()
+            .expect("a temporary profile")
+            .root
+            .clone();
+        let directory = profile.http_cache_dir().expect("a cache directory");
+        std::fs::write(directory.join("cache.sqlite3"), "cached").expect("a cache file");
+
+        assert_eq!(directory, root.join("http-cache"));
+        drop(profile);
+        assert!(!directory.exists());
+        assert!(!root.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_http_cache_is_not_used() {
+        let base = unique_temporary_directory("http-cache-symlink");
+        let root = base.join("profile");
+        let elsewhere = base.join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).expect("the test directories");
+        ProfilePaths::resolve(None, Some(&root))
+            .expect("an override is enough")
+            .create()
+            .expect("a profile");
+        std::os::unix::fs::symlink(&elsewhere, root.join("http-cache")).expect("a link");
+        let area = TestArea::new("a_symlinked_http_cache_is_not_used");
+
+        let profile = open_profile(Some(&root), false, area.get()).expect("not in use");
+        let directory = profile.http_cache_dir();
+        drop(profile);
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(directory, None);
+    }
+
+    #[test]
+    fn without_a_profile_there_is_no_http_cache() {
+        let area = TestArea::new("without_a_profile_there_is_no_http_cache");
+        let file = unique_temporary_directory("not-a-directory");
+        std::fs::write(&file, "").expect("a file");
+
+        let profile = open_profile(Some(&file), true, area.get()).expect("not in use");
+        let directory = profile.http_cache_dir();
+        drop(profile);
+        let _ = std::fs::remove_file(&file);
+
+        assert_eq!(directory, None);
     }
 }

@@ -12,6 +12,8 @@ dpi.workspace = true
 euclid.workspace = true
 log.workspace = true
 rustls.workspace = true
+# Checks the HTTP disk cache Servo opens (the same rusqlite Servo uses).
+rusqlite.workspace = true
 serde_json.workspace = true
 servo.workspace = true
 talaria-core = { path = "../talaria-core" }
@@ -32,3 +34,6 @@ servo = { workspace = true, features = ["media-gstreamer"] }
 
 [build-dependencies]
 adblock.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

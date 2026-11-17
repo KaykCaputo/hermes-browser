@@ -9,7 +9,7 @@ use std::time::Duration;
 use talaria_servo::ServoRuntime;
 use url::Url;
 
-use super::slint_callback::InSlintCallback;
+use crate::callback_scope::InSlintCallback;
 
 /// How often, and how many times, a busy engine is asked again before giving up (2 s).
 const RETRY_INTERVAL: Duration = Duration::from_millis(50);
@@ -60,7 +60,7 @@ fn attempt(download_url: Url, pending: Pending, tries: u32) {
             ask_engine(runtime, &download_url, then);
         }
     });
-    if reached.is_some() {
+    if reached {
         return;
     }
     if tries + 1 >= ATTEMPTS {
@@ -71,7 +71,7 @@ fn attempt(download_url: Url, pending: Pending, tries: u32) {
         return;
     }
     slint::Timer::single_shot(RETRY_INTERVAL, move || {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         attempt(download_url, pending, tries + 1);
     });
 }

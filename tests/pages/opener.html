@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Opener</title>
+<style>
+  body { font: 24px -apple-system, sans-serif; margin: 40px; background: #dff; color: #000; }
+</style>
+</head>
+<body>
+<h1>Opener page</h1>
+<p><a href="opened.html" target="_blank">Open a page in a new tab</a></p>
+<p id="status">window.open runs 300 ms after load.</p>
+<script>
+  window.addEventListener("load", () => {
+    setTimeout(() => {
+      // "?close" is passed on, and the opened page then closes itself.
+      const opened = window.open("opened.html" + location.search);
+      document.getElementById("status").textContent =
+        opened ? "window.open returned a window." : "window.open returned null.";
+    }, 300);
+  });
+</script>
+</body>
+</html>

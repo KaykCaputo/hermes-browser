@@ -7,13 +7,13 @@ license.workspace = true
 
 [dependencies]
 getrandom.workspace = true
-log.workspace = true
 thiserror.workspace = true
 url.workspace = true
 zeroize.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation.workspace = true
+log.workspace = true
 security-framework.workspace = true
 
 [dev-dependencies]

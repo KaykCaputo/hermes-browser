@@ -46,3 +46,12 @@ pub enum ImeInput {
     },
     Dismissed,
 }
+
+/// A clipboard edit performed on whatever has focus inside the page, as if its key had been
+/// pressed: Servo runs the same editing code for both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardCommand {
+    Cut,
+    Copy,
+    Paste,
+}

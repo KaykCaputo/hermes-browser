@@ -25,7 +25,6 @@ mod offers;
 mod progress;
 mod quit;
 mod request;
-mod slint_callback;
 mod stop;
 mod view;
 
@@ -47,7 +46,7 @@ use self::model::{DownloadList, FileFacts, NewItem, RecordOp, file_still_matches
 use self::offers::{BarWatch, Decision, Navigations, OfferFacts, OfferPolicy, Refusal};
 pub(crate) use self::request::SaveError;
 use self::request::{RequestContext, build_request, referrer_for, savable_url};
-use self::slint_callback::InSlintCallback;
+use crate::callback_scope::InSlintCallback;
 use self::stop::Inbox;
 use self::view::item_view;
 
@@ -94,10 +93,13 @@ struct PendingOffer {
     /// The origin of the page that started it, which Block blocks.
     initiator_site: String,
     watch: BarWatch,
+    /// The tab was opened by a page only for this file: it closes once the bar is answered.
+    close_tab_after: bool,
 }
 
 struct Downloads {
     window: slint::Weak<MainWindow>,
+    controller: std::rc::Weak<RefCell<BrowserController>>,
     manager: RefCell<Option<DownloadManager>>,
     inbox: Arc<Inbox>,
     list: RefCell<DownloadList>,
@@ -147,6 +149,7 @@ pub(crate) fn start(
     );
     let downloads = Rc::new(Downloads {
         window: window.as_weak(),
+        controller: Rc::downgrade(&controller),
         manager: RefCell::new(None),
         inbox: Arc::new(Inbox::default()),
         list: RefCell::new(DownloadList::default()),
@@ -183,12 +186,12 @@ fn start_when_page_settles(controller: Rc<RefCell<BrowserController>>, address: 
         slint::TimerMode::Repeated,
         Duration::from_millis(250),
         move || {
-            let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+            let _slint = InSlintCallback::enter();
             let settled = matches!(
                 controller.borrow().active_state().load_state(),
                 talaria_core::LoadState::Loaded | talaria_core::LoadState::Failed { .. }
             );
-            if !settled || crate::engine::with_runtime(|_| ()).is_none() {
+            if !settled || !crate::engine::with_runtime(|_| ()) {
                 return;
             }
             held.stop();
@@ -306,30 +309,14 @@ pub(crate) fn document_request_listener() -> talaria_servo::DocumentRequestListe
     })
 }
 
-/// Whether a key press passed to the page counts as a gesture: anything but Escape and keys
-/// pressed alone as modifiers (HTML's activation-triggering `keydown`).
-pub(crate) fn counts_as_activation(key: &winit::keyboard::Key) -> bool {
-    use slint::winit_030::winit::keyboard::{Key, NamedKey};
-    !matches!(
-        key,
-        Key::Named(
-            NamedKey::Escape
-                | NamedKey::Shift
-                | NamedKey::Control
-                | NamedKey::Alt
-                | NamedKey::AltGraph
-                | NamedKey::Super
-                | NamedKey::Meta
-                | NamedKey::Hyper
-                | NamedKey::Fn
-                | NamedKey::FnLock
-                | NamedKey::CapsLock
-                | NamedKey::NumLock
-                | NamedKey::ScrollLock
-                | NamedKey::Symbol
-                | NamedKey::SymbolLock
-        )
-    )
+/// A page opened `tab` because of the user's gesture (tabs lane's pop-up policy): the tab's
+/// first request is the user's, so a `target=_blank` download link downloads at once.
+pub(crate) fn note_tab_opened_by_gesture(tab: TabId) {
+    if let Some(downloads) = current()
+        && let Ok(mut navigations) = downloads.navigations.try_borrow_mut()
+    {
+        navigations.note_opened_by_gesture(tab, Instant::now());
+    }
 }
 
 /// After the engine's events are applied: top-level requests (who started each navigation)
@@ -482,7 +469,7 @@ impl Downloads {
                 if inbox.push(event) {
                     // Fails only once the event loop has ended; `shut_down` drains the rest.
                     let _ = slint::invoke_from_event_loop(|| {
-                        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+                        let _slint = InSlintCallback::enter();
                         drain_events();
                     });
                 }
@@ -584,6 +571,9 @@ impl Downloads {
             return;
         };
         let navigation = self.navigations.borrow_mut().take(tab, &offer.url);
+        // No request seen for the page (it should not happen, as every top-level request
+        // passes the hook): who started it is unknown, which is never answered with silence.
+        let known = navigation.is_some();
         // A gesture counts only in the tab that was in front when the request started.
         let user_started = navigation
             .as_ref()
@@ -616,8 +606,10 @@ impl Downloads {
             tab.value()
         );
         // A refusal the user never hears of leaves the tab alone; everything else takes the tab
-        // back to the page before, if it still shows the offered page.
-        let silent = !user_started
+        // back to the page before, if it still shows the offered page. Only a download the page
+        // is known to have started can be refused without a word.
+        let audible = user_started || !known;
+        let silent = !audible
             && matches!(
                 decision,
                 Decision::Refuse(Refusal::Background | Refusal::Blocked | Refusal::RateLimited)
@@ -634,11 +626,25 @@ impl Downloads {
             }
             on_offer
         };
+        // A tab a page opened only for this file (no page before it) is closed once the file is
+        // on its way, or once its bar has been answered.
+        let only_for_the_file = !went_back
+            && controller.borrow().tabs().any(|candidate| {
+                candidate.id() == tab
+                    && candidate.is_opened_by_page()
+                    && !candidate.state().can_go_back()
+                    && candidate.state().url() == offer.url
+            });
         let name =
             mercury_downloads::file_name_for(None, &url, Some(offer.mime_type.as_str()), None);
         let referrer = referrer_for(referrer.as_ref());
         match decision {
-            Decision::Download => self.start_download(url, referrer, None, true),
+            Decision::Download => {
+                self.start_download(url, referrer, None, true);
+                if only_for_the_file {
+                    self.close_tab_opened_for_a_file(tab);
+                }
+            }
             Decision::Ask => {
                 let text = match &initiator {
                     Some(page) => {
@@ -657,6 +663,7 @@ impl Downloads {
                         detail,
                         initiator_site,
                         watch,
+                        close_tab_after: only_for_the_file,
                     },
                 );
             }
@@ -670,7 +677,7 @@ impl Downloads {
                 &format!("Files from “{scheme}:” addresses cannot be saved yet"),
             ),
             // A download the user started is never dropped without a word.
-            Decision::Refuse(Refusal::Blocked) if user_started => self.note(
+            Decision::Refuse(Refusal::Blocked) if audible => self.note(
                 &name,
                 &format!(
                     "Downloads started by {} are blocked for this session",
@@ -679,7 +686,7 @@ impl Downloads {
                         .map_or_else(|| offers::host_label(&url), offers::host_label)
                 ),
             ),
-            Decision::Refuse(Refusal::RateLimited | Refusal::Background) if user_started => {
+            Decision::Refuse(Refusal::RateLimited | Refusal::Background) if audible => {
                 self.note(
                     &name,
                     "This download was not started; download it from the page",
@@ -695,7 +702,7 @@ impl Downloads {
         self.sync_bar();
         if let Some(answer) = self.offer_answer {
             slint::Timer::single_shot(DIAGNOSTIC_ANSWER_DELAY, move || {
-                let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+                let _slint = InSlintCallback::enter();
                 if let Some(downloads) = current() {
                     downloads.answer_offer(tab, answer);
                 }
@@ -713,11 +720,40 @@ impl Downloads {
             }
             OfferAnswer::Block => self.policy.borrow_mut().block(&offer.initiator_site),
         }
+        if offer.close_tab_after {
+            self.close_tab_opened_for_a_file(tab);
+        }
         self.sync_bar();
     }
 
+    /// Closes a tab a page opened only for a file. Never the last tab: that would quit.
+    fn close_tab_opened_for_a_file(&self, tab: TabId) {
+        let Some(controller) = self.controller.upgrade() else {
+            return;
+        };
+        let Ok(mut borrowed) = controller.try_borrow_mut() else {
+            return;
+        };
+        if borrowed.tabs().len() < 2 {
+            return;
+        }
+        let outcome = borrowed.close_tab(tab);
+        drop(borrowed);
+        log::info!("tab {}: closed, opened only for a file ({outcome:?})", tab.value());
+        if let Some(window) = self.window.upgrade() {
+            crate::ui_sync::sync_ui(&window, &controller.borrow());
+        }
+    }
+
     fn dismiss_offer(&self, tab: TabId) {
-        self.bars.borrow_mut().remove(&tab);
+        let closes = self
+            .bars
+            .borrow_mut()
+            .remove(&tab)
+            .is_some_and(|offer| offer.close_tab_after);
+        if closes {
+            self.close_tab_opened_for_a_file(tab);
+        }
         self.sync_bar();
     }
 
@@ -1031,46 +1067,46 @@ fn with_downloads(work: impl FnOnce(&Downloads)) {
 
 fn connect_callbacks(window: &MainWindow) {
     window.on_downloads_toggle_popover(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| downloads.set_popover_open(!downloads.popover_open.get()));
     });
     window.on_downloads_close_popover(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| downloads.set_popover_open(false));
     });
     window.on_downloads_action(|guid, action| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| downloads.act(guid.as_str(), action));
     });
     window.on_downloads_clear_list(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(Downloads::clear);
     });
     window.on_downloads_show_all(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| downloads.set_panel_open(true));
     });
     window.on_downloads_show_more(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| {
             let next = downloads.records_asked.get().saturating_add(RECORDS_PAGE);
             downloads.load_records(next);
         });
     });
     window.on_downloads_close_panel(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| downloads.set_panel_open(false));
     });
     window.on_quit_prompt_confirm(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| downloads.answer_quit(true));
     });
     window.on_quit_prompt_keep(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| downloads.answer_quit(false));
     });
     window.on_download_offer_download(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| {
             if let Some(tab) = downloads.active_tab.get() {
                 downloads.answer_offer(tab, OfferAnswer::Download);
@@ -1078,7 +1114,7 @@ fn connect_callbacks(window: &MainWindow) {
         });
     });
     window.on_download_offer_block(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| {
             if let Some(tab) = downloads.active_tab.get() {
                 downloads.answer_offer(tab, OfferAnswer::Block);
@@ -1086,7 +1122,7 @@ fn connect_callbacks(window: &MainWindow) {
         });
     });
     window.on_download_offer_dismiss(|| {
-        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        let _slint = InSlintCallback::enter();
         with_downloads(|downloads| {
             if let Some(tab) = downloads.active_tab.get() {
                 downloads.dismiss_offer(tab);
@@ -1258,33 +1294,6 @@ fn spawn_detached(command: &mut std::process::Command) {
 
 #[cfg(test)]
 mod tests {
-    use slint::winit_030::winit::keyboard::{Key, NamedKey};
-
-    use super::counts_as_activation;
-
-    #[test]
-    fn escape_and_modifiers_alone_are_not_gestures() {
-        for key in [
-            NamedKey::Escape,
-            NamedKey::Shift,
-            NamedKey::Control,
-            NamedKey::Alt,
-            NamedKey::Super,
-            NamedKey::Meta,
-            NamedKey::CapsLock,
-        ] {
-            assert!(!counts_as_activation(&Key::Named(key)), "{key:?}");
-        }
-        for key in [
-            Key::Character("a".into()),
-            Key::Named(NamedKey::Enter),
-            Key::Named(NamedKey::Space),
-            Key::Named(NamedKey::Tab),
-        ] {
-            assert!(counts_as_activation(&key), "{key:?}");
-        }
-    }
-
     // Review round 3.
 
     #[test]

@@ -1,0 +1,73 @@
+import { ChromePalette } from "../theme/chrome-palette.slint";
+
+// A message about the settings file under the toolbar, with a button to dismiss it.
+export component SettingsNotice inherits Rectangle {
+    in property <string> text;
+    callback dismissed;
+
+    height: 40px;
+    background: ChromePalette.notice-background;
+    accessible-role: AccessibleRole.text;
+    accessible-label: root.text;
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 10px;
+        spacing: 12px;
+
+        Text {
+            horizontal-stretch: 1;
+            text: root.text;
+            color: ChromePalette.text;
+            font-size: 13px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+
+        dismiss := Rectangle {
+            width: 76px;
+            y: 6px;
+            height: 28px;
+            border-radius: 6px;
+            border-width: dismiss-focus.has-focus ? 2px : 1px;
+            border-color: dismiss-focus.has-focus ? ChromePalette.focus-ring : ChromePalette.notice-border;
+            background: dismiss-touch.has-hover ? ChromePalette.button-hover : transparent;
+            accessible-role: button;
+            accessible-label: "Dismiss";
+            accessible-action-default => {
+                root.dismissed();
+            }
+
+            Text {
+                text: "Dismiss";
+                color: ChromePalette.text;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            dismiss-touch := TouchArea {
+                clicked => {
+                    root.dismissed();
+                }
+            }
+
+            dismiss-focus := FocusScope {
+                focus-on-click: false;
+                key-pressed(event) => {
+                    if event.text == Key.Return || event.text == " " {
+                        root.dismissed();
+                        return accept;
+                    }
+                    reject
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: ChromePalette.notice-border;
+    }
+}

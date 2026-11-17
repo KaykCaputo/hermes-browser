@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Instant;
 
 use mercury_ui::MainWindow;
 use slint::ComponentHandle;
@@ -29,39 +30,55 @@ pub(crate) fn connect_native_keyboard_input(
     window
         .window()
         .on_winit_window_event(move |_slint_window, event| {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
             let Some(window) = weak_window.upgrade() else {
                 return EventResult::Propagate;
             };
+            // menus lane: focus tracking, and releases of keys the native menu performed.
+            crate::menus::observe_window_event(&window, event, &mut shortcut_keys);
 
             match event {
                 WindowEvent::ModifiersChanged(changed) => {
                     modifiers = changed.state();
+                    // controls: Control-click opens the context menu on macOS.
+                    crate::controls::set_control_key(modifiers.control_key());
                 }
-                WindowEvent::KeyboardInput { event, .. } => {
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic,
+                    ..
+                } => {
                     if crate::downloads::handle_key(event) {
                         return EventResult::PreventDefault; // downloads-ui lane
                     }
-                    if handle_browser_shortcut(
+                    // controls: an open popup takes the keys; the page keeps its focus.
+                    if crate::controls::handle_key(&window, event, modifiers) {
+                        window.window().request_redraw();
+                        return EventResult::PreventDefault;
+                    }
+                    let handled_as_shortcut = handle_browser_shortcut(
                         &window,
                         &controller,
                         &web_view_focused,
                         &mut shortcut_keys,
                         event,
                         modifiers,
-                    ) {
+                    );
+                    if handled_as_shortcut {
                         return EventResult::PreventDefault;
                     }
 
-                    if web_view_focused.get() {
+                    // downloads-ui lane: the decision, as a pure function
+                    if forwards_to_page(web_view_focused.get(), handled_as_shortcut) {
                         let active_tab_id = controller.borrow().active_tab_id();
-                        if event.state == ElementState::Pressed
-                            && !event.repeat
-                            && crate::downloads::counts_as_activation(&event.logical_key)
-                        {
-                            crate::activation::note_user_activation(
-                                active_tab_id,
-                                std::time::Instant::now(),
-                            ); // activation (tabs lane)
+                        // activation (tabs lane)
+                        if crate::activation::is_activating_key(
+                            &event.logical_key,
+                            event.state,
+                            event.repeat,
+                            *is_synthetic,
+                        ) {
+                            crate::activation::note_user_activation(active_tab_id, Instant::now());
                         }
                         let keyboard_input = keyboard_input_from_winit(
                             event,
@@ -73,6 +90,10 @@ pub(crate) fn connect_native_keyboard_input(
                             .queue_command(BrowserCommand::KeyboardInput(keyboard_input));
                         window.window().request_redraw();
                     }
+                }
+                // dialogs: a page under a sheet gets no IME input; its composition ends.
+                WindowEvent::Ime(_) if crate::page_requests::sheet_shown(&controller.borrow()) => {
+                    dismiss_composition(&controller, &mut composition_tab_id);
                 }
                 WindowEvent::Ime(ime) if web_view_focused.get() || composition_tab_id.is_some() => {
                     queue_ime_input(&controller, &mut composition_tab_id, ime);
@@ -114,8 +135,13 @@ pub(crate) fn connect_native_keyboard_input(
                     controller
                         .borrow_mut()
                         .set_color_scheme(color_scheme_from_winit(*theme));
+                    // settings-ui: the settings window follows the system under "Follow the system".
+                    crate::settings::system_theme_changed();
                     window.window().request_redraw();
                 }
+                // settings-ui: the settings window closes with the browser window, so the
+                // event loop can end.
+                WindowEvent::CloseRequested => crate::settings::main_window_closing(),
                 WindowEvent::Focused(false) => {
                     // Key-ups that happen while another window has focus never arrive.
                     shortcut_keys.clear();
@@ -126,6 +152,13 @@ pub(crate) fn connect_native_keyboard_input(
 
             EventResult::Propagate
         });
+}
+
+/// Whether a key goes to the page: only while the page has the keyboard (the downloads list,
+/// the quit question and the address field take it away) and only if it was not a browser
+/// shortcut. (downloads-ui lane)
+pub(crate) fn forwards_to_page(web_view_focused: bool, handled_as_shortcut: bool) -> bool {
+    web_view_focused && !handled_as_shortcut
 }
 
 pub(crate) fn keyboard_input_from_winit(
@@ -458,5 +491,15 @@ mod tests {
             Some(&BrowserCommand::ImeInput(ImeInput::Dismissed))
         );
         assert_eq!(composition_tab_id, None);
+    }
+
+    // downloads-ui lane
+    #[test]
+    fn a_key_goes_to_the_page_only_while_it_has_the_keyboard_and_was_no_shortcut() {
+        assert!(forwards_to_page(true, false));
+        assert!(!forwards_to_page(true, true));
+        // The quit question or the downloads list has taken the keyboard.
+        assert!(!forwards_to_page(false, false));
+        assert!(!forwards_to_page(false, true));
     }
 }

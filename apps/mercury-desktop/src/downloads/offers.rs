@@ -167,6 +167,9 @@ pub(crate) struct Navigation {
 #[derive(Debug, Default)]
 pub(crate) struct Navigations {
     typed: HashMap<TabId, (String, Instant)>,
+    /// Tabs a page opened because of the user's gesture (`target=_blank`, `window.open` on a
+    /// click): their first request is the user's, as the gesture was used to open the tab.
+    opened_by_gesture: HashMap<TabId, Instant>,
     current: HashMap<TabId, Navigation>,
 }
 
@@ -174,6 +177,11 @@ impl Navigations {
     /// The user typed `url` (resolved) into the address bar of `tab`.
     pub(crate) fn note_typed(&mut self, tab: TabId, url: &str, now: Instant) {
         self.typed.insert(tab, (url.to_owned(), now));
+    }
+
+    /// A page opened `tab` because of the user's gesture, which opening it used up.
+    pub(crate) fn note_opened_by_gesture(&mut self, tab: TabId, now: Instant) {
+        self.opened_by_gesture.insert(tab, now);
     }
 
     /// Called synchronously as a top-level request of `tab` starts: whether the user started
@@ -198,6 +206,12 @@ impl Navigations {
         });
         if typed {
             self.typed.remove(&tab);
+            return true;
+        }
+        // The first request of a tab opened by a gesture is that gesture's, once.
+        if let Some(opened) = self.opened_by_gesture.remove(&tab)
+            && now.saturating_duration_since(opened) <= TYPED_LIFETIME
+        {
             return true;
         }
         take_gesture()
@@ -244,6 +258,7 @@ impl Navigations {
 
     pub(crate) fn forget_tab(&mut self, tab: TabId) {
         self.typed.remove(&tab);
+        self.opened_by_gesture.remove(&tab);
         self.current.remove(&tab);
     }
 }
@@ -537,6 +552,43 @@ mod tests {
         assert!(same_address("http://a.test/x", "https://a.test/x"));
         assert!(!same_address("http://a.test/x", "https://a.test/y"));
         assert!(!same_address("file:///x", "https:///x"));
+    }
+
+    #[test]
+    fn a_tab_opened_by_a_click_downloads_its_first_page_without_another_click() {
+        let now = Instant::now();
+        let tab = TabId::new(5);
+        let mut navigations = Navigations::default();
+        navigations.note_opened_by_gesture(tab, now);
+        // A redirect hop does not use it.
+        assert!(!navigations.user_started_now(tab, "https://x.test/a", true, now, || false));
+        assert!(navigations.user_started_now(
+            tab,
+            "https://files.example.net/a.zip",
+            false,
+            now,
+            || false
+        ));
+        // Once only.
+        assert!(!navigations.user_started_now(
+            tab,
+            "https://files.example.net/b.zip",
+            false,
+            now,
+            || false
+        ));
+        // Not after a while.
+        navigations.note_opened_by_gesture(tab, now);
+        assert!(!navigations.user_started_now(
+            tab,
+            "https://files.example.net/c.zip",
+            false,
+            now + TYPED_LIFETIME + Duration::from_millis(1),
+            || false
+        ));
+        // Another tab is not that tab.
+        navigations.note_opened_by_gesture(TabId::new(6), now);
+        assert!(!navigations.user_started_now(tab, "https://x.test/d", false, now, || false));
     }
 
     #[test]
