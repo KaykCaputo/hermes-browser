@@ -1,6 +1,6 @@
 use crate::{
-    ClipboardCommand, ColorScheme, ControlAnswer, ControlId, ControlRect, ControlRequest, DEFAULT_ZOOM_PERCENT,
-    ImeInput, KeyboardInput, PageIcon, PointerCursor,
+    ClipboardCommand, ColorScheme, ControlAnswer, ControlId, ControlRect, ControlRequest,
+    DEFAULT_ZOOM_PERCENT, ImeInput, KeyboardInput, PageIcon, PointerCursor,
 };
 use crate::{PageRequest, PageRequestAnswer, PageRequestId};
 

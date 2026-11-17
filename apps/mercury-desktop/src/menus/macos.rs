@@ -300,6 +300,7 @@ fn update_routing(key_window: KeyWindow) {
 /// browser window.
 fn close_key_window_later() {
     let _ = slint::invoke_from_event_loop(|| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let Some(mtm) = MainThreadMarker::new() else {
             return;
         };
@@ -555,7 +556,10 @@ pub(crate) fn ensure_installed(reason: &str) {
 }
 
 pub(crate) fn ensure_installed_later(reason: &'static str) {
-    let _ = slint::invoke_from_event_loop(move || ensure_installed(reason));
+    let _ = slint::invoke_from_event_loop(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
+        ensure_installed(reason);
+    });
 }
 
 /// For a window of ours other than the browser window (About, settings): reinstall Mercury's
@@ -563,6 +567,7 @@ pub(crate) fn ensure_installed_later(reason: &'static str) {
 pub(crate) fn reinstall_when_key(window: &slint::Window, reason: &'static str) {
     use slint::winit_030::{EventResult, winit::event::WindowEvent};
     window.on_winit_window_event(move |_window, event| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         if matches!(event, WindowEvent::Focused(true)) {
             ensure_installed_later(reason);
         }
@@ -616,25 +621,35 @@ fn start_diagnostics() {
             main_menu_titles(&application).join(", "),
         );
     }
-    slint::Timer::single_shot(Duration::from_secs(2), || {
+    let delay = Duration::from_secs(2);
+    slint::Timer::single_shot(delay, || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         report("after start-up");
         crate::about::show();
-        slint::Timer::single_shot(Duration::from_secs(3), move || {
+        let delay = Duration::from_secs(3);
+        slint::Timer::single_shot(delay, move || {
+            let _slint = crate::callback_scope::InSlintCallback::enter();
             report("with the About window open");
             match crate::about::save_snapshot(&snapshot_path) {
                 Ok(()) => log::info!("menu diagnostics: saved {}", snapshot_path.display()),
                 Err(error) => log::warn!("menu diagnostics: no About snapshot: {error}"),
             }
             crate::about::hide();
-            slint::Timer::single_shot(Duration::from_millis(1500), || {
+            let delay = Duration::from_millis(1500);
+            slint::Timer::single_shot(delay, || {
+                let _slint = crate::callback_scope::InSlintCallback::enter();
                 report("after the About window closed");
                 // The settings window, opened the way its menu item opens it.
                 super::dispatch(MenuCommand::Shortcut(ShortcutAction::ShowSettings));
-                slint::Timer::single_shot(Duration::from_secs(3), || {
+                let delay = Duration::from_secs(3);
+                slint::Timer::single_shot(delay, || {
+                    let _slint = crate::callback_scope::InSlintCallback::enter();
                     report("with the settings window open");
                     // Closes the settings window (what the browser does when it closes).
                     crate::settings::main_window_closing();
-                    slint::Timer::single_shot(Duration::from_millis(1500), || {
+                    let delay = Duration::from_millis(1500);
+                    slint::Timer::single_shot(delay, || {
+                        let _slint = crate::callback_scope::InSlintCallback::enter();
                         report("after the settings window closed");
                     });
                 });

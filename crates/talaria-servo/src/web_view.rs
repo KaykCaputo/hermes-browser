@@ -11,8 +11,9 @@ use servo::{
     MouseMoveEvent, NamedKey, Theme, WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
 use talaria_core::{
-    ClipboardCommand, ColorScheme, CompositionState, ControlAnswer, ControlId, ImeInput, KeyLocation, KeyState,
-    KeyboardInput, PointerButton, PointerButtonAction, TabId, WebView as TalariaWebView,
+    ClipboardCommand, ColorScheme, CompositionState, ControlAnswer, ControlId, ImeInput,
+    KeyLocation, KeyState, KeyboardInput, PointerButton, PointerButtonAction, TabId,
+    WebView as TalariaWebView,
 };
 use talaria_core::{PageRequestAnswer, PageRequestId};
 use url::Url;

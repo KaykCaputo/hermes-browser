@@ -1,7 +1,7 @@
 use talaria_core::{
-    BrowserCommand, ClipboardCommand, ColorScheme, CompositionState, ControlAnswer, ControlId, ImeInput, KeyLocation,
-    KeyState, KeyboardInput, KeyboardModifiers, PointerButton, PointerButtonAction, WebView,
-    dispatch_command,
+    BrowserCommand, ClipboardCommand, ColorScheme, CompositionState, ControlAnswer, ControlId,
+    ImeInput, KeyLocation, KeyState, KeyboardInput, KeyboardModifiers, PointerButton,
+    PointerButtonAction, WebView, dispatch_command,
 };
 use talaria_core::{PageRequestAnswer, PageRequestId};
 

@@ -76,9 +76,11 @@ pub(crate) fn connect(
     window.set_browser_menu_top_entries(browser_menu_model(top));
     window.set_browser_menu_bottom_entries(browser_menu_model(bottom));
     window.on_browser_menu_activated(|command| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         dispatch(browser_menu_item(command).command());
     });
     window.on_address_bar_focus_changed(|focused| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         STATE.with(|state| state.address_bar_focused.set(focused));
     });
 
@@ -150,7 +152,10 @@ fn observe_event(event: &WindowEvent, shortcut_keys: &mut ShortcutKeys) {
 
 /// Runs a menu command from the event loop, outside whatever callback chose it.
 pub(crate) fn dispatch(command: MenuCommand) {
-    if let Err(error) = slint::invoke_from_event_loop(move || run(command)) {
+    if let Err(error) = slint::invoke_from_event_loop(move || {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
+        run(command);
+    }) {
         log::warn!("could not run the menu command {command:?}: {error}");
     }
 }

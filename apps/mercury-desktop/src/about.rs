@@ -94,6 +94,7 @@ fn create() -> Result<AboutWindow, slint::PlatformError> {
     about.set_media_line(media_line(option_env!("MERCURY_GSTREAMER_VERSION")).into());
     about.set_copyright_line(COPYRIGHT_LINE.into());
     about.on_open_link(|link| {
+        let _slint = crate::callback_scope::InSlintCallback::enter();
         let document = match link {
             AboutLink::Licence => Document::Licence,
             AboutLink::ThirdPartyNotices => Document::ThirdPartyNotices,
