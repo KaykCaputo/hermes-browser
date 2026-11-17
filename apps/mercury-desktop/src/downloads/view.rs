@@ -1,7 +1,7 @@
 //! What the downloads list shows for each download: its status line, its progress bar and the
 //! buttons it offers.
 
-use super::format::{amount, is_executable_type, progress_line};
+use super::format::{amount, is_unsafe_to_open, progress_line};
 use super::model::{Item, ItemState};
 
 /// No progress bar.
@@ -62,7 +62,7 @@ pub(crate) fn item_view(item: &Item) -> ItemView {
                 status.push_str(" — ");
                 status.push_str(&host);
             }
-            let executable = item.target_path.as_deref().is_some_and(is_executable_type);
+            let executable = item.target_path.as_deref().is_some_and(is_unsafe_to_open);
             (
                 status,
                 NO_BAR,
@@ -74,8 +74,16 @@ pub(crate) fn item_view(item: &Item) -> ItemView {
                 },
             )
         }
-        ItemState::Complete => ("Deleted".to_owned(), NO_BAR, retry_or_remove()),
-        ItemState::Cancelled => ("Cancelled".to_owned(), NO_BAR, retry_or_remove()),
+        ItemState::Complete => (
+            "Moved, changed or deleted".to_owned(),
+            NO_BAR,
+            retry_or_remove(item.can_retry),
+        ),
+        ItemState::Cancelled => (
+            "Cancelled".to_owned(),
+            NO_BAR,
+            retry_or_remove(item.can_retry),
+        ),
         ItemState::Interrupted { resumable: true } => (
             format!("Interrupted — {}", amount(item.received, item.total)),
             match fraction() {
@@ -91,11 +99,13 @@ pub(crate) fn item_view(item: &Item) -> ItemView {
         ),
         ItemState::Interrupted { resumable: false } => (
             match &item.error {
+                // A note (a download that could not start) is its own sentence.
+                Some(error) if !item.can_retry => error.clone(),
                 Some(error) => format!("Failed — {error}"),
                 None => "Failed".to_owned(),
             },
             NO_BAR,
-            retry_or_remove(),
+            retry_or_remove(item.can_retry),
         ),
     };
     ItemView {
@@ -108,9 +118,9 @@ pub(crate) fn item_view(item: &Item) -> ItemView {
     }
 }
 
-fn retry_or_remove() -> Actions {
+fn retry_or_remove(can_retry: bool) -> Actions {
     Actions {
-        retry: true,
+        retry: can_retry,
         remove: true,
         ..Actions::default()
     }
@@ -148,7 +158,13 @@ mod tests {
                 started_at_ms: 1,
                 ended_at_ms: Some(2),
             }],
-            |_| exists,
+            |_| {
+                exists.then_some(crate::downloads::model::FileFacts {
+                    regular: true,
+                    len: 1024,
+                    id: (1, 1),
+                })
+            },
         );
         list
     }
@@ -163,6 +179,8 @@ mod tests {
             name_guess: "a.zip".into(),
             transfer: DownloadId(1),
             started_at_ms: 1,
+            suggested_name: None,
+            refetched: false,
         });
         let starting = item_view(&list.items()[0]);
         assert_eq!(starting.status, "Starting…");
@@ -236,7 +254,7 @@ mod tests {
     fn a_deleted_file_can_only_be_downloaded_again_or_removed() {
         let list = list_with(DownloadState::Complete, "/dl/report.pdf", false);
         let view = item_view(&list.items()[0]);
-        assert_eq!(view.status, "Deleted");
+        assert_eq!(view.status, "Moved, changed or deleted");
         assert_eq!(
             view.actions,
             Actions {

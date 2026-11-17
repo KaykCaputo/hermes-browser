@@ -54,6 +54,12 @@ pub(crate) fn connect_native_keyboard_input(
 
                     if web_view_focused.get() {
                         let active_tab_id = controller.borrow().active_tab_id();
+                        if event.state == ElementState::Pressed && !event.repeat {
+                            crate::activation::note_user_activation(
+                                active_tab_id,
+                                std::time::Instant::now(),
+                            ); // activation (tabs lane)
+                        }
                         let keyboard_input = keyboard_input_from_winit(
                             event,
                             modifiers,

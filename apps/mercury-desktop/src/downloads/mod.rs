@@ -1,6 +1,7 @@
-//! Saving files: links, images and pages the user asks for, the downloads list, and the
-//! question before quitting with downloads running. The transfers are `mercury-downloads`'
-//! work; their records live in the profile database through `profile_data`.
+//! Saving files: links, images and pages the user asks for, pages the engine could not show
+//! (offered as downloads), the downloads list, and the question before quitting with downloads
+//! running. The transfers are `mercury-downloads`' work; their records live in the profile
+//! database through `profile_data`.
 //!
 //! Everything here runs on the UI thread. `mercury-downloads` reports from its own threads; its
 //! events are queued and applied on the UI thread (`drain_events`).
@@ -10,68 +11,85 @@
 //! - `save_url` for "Save link as…" and "Save image as…" (the context menu);
 //! - `save_page` for "Save page as…" (Cmd+S);
 //! - `show_list` for the downloads shortcut;
+//! - `take_download_offers` after the engine's events are applied (the engine pump);
+//! - `sync_tab` whenever the tabs change (`sync_ui`);
 //! - `confirm_quit` before the quit sequence starts shutting down;
-//! - `handle_key` for Escape and Return while the list or the question is open;
+//! - `handle_key` for Escape while the list or the question is open;
 //! - `shut_down` once the event loop has ended, before `profile_data::shut_down`.
 
+mod engine_access;
 mod format;
 mod location;
 mod model;
+mod offers;
 mod progress;
 mod quit;
 mod request;
+mod slint_callback;
+mod stop;
 mod view;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mercury_downloads::{DownloadEvent, DownloadManager, ResumeFrom, remove_partial_file};
+use mercury_downloads::{DownloadManager, ResumeFrom, remove_partial_file};
 use mercury_ui::{DownloadAction, DownloadRow, MainWindow};
 use slint::winit_030::winit;
 use slint::{ComponentHandle, ModelRc, VecModel};
-use talaria_core::{BrowserController, TabId};
+use talaria_core::{BrowserCommand, BrowserController, TabId};
 use url::Url;
 
-use self::location::{SaveLocation, save_location};
-use self::model::{DownloadList, NewItem, RecordOp};
+use self::model::{DownloadList, FileFacts, NewItem, RecordOp, file_still_matches};
+use self::offers::{Decision, OfferPolicy, Refusal};
 pub(crate) use self::request::SaveError;
 use self::request::{RequestContext, build_request, referrer_for, savable_url};
+use self::slint_callback::InSlintCallback;
+use self::stop::Inbox;
 use self::view::item_view;
 
 /// How many downloads the popover shows.
 const RECENT_ROWS: usize = 6;
 /// How many records the full list reads at a time.
 const RECORDS_PAGE: u32 = 200;
+/// `--download-offer-answer`: how long a bar stays up before the diagnostic answers it.
+const DIAGNOSTIC_ANSWER_DELAY: Duration = Duration::from_millis(1500);
 
 thread_local! {
     static DOWNLOADS: RefCell<Option<Rc<Downloads>>> = const { RefCell::new(None) };
 }
 
-/// Diagnostics from the command line.
+/// The diagnostic answer to a download bar, `--download-offer-answer`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OfferAnswer {
+    Download,
+    Block,
+}
+
+/// Start-up settings of the downloads work.
 #[derive(Debug, Default)]
 pub(crate) struct DownloadOptions {
     /// `--download-dir`: save into this folder in this run.
     pub(crate) folder: Option<PathBuf>,
     /// `--download`: start downloading this address once the browser is up.
     pub(crate) url: Option<String>,
+    /// `--download-offer-answer`: answer every download bar this way, after a moment.
+    pub(crate) offer_answer: Option<OfferAnswer>,
+    /// A `--screenshot` or `--background` run: it never saves into the user's folders.
+    pub(crate) automated: bool,
+    /// The run's profile folder, if it has one.
+    pub(crate) profile_root: Option<PathBuf>,
 }
 
-/// `mercury-downloads` events waiting for the UI thread.
-#[derive(Default)]
-struct Inbox {
-    events: Mutex<Vec<DownloadEvent>>,
-    wake_pending: AtomicBool,
-}
-
-impl Inbox {
-    fn take(&self) -> Vec<DownloadEvent> {
-        self.wake_pending.store(false, Ordering::Release);
-        std::mem::take(&mut *self.events.lock().unwrap_or_else(PoisonError::into_inner))
-    }
+/// A page-started download waiting for the user's answer on its tab's bar.
+#[derive(Debug, Clone)]
+struct PendingOffer {
+    url: Url,
+    referrer: Option<Url>,
+    text: String,
 }
 
 struct Downloads {
@@ -79,8 +97,14 @@ struct Downloads {
     manager: RefCell<Option<DownloadManager>>,
     inbox: Arc<Inbox>,
     list: RefCell<DownloadList>,
+    policy: RefCell<OfferPolicy>,
+    bars: RefCell<HashMap<TabId, PendingOffer>>,
+    active_tab: Cell<Option<TabId>>,
+    offer_answer: Option<OfferAnswer>,
     popover_open: Cell<bool>,
     panel_open: Cell<bool>,
+    /// Something started or ended since the list was last opened.
+    attention: Cell<bool>,
     /// How many records were asked of the database, and whether it had more.
     records_asked: Cell<u32>,
     more_records: Cell<bool>,
@@ -98,14 +122,23 @@ pub(crate) fn start(
     controller: Rc<RefCell<BrowserController>>,
     options: DownloadOptions,
 ) {
-    location::override_folder(options.folder);
+    location::configure(
+        options.folder,
+        options.automated,
+        options.profile_root.as_deref(),
+    );
     let downloads = Rc::new(Downloads {
         window: window.as_weak(),
         manager: RefCell::new(None),
         inbox: Arc::new(Inbox::default()),
         list: RefCell::new(DownloadList::default()),
+        policy: RefCell::new(OfferPolicy::default()),
+        bars: RefCell::new(HashMap::new()),
+        active_tab: Cell::new(None),
+        offer_answer: options.offer_answer,
         popover_open: Cell::new(false),
         panel_open: Cell::new(false),
+        attention: Cell::new(false),
         records_asked: Cell::new(0),
         more_records: Cell::new(false),
         pending_quit: RefCell::new(None),
@@ -129,6 +162,7 @@ fn start_when_page_settles(controller: Rc<RefCell<BrowserController>>, address: 
         slint::TimerMode::Repeated,
         Duration::from_millis(250),
         move || {
+            let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
             let settled = matches!(
                 controller.borrow().active_state().load_state(),
                 talaria_core::LoadState::Loaded | talaria_core::LoadState::Failed { .. }
@@ -166,18 +200,26 @@ pub(crate) fn save_url(
     referrer: Option<&str>,
     suggested_name: Option<&str>,
 ) -> Result<(), SaveError> {
-    let url = savable_url(url)?;
+    let Some(downloads) = current() else {
+        eprintln!("mercury-browser: downloads are not available in this run");
+        return Err(SaveError::NotStarted);
+    };
+    let url = match savable_url(url) {
+        Ok(url) => url,
+        Err(error) => {
+            downloads.note(url, &error.to_string());
+            return Err(error);
+        }
+    };
     let page = referrer.and_then(|referrer| Url::parse(referrer).ok());
     if let Some(tab) = tab {
         log::info!("tab {}: saving a file", tab.value());
     }
-    let Some(downloads) = current() else {
-        return Ok(());
-    };
     downloads.start_download(
         url,
         referrer_for(page.as_ref()),
         suggested_name.map(str::to_owned),
+        false,
     );
     Ok(())
 }
@@ -192,9 +234,14 @@ pub(crate) fn save_page(controller: &RefCell<BrowserController>) {
             controller.active_state().url().to_owned(),
         )
     };
-    if let Err(error) = save_url(Some(tab), &address, None, None) {
-        log::info!("cannot save the page: {error}");
+    if address.is_empty() {
+        if let Some(downloads) = current() {
+            downloads.note("New tab", "There is no page to save");
+        }
+        return;
     }
+    // A refusal is already shown in the list by `save_url`.
+    let _ = save_url(Some(tab), &address, None, None);
 }
 
 /// Opens or closes the full list of downloads (the downloads shortcut).
@@ -203,6 +250,89 @@ pub(crate) fn show_list() {
         let open = !downloads.panel_open.get();
         downloads.set_panel_open(open);
     }
+}
+
+/// After the engine's events are applied: pages the engine could not show are offered as
+/// downloads. The tab goes back to the page before (if there is one), then the file is fetched
+/// at once after a user gesture in the tab, or the tab's bar asks.
+pub(crate) fn take_download_offers(controller: &RefCell<BrowserController>) {
+    let offers = controller.borrow_mut().take_download_offers();
+    if offers.is_empty() {
+        return;
+    }
+    let Some(downloads) = current() else {
+        return;
+    };
+    let now = Instant::now();
+    for (tab, offer) in offers {
+        let Ok(url) = Url::parse(&offer.url) else {
+            continue;
+        };
+        {
+            let mut controller = controller.borrow_mut();
+            let can_go_back = controller
+                .tabs()
+                .any(|candidate| candidate.id() == tab && candidate.state().can_go_back());
+            if can_go_back {
+                controller.queue_command_for(tab, BrowserCommand::GoBack);
+            }
+        }
+        let activated = crate::activation::consume_user_activation(tab, now);
+        let decision =
+            downloads
+                .policy
+                .borrow_mut()
+                .decide(tab, &url, offer.posted, activated, now);
+        let name =
+            mercury_downloads::file_name_for(None, &url, Some(offer.mime_type.as_str()), None);
+        let referrer = referrer_for(
+            offer
+                .referrer
+                .as_deref()
+                .and_then(|referrer| Url::parse(referrer).ok())
+                .as_ref(),
+        );
+        log::info!(
+            "tab {}: a page offered a download: {decision:?}",
+            tab.value()
+        );
+        match decision {
+            Decision::Download => downloads.start_download(url, referrer, None, true),
+            Decision::Ask => downloads.ask(tab, url, referrer, &name),
+            Decision::Refuse(Refusal::Posted) => downloads.note(
+                &name,
+                "This file came from a form, which Mercury Browser cannot send again; it was \
+                 not saved",
+            ),
+            Decision::Refuse(Refusal::Unsupported(scheme)) => downloads.note(
+                &name,
+                &format!("Files from “{scheme}:” addresses cannot be saved yet"),
+            ),
+            Decision::Refuse(Refusal::Blocked | Refusal::RateLimited) => {}
+        }
+    }
+    downloads.sync();
+}
+
+/// The tabs changed: drops the bars of closed tabs and shows the active tab's bar, if any.
+pub(crate) fn sync_tab(controller: &BrowserController) {
+    let Some(downloads) = current() else {
+        return;
+    };
+    let open: Vec<TabId> = controller.tabs().map(|tab| tab.id()).collect();
+    let closed: Vec<TabId> = downloads
+        .bars
+        .borrow()
+        .keys()
+        .filter(|tab| !open.contains(tab))
+        .copied()
+        .collect();
+    for tab in closed {
+        downloads.bars.borrow_mut().remove(&tab);
+        downloads.policy.borrow_mut().forget_tab(tab);
+    }
+    downloads.active_tab.set(Some(controller.active_tab_id()));
+    downloads.sync_bar();
 }
 
 /// Before quitting: with downloads running, asks "Cancel N downloads and quit?" and runs
@@ -229,11 +359,14 @@ pub(crate) fn confirm_quit(quit: impl FnOnce() + 'static) {
     }
 }
 
-/// Escape closes the question (keep downloading), the popover or the list; Return answers the
-/// question with its default, "Keep downloading". Returns whether the key was used.
+/// Escape closes the question (keep downloading), the popover or the list. Return and Tab
+/// reach the question's focused button through Slint. Returns whether the key was used.
 pub(crate) fn handle_key(event: &winit::event::KeyEvent) -> bool {
     use winit::keyboard::{Key, NamedKey};
     if event.state != winit::event::ElementState::Pressed || event.repeat {
+        return false;
+    }
+    if !matches!(event.logical_key, Key::Named(NamedKey::Escape)) {
         return false;
     }
     let Some(downloads) = current() else {
@@ -242,20 +375,15 @@ pub(crate) fn handle_key(event: &winit::event::KeyEvent) -> bool {
     let Some(window) = downloads.window.upgrade() else {
         return false;
     };
-    let escape = matches!(event.logical_key, Key::Named(NamedKey::Escape));
-    let enter = matches!(event.logical_key, Key::Named(NamedKey::Enter));
     if window.get_quit_prompt_open() {
-        if escape || enter {
-            downloads.answer_quit(false);
-            return true;
-        }
-        return false;
+        downloads.answer_quit(false);
+        return true;
     }
-    if escape && downloads.popover_open.get() {
+    if downloads.popover_open.get() {
         downloads.set_popover_open(false);
         return true;
     }
-    if escape && downloads.panel_open.get() {
+    if downloads.panel_open.get() {
         downloads.set_panel_open(false);
         return true;
     }
@@ -263,7 +391,7 @@ pub(crate) fn handle_key(event: &winit::event::KeyEvent) -> bool {
 }
 
 /// After the event loop has ended: interrupts the running downloads, keeping the partial files
-/// that can be resumed, records how each ended, and stops the transfers. Returns by `deadline`.
+/// that can be resumed, records how each ended, and stops the transfers, all by `deadline`.
 /// Call before `profile_data::shut_down`, so the records are written.
 pub(crate) fn shut_down(deadline: Instant) {
     let Some(downloads) = DOWNLOADS.with(|current| current.borrow_mut().take()) else {
@@ -273,23 +401,8 @@ pub(crate) fn shut_down(deadline: Instant) {
     let Some(manager) = manager else {
         return;
     };
-    for id in downloads.list.borrow().running_transfers() {
-        manager.interrupt(id);
-    }
-    loop {
-        downloads.apply_events();
-        if downloads.list.borrow().active_count() == 0 || Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let left = downloads.list.borrow().active_count();
-    if left > 0 {
-        log::warn!("{left} download(s) did not stop in time; their partial files are removed");
-    }
-    // Cancels whatever is left and waits a little for it.
-    drop(manager);
-    downloads.apply_events();
+    let ops = stop::finish_transfers(manager, &downloads.list, &downloads.inbox, deadline);
+    send_ops(ops);
 }
 
 impl Downloads {
@@ -297,14 +410,12 @@ impl Downloads {
         if self.manager.borrow().is_none() {
             let inbox = Arc::clone(&self.inbox);
             let created = DownloadManager::new(move |event| {
-                inbox
-                    .events
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(event);
-                if !inbox.wake_pending.swap(true, Ordering::AcqRel) {
+                if inbox.push(event) {
                     // Fails only once the event loop has ended; `shut_down` drains the rest.
-                    let _ = slint::invoke_from_event_loop(drain_events);
+                    let _ = slint::invoke_from_event_loop(|| {
+                        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+                        drain_events();
+                    });
                 }
             });
             match created {
@@ -318,74 +429,163 @@ impl Downloads {
         std::cell::Ref::filter_map(self.manager.borrow(), Option::as_ref).ok()
     }
 
-    /// The parts of a request that come from the engine: its user agent and its cookies.
-    fn engine_context(url: &Url) -> (String, Vec<(String, String)>) {
-        crate::engine::with_runtime(|runtime| {
-            (
-                runtime.user_agent().to_owned(),
-                runtime.cookies_for_url(url),
-            )
-        })
-        .unwrap_or_else(|| {
-            log::warn!("the engine is busy or not running; downloading without its cookies");
-            (String::new(), Vec::new())
-        })
-    }
-
-    fn folder(&self) -> PathBuf {
-        match save_location() {
-            SaveLocation::Folder(folder) => folder,
-            SaveLocation::Ask { suggested_folder } => {
-                // The save panel is not built yet; see the lane report.
-                log::info!("asking where to save is not available yet; saving to the folder");
-                suggested_folder
-            }
-        }
-    }
-
-    fn start_download(&self, url: Url, referrer: Option<Url>, suggested_name: Option<String>) {
-        let (user_agent, cookies) = Self::engine_context(&url);
+    /// Asks the engine for the user agent and the download URL's cookies (waiting while it is
+    /// busy), then starts the transfer.
+    fn start_download(
+        &self,
+        url: Url,
+        referrer: Option<Url>,
+        suggested_name: Option<String>,
+        refetched: bool,
+    ) {
         let name_guess =
             mercury_downloads::file_name_for(None, &url, None, suggested_name.as_deref());
-        let request = build_request(
-            url.clone(),
-            RequestContext {
-                referrer: referrer.clone(),
-                user_agent,
-                cookies,
-                destination_dir: self.folder(),
-                suggested_name,
-                resume: None,
-            },
+        let fetched = url.clone();
+        let failed_name = name_guess.clone();
+        engine_access::with_engine(
+            url,
+            Box::new(move |user_agent, cookies| {
+                let Some(downloads) = current() else {
+                    return;
+                };
+                let request = build_request(
+                    fetched.clone(),
+                    RequestContext {
+                        referrer: referrer.clone(),
+                        user_agent,
+                        cookies,
+                        destination_dir: location::download_folder(),
+                        suggested_name: suggested_name.clone(),
+                        resume: None,
+                    },
+                );
+                let Some(transfer) = downloads.manager().map(|manager| manager.start(request))
+                else {
+                    downloads.note(&name_guess, "Downloads could not be started");
+                    return;
+                };
+                let guid = crate::profile_data::new_guid().unwrap_or_else(fallback_guid);
+                downloads.list.borrow_mut().begin(NewItem {
+                    guid,
+                    url: fetched.to_string(),
+                    referrer: referrer.map(String::from),
+                    name_guess,
+                    transfer,
+                    started_at_ms: crate::profile_data::now_ms(),
+                    suggested_name,
+                    refetched,
+                });
+                downloads.attention.set(true);
+                downloads.sync();
+            }),
+            Box::new(move || {
+                if let Some(downloads) = current() {
+                    downloads.note(
+                        &failed_name,
+                        "The browser engine was not available; try again",
+                    );
+                }
+            }),
         );
-        let Some(transfer) = self.manager().map(|manager| manager.start(request)) else {
-            return;
-        };
+    }
+
+    /// A failure shown as one line of the list, never stored.
+    fn note(&self, name: &str, message: &str) {
         let guid = crate::profile_data::new_guid().unwrap_or_else(fallback_guid);
-        self.list.borrow_mut().begin(NewItem {
+        self.list.borrow_mut().add_note(
             guid,
-            url: url.to_string(),
-            referrer: referrer.map(String::from),
-            name_guess,
-            transfer,
-            started_at_ms: crate::profile_data::now_ms(),
-        });
-        self.popover_open.set(true);
+            String::new(),
+            name.to_owned(),
+            message.to_owned(),
+            crate::profile_data::now_ms(),
+        );
+        self.attention.set(true);
         self.sync();
     }
 
-    fn apply_events(&self) {
-        let events = self.inbox.take();
-        if events.is_empty() {
-            return;
+    /// Puts up the tab's bar for a page-started download.
+    fn ask(&self, tab: TabId, url: Url, referrer: Option<Url>, name: &str) {
+        let site = match (url.host_str(), url.port()) {
+            (Some(host), Some(port)) => format!("{host}:{port}"),
+            (Some(host), None) => host.to_owned(),
+            (None, _) => url.origin().ascii_serialization(),
+        };
+        self.bars.borrow_mut().insert(
+            tab,
+            PendingOffer {
+                url,
+                referrer,
+                text: format!("{site} wants to download {name}"),
+            },
+        );
+        self.sync_bar();
+        if let Some(answer) = self.offer_answer {
+            slint::Timer::single_shot(DIAGNOSTIC_ANSWER_DELAY, move || {
+                let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+                if let Some(downloads) = current() {
+                    downloads.answer_offer(tab, answer);
+                }
+            });
         }
-        let now = Instant::now();
-        let mut ops = Vec::new();
-        {
-            let mut list = self.list.borrow_mut();
-            for event in events {
-                ops.extend(list.apply(event, now));
+    }
+
+    fn answer_offer(&self, tab: TabId, answer: OfferAnswer) {
+        let Some(offer) = self.bars.borrow_mut().remove(&tab) else {
+            return;
+        };
+        match answer {
+            OfferAnswer::Download => {
+                self.start_download(offer.url, offer.referrer, None, true);
             }
+            OfferAnswer::Block => self.policy.borrow_mut().block(&offer.url),
+        }
+        self.sync_bar();
+    }
+
+    fn dismiss_offer(&self, tab: TabId) {
+        self.bars.borrow_mut().remove(&tab);
+        self.sync_bar();
+    }
+
+    fn sync_bar(&self) {
+        let Some(window) = self.window.upgrade() else {
+            return;
+        };
+        let bar = self
+            .active_tab
+            .get()
+            .and_then(|tab| self.bars.borrow().get(&tab).cloned());
+        window.set_download_offer_visible(bar.is_some());
+        window.set_download_offer_text(bar.map(|bar| bar.text).unwrap_or_default().into());
+        window.window().request_redraw();
+    }
+
+    fn apply_events(&self) {
+        let before = self.list.borrow().active_count();
+        let ops = stop::apply_events(&self.list, &self.inbox);
+        // A finished file's identity, read right after it was published.
+        let finished: Vec<(String, PathBuf)> = ops
+            .iter()
+            .filter_map(|op| match op {
+                RecordOp::Finish {
+                    guid,
+                    state: mercury_store::DownloadState::Complete,
+                    ..
+                } => Some(guid.clone()),
+                _ => None,
+            })
+            .filter_map(|guid| {
+                let path = self.list.borrow().item(&guid)?.target_path.clone()?;
+                Some((guid, path))
+            })
+            .collect();
+        for (guid, path) in finished {
+            self.list
+                .borrow_mut()
+                .record_identity(&guid, file_facts(&path));
+        }
+        if self.list.borrow().active_count() < before {
+            self.attention.set(true);
         }
         send_ops(ops);
     }
@@ -407,7 +607,7 @@ impl Downloads {
                     downloads
                         .list
                         .borrow_mut()
-                        .merge_records(records, |path| path.symlink_metadata().is_ok());
+                        .merge_records(records, file_facts);
                     downloads.sync();
                 }
                 Err(error) => log::info!("download records are not available: {error}"),
@@ -418,6 +618,7 @@ impl Downloads {
     fn set_popover_open(&self, open: bool) {
         if open {
             self.refresh_files();
+            self.attention.set(false);
         }
         self.popover_open.set(open);
         self.sync();
@@ -427,15 +628,14 @@ impl Downloads {
         if open {
             self.popover_open.set(false);
             self.refresh_files();
+            self.attention.set(false);
         }
         self.panel_open.set(open);
         self.sync();
     }
 
     fn refresh_files(&self) {
-        self.list
-            .borrow_mut()
-            .refresh_file_presence(|path| path.symlink_metadata().is_ok());
+        self.list.borrow_mut().refresh_file_presence(file_facts);
     }
 
     fn answer_quit(&self, confirmed: bool) {
@@ -455,16 +655,17 @@ impl Downloads {
             return;
         };
         match action {
-            DownloadAction::Open => {
-                if let Some(path) = &item.target_path
-                    && !format::is_executable_type(path)
-                {
-                    open_file(path);
-                }
-            }
-            DownloadAction::Show => {
-                if let Some(path) = &item.target_path {
-                    show_file(path);
+            DownloadAction::Open | DownloadAction::Show => {
+                let Some(path) = item.target_path.clone() else {
+                    return;
+                };
+                // Still the file that was downloaded, reached without a link?
+                if !file_still_matches(&item, file_facts(&path)) {
+                    self.refresh_files();
+                } else if action == DownloadAction::Show {
+                    show_file(&path);
+                } else if !format::is_unsafe_to_open(&path) {
+                    open_file(&path);
                 }
             }
             DownloadAction::Cancel => {
@@ -482,14 +683,17 @@ impl Downloads {
             }
             DownloadAction::Resume => self.resume(&item),
             DownloadAction::Retry => {
+                let Some(source) = self.list.borrow().retry_source(guid) else {
+                    return;
+                };
                 let removed = self.list.borrow_mut().remove(guid);
                 if let Some((ops, partial)) = removed {
                     send_ops(ops);
                     discard(partial);
                 }
-                if let Ok(url) = savable_url(&item.url) {
-                    let referrer = item.referrer.as_deref().and_then(|r| Url::parse(r).ok());
-                    self.start_download(url, referrer, None);
+                if let Ok(url) = savable_url(&source.url) {
+                    let referrer = source.referrer.as_deref().and_then(|r| Url::parse(r).ok());
+                    self.start_download(url, referrer, source.suggested_name, source.refetched);
                 }
             }
             DownloadAction::Remove => {
@@ -510,27 +714,42 @@ impl Downloads {
         let Some(folder) = resume.target_path.parent().map(Path::to_path_buf) else {
             return;
         };
-        let (user_agent, cookies) = Self::engine_context(&url);
-        let request = build_request(
+        let guid = item.guid.clone();
+        let referrer = item.referrer.as_deref().and_then(|r| Url::parse(r).ok());
+        let fetched = url.clone();
+        engine_access::with_engine(
             url,
-            RequestContext {
-                referrer: item.referrer.as_deref().and_then(|r| Url::parse(r).ok()),
-                user_agent,
-                cookies,
-                destination_dir: folder,
-                suggested_name: None,
-                resume: Some(resume),
-            },
+            Box::new(move |user_agent, cookies| {
+                let Some(downloads) = current() else {
+                    return;
+                };
+                let request = build_request(
+                    fetched,
+                    RequestContext {
+                        referrer,
+                        user_agent,
+                        cookies,
+                        destination_dir: folder,
+                        suggested_name: None,
+                        resume: Some(resume),
+                    },
+                );
+                let Some(transfer) = downloads.manager().map(|manager| manager.start(request))
+                else {
+                    return;
+                };
+                let ops = downloads.list.borrow_mut().resume(&guid, transfer);
+                send_ops(ops.unwrap_or_default());
+                downloads.sync();
+            }),
+            Box::new(|| {}),
         );
-        let Some(transfer) = self.manager().map(|manager| manager.start(request)) else {
-            return;
-        };
-        let ops = self.list.borrow_mut().resume(&item.guid, transfer);
-        send_ops(ops.unwrap_or_default());
     }
 
     fn clear(&self) {
         let (ops, partials) = self.list.borrow_mut().clear();
+        // `RecordOp::Clear` removes the partial files of every interrupted record, loaded or
+        // not; these are the loaded ones, removed now in case the database is unavailable.
         send_ops(ops);
         for partial in partials {
             discard(Some(partial));
@@ -551,6 +770,7 @@ impl Downloads {
         let active = list.active_count() > 0;
         window.set_downloads_button_visible(list.has_items_this_run());
         window.set_downloads_active(active);
+        window.set_downloads_attention(self.attention.get());
         window.set_downloads_progress(list.overall_progress().unwrap_or(view::INDETERMINATE_BAR));
         window.set_downloads_recent(ModelRc::new(VecModel::from(
             rows.iter().take(RECENT_ROWS).cloned().collect::<Vec<_>>(),
@@ -574,53 +794,76 @@ fn drain_events() {
     }
 }
 
+/// Runs `work` with the downloads state from a Slint callback.
+fn with_downloads(work: impl FnOnce(&Downloads)) {
+    if let Some(downloads) = current() {
+        work(&downloads);
+    }
+}
+
 fn connect_callbacks(window: &MainWindow) {
     window.on_downloads_toggle_popover(|| {
-        if let Some(downloads) = current() {
-            let open = !downloads.popover_open.get();
-            downloads.set_popover_open(open);
-        }
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| downloads.set_popover_open(!downloads.popover_open.get()));
     });
     window.on_downloads_close_popover(|| {
-        if let Some(downloads) = current() {
-            downloads.set_popover_open(false);
-        }
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| downloads.set_popover_open(false));
     });
     window.on_downloads_action(|guid, action| {
-        if let Some(downloads) = current() {
-            downloads.act(guid.as_str(), action);
-        }
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| downloads.act(guid.as_str(), action));
     });
     window.on_downloads_clear_list(|| {
-        if let Some(downloads) = current() {
-            downloads.clear();
-        }
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(Downloads::clear);
     });
     window.on_downloads_show_all(|| {
-        if let Some(downloads) = current() {
-            downloads.set_panel_open(true);
-        }
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| downloads.set_panel_open(true));
     });
     window.on_downloads_show_more(|| {
-        if let Some(downloads) = current() {
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| {
             let next = downloads.records_asked.get().saturating_add(RECORDS_PAGE);
             downloads.load_records(next);
-        }
+        });
     });
     window.on_downloads_close_panel(|| {
-        if let Some(downloads) = current() {
-            downloads.set_panel_open(false);
-        }
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| downloads.set_panel_open(false));
     });
     window.on_quit_prompt_confirm(|| {
-        if let Some(downloads) = current() {
-            downloads.answer_quit(true);
-        }
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| downloads.answer_quit(true));
     });
     window.on_quit_prompt_keep(|| {
-        if let Some(downloads) = current() {
-            downloads.answer_quit(false);
-        }
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| downloads.answer_quit(false));
+    });
+    window.on_download_offer_download(|| {
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| {
+            if let Some(tab) = downloads.active_tab.get() {
+                downloads.answer_offer(tab, OfferAnswer::Download);
+            }
+        });
+    });
+    window.on_download_offer_block(|| {
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| {
+            if let Some(tab) = downloads.active_tab.get() {
+                downloads.answer_offer(tab, OfferAnswer::Block);
+            }
+        });
+    });
+    window.on_download_offer_dismiss(|| {
+        let _in_callback = InSlintCallback::enter(); // InSlintCallback (quit lane)
+        with_downloads(|downloads| {
+            if let Some(tab) = downloads.active_tab.get() {
+                downloads.dismiss_offer(tab);
+            }
+        });
     });
 }
 
@@ -683,9 +926,19 @@ fn send_ops(ops: Vec<RecordOp>) {
             RecordOp::Remove { guid } => {
                 data.remove_download(guid, log_failure("removing a download record"));
             }
-            RecordOp::Clear => {
-                data.clear_finished_downloads(log_failure("clearing the download records"));
-            }
+            RecordOp::Clear => data.clear_finished_downloads_and_partials(|result| match result {
+                Ok(partials) => {
+                    for (target_path, partial_path) in partials {
+                        discard(Some(ResumeFrom {
+                            partial_path: partial_path.into(),
+                            target_path: target_path.into(),
+                            etag: None,
+                            last_modified: None,
+                        }));
+                    }
+                }
+                Err(error) => log::debug!("clearing the download records: {error}"),
+            }),
         }
     }
 }
@@ -721,6 +974,23 @@ fn fallback_guid() -> String {
         crate::profile_data::now_ms(),
         std::process::id()
     )
+}
+
+/// What `lstat` says about `path`; a link is reported as not a regular file.
+fn file_facts(path: &Path) -> Option<FileFacts> {
+    let metadata = path.symlink_metadata().ok()?;
+    #[cfg(unix)]
+    let id = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let id = (0, 0);
+    Some(FileFacts {
+        regular: metadata.file_type().is_file(),
+        len: metadata.len(),
+        id,
+    })
 }
 
 /// Opens a downloaded file with its default application, through the platform's normal open

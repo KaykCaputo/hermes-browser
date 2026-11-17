@@ -8,11 +8,11 @@ use std::rc::Rc;
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType,
 };
-use slint::platform::{Platform, PointerEventButton, WindowAdapter, WindowEvent};
+use slint::platform::{Key, Platform, PointerEventButton, WindowAdapter, WindowEvent};
 use slint::{ComponentHandle, LogicalPosition, ModelRc, PhysicalSize, VecModel};
 
 slint::slint! {
-    import { DownloadsButton, DownloadsPopover, DownloadsPanel, QuitDownloadsPrompt, DownloadsPalette, DownloadRow, DownloadAction } from "../ui/downloads/downloads.slint";
+    import { DownloadsButton, DownloadsPopover, DownloadsPanel, QuitDownloadsPrompt, DownloadOfferBar, DownloadsPalette, DownloadRow, DownloadAction } from "../ui/downloads/downloads.slint";
 
     export { DownloadsPalette, DownloadRow, DownloadAction }
 
@@ -26,8 +26,13 @@ slint::slint! {
         in property <bool> panel-open;
         in property <bool> prompt-open;
         in property <bool> can-show-more;
+        in property <bool> bar-open;
+        in property <bool> attention;
         callback acted(string, DownloadAction);
         callback quit-answer(bool);
+        callback bar-answer(string);
+        property <length> anchor-right;
+        property <length> anchor-bottom;
 
         width: 900px;
         height: 640px;
@@ -63,6 +68,11 @@ slint::slint! {
                 active: root.button-active;
                 progress: root.button-progress;
                 open: root.popover-open;
+                attention: root.attention;
+                anchor-changed(right, bottom) => {
+                    root.anchor-right = right;
+                    root.anchor-bottom = bottom;
+                }
             }
         }
 
@@ -79,6 +89,22 @@ slint::slint! {
                 font-size: 26px;
             }
 
+            if root.bar-open: DownloadOfferBar {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                text: "127.0.0.1:8123 wants to download installer.dmg";
+                download => {
+                    root.bar-answer("download");
+                }
+                block => {
+                    root.bar-answer("block");
+                }
+                dismiss => {
+                    root.bar-answer("dismiss");
+                }
+            }
+
             if root.panel-open: DownloadsPanel {
                 width: parent.width;
                 height: parent.height;
@@ -92,8 +118,8 @@ slint::slint! {
         }
 
         if root.popover-open: DownloadsPopover {
-            x: root.width - self.width - 14px;
-            y: 104px;
+            x: root.anchor-right - self.width;
+            y: root.anchor-bottom + 6px;
             rows: root.rows;
             show-label: "Show in Finder";
             action(guid, action) => {
@@ -213,6 +239,7 @@ struct Fixture {
     harness: Harness,
     acted: Rc<RefCell<Vec<(String, DownloadAction)>>>,
     answers: Rc<RefCell<Vec<bool>>>,
+    bar_answers: Rc<RefCell<Vec<String>>>,
 }
 
 impl Fixture {
@@ -235,11 +262,15 @@ impl Fixture {
         let recorded = Rc::clone(&answers);
         harness.on_quit_answer(move |confirmed| recorded.borrow_mut().push(confirmed));
         harness.set_rows(ModelRc::new(VecModel::from(sample_rows())));
+        let bar_answers = Rc::new(RefCell::new(Vec::new()));
+        let recorded = Rc::clone(&bar_answers);
+        harness.on_bar_answer(move |answer| recorded.borrow_mut().push(answer.to_string()));
         Self {
             window,
             harness,
             acted,
             answers,
+            bar_answers,
         }
     }
 
@@ -250,6 +281,8 @@ impl Fixture {
         self.harness.set_prompt_open(false);
         self.harness.set_button_active(false);
         self.harness.set_can_show_more(false);
+        self.harness.set_bar_open(false);
+        self.harness.set_attention(false);
         self.settle();
     }
 
@@ -305,6 +338,15 @@ impl Fixture {
         self.settle();
     }
 
+    fn key(&self, key: impl Into<slint::SharedString>) {
+        let text = key.into();
+        self.window
+            .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+        self.window
+            .dispatch_event(WindowEvent::KeyReleased { text });
+        self.settle();
+    }
+
     fn pixel(pixels: &[PremultipliedRgbaColor], x: f32, y: f32) -> (u8, u8, u8) {
         let index = (y * SCALE) as usize * WIDTH as usize + (x * SCALE) as usize;
         let pixel = pixels[index];
@@ -339,6 +381,11 @@ fn the_downloads_components_render_and_answer_clicks() {
         fixture.harness.set_panel_open(false);
         fixture.harness.set_prompt_open(true);
         fixture.save(&format!("downloads-04-quit-prompt-{theme}"));
+
+        fixture.reset(dark);
+        fixture.harness.set_bar_open(true);
+        fixture.harness.set_attention(true);
+        fixture.save(&format!("downloads-05-offer-bar-{theme}"));
     }
 
     // Clicks: the first row's Cancel in the popover, then the quit prompt's two answers, and a
@@ -346,9 +393,9 @@ fn the_downloads_components_render_and_answer_clicks() {
     fixture.reset(true);
     fixture.harness.set_popover_open(true);
     fixture.settle();
-    // The popover is 460 wide at x = 900 - 460 - 14 = 426; the first row's only button
-    // ("Cancel") sits at its right edge, 8 + 64/2 px below the 36 px header.
-    fixture.click(845.0, 104.0 + 8.0 + 36.0 + 32.0);
+    // The popover hangs from the button's lower right corner (856, 95); the first row's only
+    // button ("Cancel") is at its right edge, read off the rendering.
+    fixture.click(811.0, 176.0);
     assert_eq!(
         fixture.acted.borrow().as_slice(),
         &[("running".to_owned(), DownloadAction::Cancel)]
@@ -363,7 +410,49 @@ fn the_downloads_components_render_and_answer_clicks() {
     fixture.click(KEEP.0, KEEP.1);
     fixture.click(CONFIRM.0, CONFIRM.1);
     assert_eq!(fixture.answers.borrow().as_slice(), &[false, true]);
+
+    // The keyboard: the default answer has the focus, Return presses it, Tab moves to the
+    // other button, Escape keeps downloading from anywhere in the question.
+    let keyboard = |keys: &[Key]| {
+        fixture.reset(true);
+        fixture.answers.borrow_mut().clear();
+        fixture.harness.set_prompt_open(true);
+        fixture.settle();
+        for key in keys {
+            fixture.key(*key);
+        }
+        let answers = fixture.answers.borrow().clone();
+        fixture.harness.set_prompt_open(false);
+        answers
+    };
+    fixture.reset(true);
+    fixture.harness.set_prompt_open(true);
+    fixture.save("downloads-06-quit-prompt-focus");
+    assert_eq!(keyboard(&[Key::Return]), [false]);
+    assert_eq!(keyboard(&[Key::Tab, Key::Return]), [true]);
+    assert_eq!(keyboard(&[Key::Tab, Key::Escape]), [false]);
+
+    // The bar's three answers.
+    fixture.reset(true);
+    fixture.harness.set_bar_open(true);
+    fixture.settle();
+    for (x, answer) in [
+        (BAR_DOWNLOAD, "download"),
+        (BAR_BLOCK, "block"),
+        (BAR_DISMISS, "dismiss"),
+    ] {
+        fixture.click(x, 108.0 + 22.0);
+        assert_eq!(
+            fixture.bar_answers.borrow().last().map(String::as_str),
+            Some(answer)
+        );
+    }
 }
+
+/// Centres of the bar's buttons in the 900-wide harness, read off its rendering.
+const BAR_DOWNLOAD: f32 = 723.0;
+const BAR_BLOCK: f32 = 793.0;
+const BAR_DISMISS: f32 = 857.0;
 
 /// Centres of the quit prompt's buttons in the 900×640 harness, read off its rendering.
 const KEEP: (f32, f32) = (576.0, 315.0);

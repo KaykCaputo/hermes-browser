@@ -1686,3 +1686,41 @@ fn a_download_published_under_another_name_records_that_name() {
     let records = harness.ask(|data, reply| data.downloads(5, reply)).unwrap();
     assert_eq!(records[0].target_path, "/downloads/f (1).zip");
 }
+
+// downloads-ui lane
+#[test]
+fn clearing_the_list_names_the_partial_files_of_every_interrupted_record() {
+    let harness = Harness::new();
+    let data = &harness.data;
+    let interrupted = new_guid().unwrap();
+    let complete = new_guid().unwrap();
+    data.insert_download(download(&interrupted), |result| result.unwrap());
+    data.finish_download(interrupted, DownloadState::Interrupted, None, |r| {
+        r.unwrap()
+    });
+    data.insert_download(
+        DownloadStart {
+            target_path: "/downloads/done.zip".into(),
+            temp_path: Some("/downloads/done.zip.part".into()),
+            ..download(&complete)
+        },
+        |result| result.unwrap(),
+    );
+    data.finish_download(complete, DownloadState::Complete, None, |r| r.unwrap());
+    let partials = harness
+        .ask(|data, reply| data.clear_finished_downloads_and_partials(reply))
+        .unwrap();
+    assert_eq!(
+        partials,
+        vec![(
+            "/downloads/f.zip".to_owned(),
+            "/downloads/f.zip.part".to_owned()
+        )]
+    );
+    assert!(
+        harness
+            .ask(|data, reply| data.downloads(5, reply))
+            .unwrap()
+            .is_empty()
+    );
+}

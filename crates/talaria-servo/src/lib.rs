@@ -1,5 +1,6 @@
 mod adblocker;
 mod content_process;
+mod download_offers;
 mod downloads;
 mod error;
 mod error_pages;

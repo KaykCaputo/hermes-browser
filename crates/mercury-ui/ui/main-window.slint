@@ -1,5 +1,5 @@
 import { Palette } from "std-widgets.slint";
-import { DownloadsButton, DownloadsPopover, DownloadsPanel, QuitDownloadsPrompt, DownloadsPalette, DownloadRow, DownloadAction } from "downloads/downloads.slint"; // downloads-ui lane
+import { DownloadsButton, DownloadsPopover, DownloadsPanel, QuitDownloadsPrompt, DownloadOfferBar, DownloadsPalette, DownloadRow, DownloadAction } from "downloads/downloads.slint"; // downloads-ui lane
 export { DownloadsPalette, DownloadRow, DownloadAction }
 
 export enum WebViewPointerButton {
@@ -233,6 +233,12 @@ export component MainWindow inherits Window {
     in property <string> quit-prompt-body;
     in property <string> quit-prompt-confirm-label;
     in property <string> quit-prompt-keep-label;
+    in property <bool> downloads-attention: false;
+    in property <bool> download-offer-visible: false;
+    in property <string> download-offer-text;
+    // Set by the downloads button wherever the toolbar places it.
+    property <length> downloads-anchor-right;
+    property <length> downloads-anchor-bottom;
     callback downloads-toggle-popover();
     callback downloads-close-popover();
     callback downloads-action(string, DownloadAction);
@@ -242,6 +248,9 @@ export component MainWindow inherits Window {
     callback downloads-close-panel();
     callback quit-prompt-confirm();
     callback quit-prompt-keep();
+    callback download-offer-download();
+    callback download-offer-block();
+    callback download-offer-dismiss();
     // --- end downloads-ui ---
 
     pure function mouse-cursor-for(cursor: WebViewCursor) -> MouseCursor {
@@ -478,6 +487,11 @@ export component MainWindow inherits Window {
                     active: root.downloads-active;
                     progress: root.downloads-progress;
                     open: root.downloads-popover-open;
+                    attention: root.downloads-attention;
+                    anchor-changed(right, bottom) => {
+                        root.downloads-anchor-right = right;
+                        root.downloads-anchor-bottom = bottom;
+                    }
                     clicked => {
                         root.downloads-toggle-popover();
                     }
@@ -762,6 +776,23 @@ export component MainWindow inherits Window {
             }
 
             // downloads-ui lane
+            if root.download-offer-visible: DownloadOfferBar {
+                x: 0px;
+                y: 0px;
+                width: parent.width;
+                text: root.download-offer-text;
+                download => {
+                    root.download-offer-download();
+                }
+                block => {
+                    root.download-offer-block();
+                }
+                dismiss => {
+                    root.download-offer-dismiss();
+                }
+            }
+
+            // downloads-ui lane
             if root.downloads-panel-open: DownloadsPanel {
                 width: parent.width;
                 height: parent.height;
@@ -793,8 +824,8 @@ export component MainWindow inherits Window {
 
     // downloads-ui lane
     if root.downloads-popover-open: DownloadsPopover {
-        x: root.width - self.width - 14px;
-        y: (root.chrome-hidden ? 0px : 108px) - 4px;
+        x: Math.max(8px, root.downloads-anchor-right - self.width);
+        y: root.downloads-anchor-bottom + 6px;
         rows: root.downloads-recent;
         show-label: root.downloads-show-label;
         action(guid, action) => {

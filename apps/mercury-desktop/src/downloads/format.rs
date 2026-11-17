@@ -45,9 +45,10 @@ pub(crate) fn progress_line(received: u64, total: Option<u64>, bytes_per_second:
     line
 }
 
-/// Files that run code when opened. The list offers only "Show in Finder" for them, never a
-/// direct "Open", so a download is never one click from running.
-pub(crate) fn is_executable_type(path: &Path) -> bool {
+/// Files that run code, change the system or open an address when opened, and documents that
+/// run scripts in a browser. The list offers only "Show in Finder" for them, never a direct
+/// "Open", so a download is never one click from running.
+pub(crate) fn is_unsafe_to_open(path: &Path) -> bool {
     const EXECUTABLE: &[&str] = &[
         // macOS applications, scripts and installers.
         "app",
@@ -64,6 +65,23 @@ pub(crate) fn is_executable_type(path: &Path) -> bool {
         "prefpane",
         "kext",
         "osx",
+        "dylib",
+        "bundle",
+        "plugin",
+        "service",
+        "shortcut",
+        "mobileconfig",
+        // Address files that open whatever they point at.
+        "fileloc",
+        "inetloc",
+        "webloc",
+        "url",
+        // Documents that run scripts when a browser opens them.
+        "html",
+        "htm",
+        "xhtml",
+        "shtml",
+        "svg",
         // Scripts any system runs.
         "sh",
         "bash",
@@ -77,6 +95,7 @@ pub(crate) fn is_executable_type(path: &Path) -> bool {
         "rb",
         "php",
         "jar",
+        "jnlp",
         // Linux.
         "appimage",
         "desktop",
@@ -170,8 +189,22 @@ mod tests {
             "i.ps1",
             "j.vbs",
             "k.terminal",
+            "l.fileloc",
+            "m.inetloc",
+            "n.webloc",
+            "o.mobileconfig",
+            "p.dylib",
+            "q.bundle",
+            "r.plugin",
+            "s.service",
+            "t.shortcut",
+            "u.jnlp",
+            "v.url",
+            "page.html",
+            "page.HTM",
+            "drawing.svg",
         ] {
-            assert!(is_executable_type(Path::new(name)), "{name}");
+            assert!(is_unsafe_to_open(Path::new(name)), "{name}");
         }
         for name in [
             "report.pdf",
@@ -179,10 +212,9 @@ mod tests {
             "archive.zip",
             "disk.dmg",
             "notes.txt",
-            "page.html",
             "no-extension",
         ] {
-            assert!(!is_executable_type(Path::new(name)), "{name}");
+            assert!(!is_unsafe_to_open(Path::new(name)), "{name}");
         }
     }
 }

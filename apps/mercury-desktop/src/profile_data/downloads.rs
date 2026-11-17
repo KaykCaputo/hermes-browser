@@ -217,6 +217,13 @@ impl ProfileData {
     }
 
     /// Removes every record that is not in progress; replies with how many.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the list uses clear_finished_downloads_and_partials (downloads-ui lane)"
+        )
+    )]
     pub(crate) fn clear_finished_downloads(
         &self,
         reply: impl FnOnce(Result<u64, ProfileDataError>) + 'static,
@@ -227,6 +234,31 @@ impl ProfileData {
                 let removed = db.store().clear_finished_downloads()?;
                 db.download_ids.clear();
                 Ok(removed)
+            },
+            reply,
+        );
+    }
+
+    /// Like `clear_finished_downloads`, and replies with the partial files (target path,
+    /// partial path) of the interrupted records it removed, so the caller can remove them too
+    /// (downloads-ui lane). Read and cleared in one job, so nothing slips in between.
+    pub(crate) fn clear_finished_downloads_and_partials(
+        &self,
+        reply: impl FnOnce(Result<Vec<(String, String)>, ProfileDataError>) + 'static,
+    ) {
+        self.request(
+            Some(Area::Downloads),
+            move |db, _| {
+                let partials = db
+                    .store()
+                    .downloads(u32::MAX)?
+                    .into_iter()
+                    .filter(|record| record.state == DownloadState::Interrupted)
+                    .filter_map(|record| Some((record.target_path, record.temp_path?)))
+                    .collect();
+                db.store().clear_finished_downloads()?;
+                db.download_ids.clear();
+                Ok(partials)
             },
             reply,
         );

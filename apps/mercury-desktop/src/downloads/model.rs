@@ -69,6 +69,48 @@ pub(crate) struct Item {
     /// The running transfer, while there is one.
     pub(crate) transfer: Option<DownloadId>,
     record: Record,
+    /// The name the page proposed, kept for Retry.
+    pub(crate) suggested_name: Option<String>,
+    /// Fetched again by Mercury after the engine could not show it (a page-started download).
+    pub(crate) refetched: bool,
+    /// Whether Retry makes sense (not for a form's POST or a `blob:` address).
+    pub(crate) can_retry: bool,
+    /// Device and inode of the finished file, recorded when it was published in this run.
+    pub(crate) identity: Option<(u64, u64)>,
+}
+
+/// What `lstat` says about a path (links are not followed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FileFacts {
+    /// A regular file (not a link, folder or anything else).
+    pub(crate) regular: bool,
+    pub(crate) len: u64,
+    pub(crate) id: (u64, u64),
+}
+
+/// The status of a download the engine could not show, whose second request failed: the
+/// site answered the first request only (a one-time link, an expired token).
+pub(crate) const NOT_SENT_AGAIN: &str =
+    "The site did not send the file again; download it from the page";
+
+/// Where a Retry starts from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RetrySource {
+    pub(crate) url: String,
+    pub(crate) referrer: Option<String>,
+    pub(crate) suggested_name: Option<String>,
+    pub(crate) refetched: bool,
+}
+
+/// Whether the file at an item's target is still the one downloaded: a regular file reached
+/// without a link, of the downloaded size, and (when recorded in this run) the same inode.
+pub(crate) fn file_still_matches(item: &Item, facts: Option<FileFacts>) -> bool {
+    let Some(facts) = facts else {
+        return false;
+    };
+    facts.regular
+        && facts.len == item.received
+        && item.identity.is_none_or(|identity| identity == facts.id)
 }
 
 impl Item {
@@ -163,6 +205,8 @@ pub(crate) struct NewItem {
     pub(crate) name_guess: String,
     pub(crate) transfer: DownloadId,
     pub(crate) started_at_ms: i64,
+    pub(crate) suggested_name: Option<String>,
+    pub(crate) refetched: bool,
 }
 
 /// The list. Items are kept newest first.
@@ -233,8 +277,68 @@ impl DownloadList {
             file_exists: false,
             transfer: Some(new.transfer),
             record: Record::None,
+            suggested_name: new.suggested_name,
+            refetched: new.refetched,
+            can_retry: true,
+            identity: None,
         };
         self.insert_sorted(item);
+    }
+
+    /// A download that could not even start (a form's POST, a `blob:` address, the engine
+    /// not running): shown in this run's list with `message`, never stored, no Retry.
+    pub(crate) fn add_note(
+        &mut self,
+        guid: String,
+        url: String,
+        name: String,
+        message: String,
+        started_at_ms: i64,
+    ) {
+        self.insert_sorted(Item {
+            guid,
+            url,
+            referrer: None,
+            file_name: name,
+            target_path: None,
+            partial_path: None,
+            mime_type: None,
+            final_url: None,
+            etag: None,
+            last_modified: None,
+            received: 0,
+            total: None,
+            bytes_per_second: 0,
+            state: ItemState::Interrupted { resumable: false },
+            error: Some(message),
+            started_at_ms,
+            this_run: true,
+            file_exists: false,
+            transfer: None,
+            record: Record::None,
+            suggested_name: None,
+            refetched: false,
+            can_retry: false,
+            identity: None,
+        });
+    }
+
+    /// What Retry downloads again, if the item can be retried and is not running.
+    pub(crate) fn retry_source(&self, guid: &str) -> Option<RetrySource> {
+        let item = self.item(guid)?;
+        (item.can_retry && !item.is_active()).then(|| RetrySource {
+            url: item.url.clone(),
+            referrer: item.referrer.clone(),
+            suggested_name: item.suggested_name.clone(),
+            refetched: item.refetched,
+        })
+    }
+
+    /// The finished file's identity, read right after it was published.
+    pub(crate) fn record_identity(&mut self, guid: &str, facts: Option<FileFacts>) {
+        if let Some(item) = self.items.iter_mut().find(|item| item.guid == guid) {
+            item.identity = facts.filter(|facts| facts.regular).map(|facts| facts.id);
+        }
     }
 
     /// Newest first; among equal start times, the one added later first.
@@ -350,6 +454,13 @@ impl DownloadList {
             DownloadEvent::Failed {
                 error, resumable, ..
             } => {
+                // A page-started download whose second request failed before the server sent
+                // anything: most likely a link that works once.
+                let error = if item.refetched && item.record == Record::None {
+                    NOT_SENT_AGAIN.to_owned()
+                } else {
+                    error
+                };
                 item.state = ItemState::Interrupted { resumable };
                 item.bytes_per_second = 0;
                 item.transfer = None;
@@ -379,7 +490,7 @@ impl DownloadList {
     pub(crate) fn merge_records(
         &mut self,
         records: Vec<DownloadRecord>,
-        exists: impl Fn(&Path) -> bool,
+        facts: impl Fn(&Path) -> Option<FileFacts>,
     ) {
         for record in records {
             if self.item(&record.guid).is_some() {
@@ -394,7 +505,10 @@ impl DownloadList {
                 // those interrupted before any request, so this is only a safeguard.
                 DownloadState::Interrupted | DownloadState::InProgress => {
                     let resumable = (record.etag.is_some() || record.last_modified.is_some())
-                        && partial_path.as_deref().is_some_and(&exists);
+                        && partial_path
+                            .as_deref()
+                            .and_then(&facts)
+                            .is_some_and(|facts| facts.regular);
                     ItemState::Interrupted { resumable }
                 }
             };
@@ -402,12 +516,13 @@ impl DownloadList {
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| record.url.clone());
-            let item = Item {
+            let target_facts = facts(&target_path);
+            let mut item = Item {
                 guid: record.guid,
                 url: record.url,
                 referrer: record.referrer,
                 file_name,
-                file_exists: state == ItemState::Complete && exists(&target_path),
+                file_exists: false,
                 target_path: Some(target_path),
                 partial_path,
                 mime_type: record.mime_type,
@@ -425,7 +540,13 @@ impl DownloadList {
                 this_run: false,
                 transfer: None,
                 record: Record::Closed,
+                suggested_name: None,
+                refetched: false,
+                can_retry: true,
+                identity: None,
             };
+            item.file_exists =
+                state == ItemState::Complete && file_still_matches(&item, target_facts);
             // Records come newest first; each goes after the items at least as new.
             let position = self
                 .items
@@ -513,10 +634,11 @@ impl DownloadList {
     }
 
     /// Marks a complete download's file as present or not.
-    pub(crate) fn refresh_file_presence(&mut self, exists: impl Fn(&Path) -> bool) {
+    pub(crate) fn refresh_file_presence(&mut self, facts: impl Fn(&Path) -> Option<FileFacts>) {
         for item in &mut self.items {
             if item.state == ItemState::Complete {
-                item.file_exists = item.target_path.as_deref().is_some_and(&exists);
+                let found = item.target_path.as_deref().and_then(&facts);
+                item.file_exists = file_still_matches(item, found);
             }
         }
     }
@@ -565,7 +687,18 @@ mod tests {
             name_guess: format!("{guid}.zip"),
             transfer: DownloadId(id),
             started_at_ms: at,
+            suggested_name: None,
+            refetched: false,
         }
+    }
+
+    /// Every path is a regular file of the records' 40 bytes.
+    fn present(_: &Path) -> Option<FileFacts> {
+        Some(FileFacts {
+            regular: true,
+            len: 40,
+            id: (1, 1),
+        })
     }
 
     fn started(id: u64, name: &str, total: Option<u64>) -> DownloadEvent {
@@ -848,7 +981,7 @@ mod tests {
                 record("older", DownloadState::Interrupted, T0 - 20),
                 record("gone", DownloadState::Complete, T0 - 5),
             ],
-            |path| path != Path::new("/dl/gone.bin"),
+            |path| present(path).filter(|_| path != Path::new("/dl/gone.bin")),
         );
         let guids: Vec<&str> = list.items().iter().map(|item| item.guid.as_str()).collect();
         assert_eq!(guids, ["now", "gone", "old", "older"]);
@@ -869,7 +1002,7 @@ mod tests {
 
         // Only this run's downloads make the toolbar button appear.
         let mut earlier_only = DownloadList::default();
-        earlier_only.merge_records(vec![record("old", DownloadState::Complete, T0)], |_| true);
+        earlier_only.merge_records(vec![record("old", DownloadState::Complete, T0)], present);
         assert!(!earlier_only.has_items_this_run());
     }
 
@@ -878,7 +1011,7 @@ mod tests {
         let mut list = DownloadList::default();
         list.merge_records(
             vec![record("older", DownloadState::Interrupted, T0)],
-            |path| path != Path::new("/dl/older.bin.part"),
+            |path| present(path).filter(|_| path != Path::new("/dl/older.bin.part")),
         );
         assert_eq!(
             list.item("older").unwrap().state,
@@ -886,7 +1019,7 @@ mod tests {
         );
         let mut no_validator = record("plain", DownloadState::Interrupted, T0);
         no_validator.etag = None;
-        list.merge_records(vec![no_validator], |_| true);
+        list.merge_records(vec![no_validator], present);
         assert_eq!(
             list.item("plain").unwrap().state,
             ItemState::Interrupted { resumable: false }
@@ -898,7 +1031,7 @@ mod tests {
         let mut list = DownloadList::default();
         list.merge_records(
             vec![record("older", DownloadState::Interrupted, T0)],
-            |_| true,
+            present,
         );
         assert_eq!(
             list.resume("older", DownloadId(5)),
@@ -939,7 +1072,7 @@ mod tests {
         let mut list = DownloadList::default();
         list.merge_records(
             vec![record("older", DownloadState::Interrupted, T0)],
-            |_| true,
+            present,
         );
         let (ops, partial) = list.cancel_interrupted("older").unwrap();
         assert_eq!(
@@ -977,7 +1110,7 @@ mod tests {
         );
         list.merge_records(
             vec![record("older", DownloadState::Interrupted, T0)],
-            |_| true,
+            present,
         );
 
         assert_eq!(list.remove("running"), None);
@@ -1030,7 +1163,7 @@ mod tests {
             },
             now,
         );
-        list.refresh_file_presence(|_| false);
+        list.refresh_file_presence(|_| None);
         assert!(!list.item("a").unwrap().file_exists);
     }
 
@@ -1053,5 +1186,130 @@ mod tests {
         // Newest first.
         let guids: Vec<&str> = list.items().iter().map(|item| item.guid.as_str()).collect();
         assert_eq!(guids, ["c", "b", "a"]);
+    }
+
+    // Review round 1.
+
+    #[test]
+    fn retry_keeps_the_suggested_name_and_how_it_was_fetched() {
+        let mut list = DownloadList::default();
+        list.begin(NewItem {
+            suggested_name: Some("photo.png".into()),
+            refetched: true,
+            ..new_item("a", 1, T0)
+        });
+        // Not while it runs.
+        assert_eq!(list.retry_source("a"), None);
+        list.apply(
+            DownloadEvent::Cancelled { id: DownloadId(1) },
+            Instant::now(),
+        );
+        assert_eq!(
+            list.retry_source("a"),
+            Some(RetrySource {
+                url: "https://example.com/a.zip".into(),
+                referrer: Some("https://example.com/".into()),
+                suggested_name: Some("photo.png".into()),
+                refetched: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_refetch_that_fails_before_the_answer_says_the_site_did_not_send_it_again() {
+        let mut list = DownloadList::default();
+        list.begin(NewItem {
+            refetched: true,
+            ..new_item("a", 1, T0)
+        });
+        list.apply(
+            DownloadEvent::Failed {
+                id: DownloadId(1),
+                error: "the server answered HTTP 410 Gone".into(),
+                resumable: false,
+            },
+            Instant::now(),
+        );
+        assert_eq!(
+            list.item("a").unwrap().error.as_deref(),
+            Some(NOT_SENT_AGAIN)
+        );
+        // A download the user asked for keeps the server's reason.
+        list.begin(new_item("b", 2, T0 + 1));
+        list.apply(
+            DownloadEvent::Failed {
+                id: DownloadId(2),
+                error: "the server answered HTTP 410 Gone".into(),
+                resumable: false,
+            },
+            Instant::now(),
+        );
+        assert_eq!(
+            list.item("b").unwrap().error.as_deref(),
+            Some("the server answered HTTP 410 Gone")
+        );
+    }
+
+    #[test]
+    fn a_note_is_shown_but_never_stored_or_retried() {
+        let mut list = DownloadList::default();
+        list.add_note(
+            "n".into(),
+            "https://example.com/report".into(),
+            "report".into(),
+            "This file was sent in answer to a form and cannot be saved".into(),
+            T0,
+        );
+        let item = list.item("n").unwrap();
+        assert_eq!(item.state, ItemState::Interrupted { resumable: false });
+        assert!(item.this_run);
+        assert_eq!(list.retry_source("n"), None);
+        assert_eq!(list.remove("n"), Some((vec![], None)));
+    }
+
+    #[test]
+    fn a_finished_file_must_still_be_the_one_downloaded() {
+        let now = Instant::now();
+        let mut list = DownloadList::default();
+        list.begin(new_item("a", 1, T0));
+        list.apply(started(1, "a.zip", Some(5)), now);
+        list.apply(
+            DownloadEvent::Finished {
+                id: DownloadId(1),
+                target_path: "/dl/a.zip".into(),
+                received_bytes: 5,
+            },
+            now,
+        );
+        let same = FileFacts {
+            regular: true,
+            len: 5,
+            id: (7, 42),
+        };
+        list.record_identity("a", Some(same));
+        let item = list.item("a").unwrap().clone();
+        assert!(file_still_matches(&item, Some(same)));
+        // Replaced by another file, grown, a link, or gone.
+        assert!(!file_still_matches(
+            &item,
+            Some(FileFacts {
+                id: (7, 43),
+                ..same
+            })
+        ));
+        assert!(!file_still_matches(
+            &item,
+            Some(FileFacts { len: 6, ..same })
+        ));
+        assert!(!file_still_matches(
+            &item,
+            Some(FileFacts {
+                regular: false,
+                ..same
+            })
+        ));
+        assert!(!file_still_matches(&item, None));
+        list.refresh_file_presence(|_| Some(FileFacts { id: (1, 1), ..same }));
+        assert!(!list.item("a").unwrap().file_exists);
     }
 }

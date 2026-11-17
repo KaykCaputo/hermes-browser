@@ -13,6 +13,7 @@ pub(crate) struct LaunchOptions {
     /// Diagnostics of the downloads work: `--download` and `--download-dir`.
     pub download_url: Option<String>,
     pub download_dir: Option<PathBuf>,
+    pub download_offer_answer: Option<crate::downloads::OfferAnswer>,
 }
 
 impl Default for LaunchOptions {
@@ -27,6 +28,7 @@ impl Default for LaunchOptions {
             experimental_web_features: true,
             download_url: None,
             download_dir: None,
+            download_offer_answer: None,
         }
     }
 }
@@ -72,6 +74,8 @@ Options:
                                    (screenshot and background runs otherwise use a temporary one)
   --download <URL>                 Diagnostic: download this address once the browser is up
   --download-dir <directory>       Diagnostic: save downloads in this directory in this run
+  --download-offer-answer <download|block>
+                                   Diagnostic: answer every 'wants to download' bar this way
   --help                           Print this help and exit
   --version                        Print the version and exit
 
@@ -121,6 +125,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
     let mut experimental_web_features = true;
     let mut download_url = None;
     let mut download_dir = None;
+    let mut download_offer_answer = None;
 
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -169,6 +174,22 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
                 let value = option_value(&mut arguments, "--download-dir", "<directory>")?;
                 download_dir = Some(PathBuf::from(value));
             }
+            "--download-offer-answer" => {
+                let value = option_value(
+                    &mut arguments,
+                    "--download-offer-answer",
+                    "<download|block>",
+                )?;
+                download_offer_answer = Some(match value.as_str() {
+                    "download" => crate::downloads::OfferAnswer::Download,
+                    "block" => crate::downloads::OfferAnswer::Block,
+                    _ => {
+                        return Err(format!(
+                            "invalid --download-offer-answer '{value}': expected download or block"
+                        ));
+                    }
+                });
+            }
             _ if argument.starts_with("-psn_") => {}
             _ if argument.starts_with('-') => {
                 return Err(format!("unknown option '{argument}'"));
@@ -196,6 +217,7 @@ fn parse_launch_options(mut arguments: impl Iterator<Item = String>) -> Result<C
         experimental_web_features,
         download_url,
         download_dir,
+        download_offer_answer,
     }))
 }
 
@@ -280,6 +302,7 @@ mod tests {
                 experimental_web_features: true,
                 download_url: None,
                 download_dir: None,
+                download_offer_answer: None,
             })
         );
     }
@@ -599,5 +622,16 @@ mod tests {
         assert_eq!(options.urls, ["http://127.0.0.1:8000/"]);
         assert_eq!(exit_code(&parse(&["--download"])), Some(2));
         assert_eq!(exit_code(&parse(&["--download-dir"])), Some(2));
+        let CliOutcome::Run(options) = parse(&["--download-offer-answer", "block"]) else {
+            panic!("a bar answer should be accepted");
+        };
+        assert_eq!(
+            options.download_offer_answer,
+            Some(crate::downloads::OfferAnswer::Block)
+        );
+        assert_eq!(
+            exit_code(&parse(&["--download-offer-answer", "maybe"])),
+            Some(2)
+        );
     }
 }

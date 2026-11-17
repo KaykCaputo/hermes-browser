@@ -148,6 +148,26 @@ pub enum BrowserEvent {
         url: String,
         title: Option<String>,
     },
+    // downloads
+    /// The top-level page at `url` is the engine's own "Unknown content type" page: the
+    /// response was of a type it cannot show (`mime_type`). `posted` when the request that
+    /// fetched it was not a GET (a form), which cannot be fetched again. `referrer` is the
+    /// page that request came from, if the engine sent one.
+    DownloadOffered {
+        url: String,
+        mime_type: String,
+        posted: bool,
+        referrer: Option<String>,
+    },
+}
+
+/// A page the engine could not show, offered to the browser as a download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadOffer {
+    pub url: String,
+    pub mime_type: String,
+    pub posted: bool,
+    pub referrer: Option<String>,
 }
 
 impl BrowserEvent {
@@ -275,6 +295,8 @@ impl BrowserState {
             }
             // history: read by the controller's visit tracker, not shown.
             BrowserEvent::PageCommitted { .. } | BrowserEvent::PageTitleAt { .. } => {}
+            // downloads: queued by the controller, not shown.
+            BrowserEvent::DownloadOffered { .. } => {}
         }
     }
 }

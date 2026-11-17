@@ -11,7 +11,8 @@ mod zoom;
 
 pub use address::{AddressResolutionError, NavigationTarget, classify_address, resolve_address};
 pub use browser::{
-    BrowserCommand, BrowserEvent, BrowserState, LoadState, PointerButton, PointerButtonAction,
+    BrowserCommand, BrowserEvent, BrowserState, DownloadOffer, LoadState, PointerButton,
+    PointerButtonAction,
 };
 pub use controller::BrowserController;
 pub use cursor::{ColorScheme, PointerCursor};

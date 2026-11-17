@@ -13,15 +13,18 @@ pub(crate) enum SaveError {
     UnsupportedScheme(String),
     /// The address does not parse.
     InvalidAddress,
+    /// The downloads work is not running (before start-up or after shut-down).
+    NotStarted,
 }
 
 impl std::fmt::Display for SaveError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedScheme(scheme) => {
-                write!(formatter, "“{scheme}:” addresses cannot be saved")
+                write!(formatter, "Pages at “{scheme}:” addresses cannot be saved")
             }
             Self::InvalidAddress => formatter.write_str("the address is not valid"),
+            Self::NotStarted => formatter.write_str("downloads are not available"),
         }
     }
 }

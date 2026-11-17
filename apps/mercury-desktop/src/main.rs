@@ -15,6 +15,7 @@ use talaria_core::{BrowserController, TabActivation};
 use talaria_servo::{RuntimeOptions, record_browser_process_id, run_content_process_if_requested};
 use ui_sync::sync_ui;
 
+mod activation; // placeholder of the tabs lane's module (downloads-ui lane)
 mod callbacks;
 mod cli;
 mod crash_handler;
@@ -131,6 +132,9 @@ fn main() -> Result<ExitCode, Box<dyn Error>> {
         downloads::DownloadOptions {
             folder: options.download_dir.clone(),
             url: options.download_url.clone(),
+            offer_answer: options.download_offer_answer,
+            automated: options.is_automated(),
+            profile_root: profile.paths.as_ref().map(|paths| paths.root.clone()),
         },
     ); // downloads-ui lane
 

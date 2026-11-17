@@ -1,27 +1,49 @@
-//! Where downloads go: the one accessor for the download folder and "ask where to save".
+//! Where downloads go: the one accessor for the download folder.
 
-use std::cell::RefCell;
-use std::path::PathBuf;
+use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
 
 use mercury_settings::DownloadSettings;
 
 thread_local! {
+    static RUN: RefCell<RunFolders> = RefCell::new(RunFolders::default());
+    static ASK_IGNORED_LOGGED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// What this run decided at start-up.
+#[derive(Debug, Default, Clone)]
+struct RunFolders {
     /// `--download-dir`, a diagnostic that overrides the folder for one run.
-    static FOLDER_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    folder_override: Option<PathBuf>,
+    /// For an automated run (`--screenshot`, `--background`): a folder inside its profile,
+    /// so such a run never writes into the user's own folders.
+    automated: Option<PathBuf>,
 }
 
-/// Where a new download is saved.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SaveLocation {
-    Folder(PathBuf),
-    /// Ask with the system's save panel. Not built yet: see `save_location`.
-    Ask {
-        suggested_folder: PathBuf,
-    },
+/// Called once at start-up. `profile_root` is the run's profile (temporary for an automated
+/// run without `--profile-dir`); `None` if the run has no usable profile.
+pub(crate) fn configure(
+    folder_override: Option<PathBuf>,
+    automated: bool,
+    profile_root: Option<&Path>,
+) {
+    let automated = automated.then(|| automated_folder(profile_root));
+    RUN.with(|run| {
+        *run.borrow_mut() = RunFolders {
+            folder_override,
+            automated,
+        };
+    });
 }
 
-pub(crate) fn override_folder(folder: Option<PathBuf>) {
-    FOLDER_OVERRIDE.with(|current| *current.borrow_mut() = folder);
+/// `<profile>/downloads`, or a folder of this process in the temporary directory.
+fn automated_folder(profile_root: Option<&Path>) -> PathBuf {
+    match profile_root {
+        Some(root) => root.join("downloads"),
+        None => {
+            std::env::temp_dir().join(format!("mercury-browser-downloads-{}", std::process::id()))
+        }
+    }
 }
 
 /// The stored download settings. Until the settings work is wired into the application, these
@@ -30,10 +52,20 @@ fn download_settings() -> DownloadSettings {
     DownloadSettings::default()
 }
 
-pub(crate) fn save_location() -> SaveLocation {
-    location_for(
-        &download_settings(),
-        FOLDER_OVERRIDE.with(|current| current.borrow().clone()),
+/// The folder a new download is saved in.
+pub(crate) fn download_folder() -> PathBuf {
+    let run = RUN.with(|run| run.borrow().clone());
+    let settings = download_settings();
+    if settings.ask_where_to_save && !ASK_IGNORED_LOGGED.with(|logged| logged.replace(true)) {
+        eprintln!(
+            "mercury-browser: \"ask where to save\" is not available yet; downloads are saved \
+             in the download folder"
+        );
+    }
+    folder_for(
+        &settings,
+        run.folder_override,
+        run.automated,
         platform_downloads_folder(),
     )
 }
@@ -44,24 +76,19 @@ fn platform_downloads_folder() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("Downloads"))
 }
 
-/// The decision, without the environment. An override wins over everything (it is how
-/// automated runs keep downloads out of the user's folders).
-pub(crate) fn location_for(
+/// The decision, without the environment: the override, then an automated run's own folder,
+/// then the stored folder, then the platform's. "Ask where to save" is not honoured until a
+/// save panel exists (the settings window marks the download settings as stored only).
+pub(crate) fn folder_for(
     settings: &DownloadSettings,
     folder_override: Option<PathBuf>,
+    automated: Option<PathBuf>,
     platform_folder: PathBuf,
-) -> SaveLocation {
-    if let Some(folder) = folder_override {
-        return SaveLocation::Folder(folder);
-    }
-    let folder = settings.directory.clone().unwrap_or(platform_folder);
-    if settings.ask_where_to_save {
-        SaveLocation::Ask {
-            suggested_folder: folder,
-        }
-    } else {
-        SaveLocation::Folder(folder)
-    }
+) -> PathBuf {
+    folder_override
+        .or(automated)
+        .or_else(|| settings.directory.clone())
+        .unwrap_or(platform_folder)
 }
 
 #[cfg(test)]
@@ -69,33 +96,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_stored_folder_the_platform_folder_and_the_override() {
+    fn the_override_then_the_automated_run_then_the_stored_then_the_platform_folder() {
         let platform = PathBuf::from("/Users/me/Downloads");
+        let defaults = DownloadSettings::default();
         assert_eq!(
-            location_for(&DownloadSettings::default(), None, platform.clone()),
-            SaveLocation::Folder(platform.clone())
+            folder_for(&defaults, None, None, platform.clone()),
+            platform
         );
         let stored = DownloadSettings {
             directory: Some("/Volumes/Data/Incoming".into()),
             ask_where_to_save: false,
         };
         assert_eq!(
-            location_for(&stored, None, platform.clone()),
-            SaveLocation::Folder("/Volumes/Data/Incoming".into())
+            folder_for(&stored, None, None, platform.clone()),
+            PathBuf::from("/Volumes/Data/Incoming")
         );
+        // Asking is not available yet: the folder is used.
         let asking = DownloadSettings {
             ask_where_to_save: true,
-            ..stored
+            ..stored.clone()
         };
         assert_eq!(
-            location_for(&asking, None, platform.clone()),
-            SaveLocation::Ask {
-                suggested_folder: "/Volumes/Data/Incoming".into()
-            }
+            folder_for(&asking, None, None, platform.clone()),
+            PathBuf::from("/Volumes/Data/Incoming")
+        );
+        // An automated run never uses the stored or the user's folder.
+        let run = PathBuf::from("/tmp/mercury-browser-profile-x/downloads");
+        assert_eq!(
+            folder_for(&stored, None, Some(run.clone()), platform.clone()),
+            run
         );
         assert_eq!(
-            location_for(&asking, Some("/scratch/dl".into()), platform),
-            SaveLocation::Folder("/scratch/dl".into())
+            folder_for(&defaults, None, Some(run.clone()), platform.clone()),
+            run
         );
+        assert_eq!(
+            folder_for(&stored, Some("/scratch/dl".into()), Some(run), platform),
+            PathBuf::from("/scratch/dl")
+        );
+    }
+
+    #[test]
+    fn an_automated_run_saves_inside_its_profile() {
+        assert_eq!(
+            automated_folder(Some(Path::new("/tmp/mercury-browser-profile-x"))),
+            PathBuf::from("/tmp/mercury-browser-profile-x/downloads")
+        );
+        let without_profile = automated_folder(None);
+        assert!(without_profile.starts_with(std::env::temp_dir()));
+        assert_ne!(without_profile, platform_downloads_folder());
     }
 }

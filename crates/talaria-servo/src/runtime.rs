@@ -181,6 +181,7 @@ impl ServoRuntime {
             content_blocker: Rc::clone(&self.content_blocker),
             screen_metrics: Rc::clone(&self.screen_metrics),
             _after_engine_cleanup: self.after_engine_cleanup.clone(),
+            last_document_request: RefCell::new(None), // downloads
         });
 
         let inner = WebViewBuilder::new(&self.inner, rendering_context)
@@ -209,10 +210,10 @@ impl ServoRuntime {
     }
 
     /// The cookies the engine would send with an HTTP request to `url`, as name and value
-    /// pairs (`HttpOnly` ones included). Asks the network thread and waits for the answer;
-    /// empty if it does not answer.
-    pub fn cookies_for_url(&self, url: &Url) -> Vec<(String, String)> {
-        crate::downloads::cookies_for_url(&self.inner, url)
+    /// pairs (`HttpOnly` ones included), given to `answer` once the network thread replies
+    /// (during a later `spin_event_loop`). Does not block.
+    pub fn cookies_for_url(&self, url: &Url, answer: impl FnOnce(Vec<(String, String)>) + 'static) {
+        crate::downloads::cookies_for_url(&self.inner, url, answer);
     }
 }
 
@@ -338,9 +339,62 @@ struct BrowserDelegate {
     screen_metrics: Rc<Cell<Option<ScreenMetrics>>>,
     /// Servo's `WebView` drops its handle to Servo before its delegate, so this goes after it.
     _after_engine_cleanup: Option<Rc<AfterEngineCleanup>>,
+    /// downloads: the method, URL and referrer of the last top-level request.
+    last_document_request: RefCell<Option<(String, Url, Option<Url>)>>,
 }
 
 impl BrowserDelegate {
+    // downloads
+    fn note_document_request(&self, request: &servo::WebResourceRequest) {
+        if request.is_for_main_frame {
+            *self.last_document_request.borrow_mut() = Some((
+                request.method.to_string(),
+                request.url.clone().into_url(),
+                request
+                    .referrer_url
+                    .clone()
+                    .map(|referrer| referrer.into_url()),
+            ));
+        }
+    }
+
+    // downloads
+    /// A complete top-level page without a title may be Servo's "Unknown content type" page;
+    /// if the page confirms it, the tab is told it was offered a download.
+    fn check_for_download_offer(&self, web_view: &servo::WebView) {
+        if web_view.page_title().is_some_and(|title| !title.is_empty()) {
+            return;
+        }
+        let sender = self.browser_event_sender.clone();
+        let tab_id = self.tab_id;
+        let last_request = self.last_document_request.borrow().clone();
+        web_view.evaluate_javascript(crate::download_offers::RECOGNISE_SCRIPT, move |answer| {
+            let Ok(servo::JSValue::String(answer)) = answer else {
+                return;
+            };
+            let Some((mime_type, url)) = crate::download_offers::parse_answer(&answer) else {
+                return;
+            };
+            let method_and_url = last_request
+                .as_ref()
+                .map(|(method, requested, _)| (method.clone(), requested.clone()));
+            let posted = crate::download_offers::was_posted(method_and_url.as_ref(), &url);
+            let referrer = last_request
+                .filter(|(_, requested, _)| *requested == url)
+                .and_then(|(_, _, referrer)| referrer)
+                .map(String::from);
+            let _sent = sender.send(TabEvent::new(
+                tab_id,
+                BrowserEvent::DownloadOffered {
+                    url: url.to_string(),
+                    mime_type,
+                    posted,
+                    referrer,
+                },
+            ));
+        });
+    }
+
     fn send_browser_event(&self, event: BrowserEvent) {
         let _send_result = self
             .browser_event_sender
@@ -372,6 +426,7 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn load_web_resource(&self, web_view: servo::WebView, load: servo::WebResourceLoad) {
+        self.note_document_request(&load.request); // downloads
         self.content_blocker
             .handle_web_resource_load(Some(&web_view), load);
     }
@@ -405,6 +460,9 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn notify_load_status_changed(&self, _web_view: servo::WebView, status: LoadStatus) {
+        if status == LoadStatus::Complete {
+            self.check_for_download_offer(&_web_view); // downloads
+        }
         match status {
             LoadStatus::Started => {
                 self.load_metrics.borrow_mut().start(Instant::now());
