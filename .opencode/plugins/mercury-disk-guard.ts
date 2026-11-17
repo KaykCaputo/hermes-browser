@@ -4,8 +4,8 @@
 // enforces what .opencode/skills/mercury-build-hygiene/SKILL.md describes, whatever an agent does:
 //
 // - every shell command gets smaller-build settings (no debug info, no incremental files);
-// - every build command runs through scripts/dev/build-slot.sh: at most two builds at once, and
-//   none while less than 40 GB is free;
+// - every build command runs through scripts/dev/build-slot.sh: at most five builds at once, the
+//   cores shared between them, and none while less than 40 GB is free;
 // - copying a build folder (`cp ... target`) is refused;
 // - a worktree's build output (`target/`, `dist/`) is removed as soon as the agent working in it
 //   pushes, when that agent's turn ends, and by a sweep every five minutes once it has
