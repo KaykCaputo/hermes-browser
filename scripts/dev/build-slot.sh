@@ -12,7 +12,7 @@ state_dir="${MERCURY_GUARD_STATE:?MERCURY_GUARD_STATE is not set}"
 command="${MERCURY_GUARDED_COMMAND:?MERCURY_GUARDED_COMMAND is not set}"
 run_shell="${MERCURY_GUARDED_SHELL:-/bin/zsh}"
 worktrees="${MERCURY_GUARDED_WORKTREE:-}"
-slots="${MERCURY_BUILD_SLOTS:-5}"
+slots="${MERCURY_BUILD_SLOTS:-3}"
 min_free_gb="${MERCURY_MIN_FREE_GB:-40}"
 wait_minutes="${MERCURY_SLOT_WAIT_MINUTES:-360}"
 
