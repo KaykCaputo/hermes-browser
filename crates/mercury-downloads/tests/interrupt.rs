@@ -107,24 +107,35 @@ fn an_interrupted_download_resumes_to_the_whole_file() {
     let server = TestServer::start();
     let dir = TempDir::new("interrupt-resume");
     let (manager, events) = manager();
-    let id = manager.start(request(server.url("/file.bin"), &dir.path));
-    // `/file.bin` is fast; interrupting it may land after it finished, which is fine: the point
-    // is that whatever was kept resumes to the right bytes.
+    let id = manager.start(request(server.url("/slow-file.bin"), &dir.path));
+    let started = wait_started(&events, id);
+    wait_for_progress(&events);
     manager.interrupt(id);
-    let first = events_until_done(&events, id);
-    let DownloadEvent::Failed {
-        resumable: true, ..
-    } = terminal(&first)
-    else {
-        return;
-    };
-    let (partial, target) = partial_of(&first[0]);
-    let mut request = request(server.url("/file.bin"), &dir.path);
+    let rest = events_until_done(&events, id);
+    match terminal(&rest) {
+        DownloadEvent::Failed { resumable, .. } => assert!(*resumable, "{rest:#?}"),
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    let (partial, target) = partial_of(&started);
+    let kept = std::fs::metadata(&partial).unwrap().len();
+    assert!(kept > 0 && kept < FILE_LEN as u64, "{kept} bytes kept");
+
+    let mut request = request(server.url("/slow-file.bin"), &dir.path);
     request.resume = Some(resume_from(partial, target.clone(), Some(ETAG), None));
     let second = manager.start(request);
     let rest = events_until_done(&events, second);
-    assert!(matches!(terminal(&rest), DownloadEvent::Finished { .. }));
-    assert_eq!(std::fs::read(target).unwrap(), pattern(FILE_LEN));
+    assert!(
+        matches!(terminal(&rest), DownloadEvent::Finished { .. }),
+        "{rest:#?}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), pattern(FILE_LEN));
+    // The second request asked only for the rest.
+    let ranges: Vec<Option<String>> = server
+        .requests()
+        .iter()
+        .map(|request| request.header("range").map(str::to_owned))
+        .collect();
+    assert_eq!(ranges, [None, Some(format!("bytes={kept}-"))]);
 }
 
 #[test]
@@ -183,4 +194,40 @@ fn removing_a_partial_file_never_follows_a_link() {
     assert!(remove_partial_file(&resume).is_err());
     assert!(partial.symlink_metadata().unwrap().file_type().is_symlink());
     assert_eq!(std::fs::read(&victim).unwrap(), b"victim");
+}
+
+#[test]
+fn shutting_down_returns_by_its_deadline_even_if_a_transfer_is_slow_to_end() {
+    use std::sync::{Arc, Condvar, Mutex};
+
+    let server = TestServer::start();
+    let dir = TempDir::new("shutdown-deadline");
+    // Delivering the terminal event blocks until the test lets it go, after `shut_down` has
+    // returned: the transfer cannot end before then.
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    let held = Arc::clone(&release);
+    let (sender, events) = std::sync::mpsc::channel();
+    let manager = mercury_downloads::DownloadManager::new(move |event| {
+        let terminal = is_terminal(&event);
+        let _ = sender.send(event);
+        if terminal {
+            let (released, wake) = &*held;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+        }
+    })
+    .unwrap();
+    let id = manager.start(request(server.url("/slow-long"), &dir.path));
+    wait_started(&events, id);
+
+    let asked = Instant::now();
+    manager.shut_down(asked + Duration::from_millis(50));
+    let took = asked.elapsed();
+    let (released, wake) = &*release;
+    *released.lock().unwrap() = true;
+    wake.notify_all();
+    // Without the deadline it would wait its three-second grace.
+    assert!(took < Duration::from_secs(2), "{took:?}");
 }

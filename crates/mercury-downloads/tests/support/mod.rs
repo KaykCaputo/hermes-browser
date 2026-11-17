@@ -269,6 +269,23 @@ async fn respond(stream: &mut TcpStream, port: u16, request: &Recorded) -> std::
         "/slow" => slow(stream, SLOW_CHUNKS).await,
         "/slow-long" => slow(stream, 100_000).await,
         "/slow-plain" => slow_plain(stream, 100_000).await,
+        // The pattern file, slowly from the start, at once when a range is asked for.
+        "/slow-file.bin" if request.header("range").is_some() => {
+            ranged(stream, request, &file, Some(ETAG), None).await
+        }
+        "/slow-file.bin" => {
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {FILE_LEN}\r\nETag: {ETAG}\r\n\
+                 Accept-Ranges: bytes\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(head.as_bytes()).await?;
+            for chunk in file.chunks(SLOW_CHUNK) {
+                stream.write_all(chunk).await?;
+                stream.flush().await?;
+                tokio::time::sleep(SLOW_DELAY).await;
+            }
+            Ok(())
+        }
         "/stall" => {
             let head = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {FILE_LEN}\r\nETag: {ETAG}\r\n\

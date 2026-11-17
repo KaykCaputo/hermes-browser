@@ -323,12 +323,21 @@ impl DownloadManager {
     }
 }
 
-impl Drop for DownloadManager {
-    fn drop(&mut self) {
+impl DownloadManager {
+    /// Cancels every running download (their partial files are removed; `interrupt` them first
+    /// to keep resumable ones) and waits for them to clean up until `deadline` at the latest.
+    /// Dropping the manager does the same with a three-second grace.
+    pub fn shut_down(mut self, deadline: Instant) {
+        self.stop(deadline);
+    }
+
+    fn stop(&mut self, deadline: Instant) {
+        let Some(runtime) = self.runtime.take() else {
+            return;
+        };
         for cancel in lock(&self.shared.running).values() {
             let _ = cancel.send(Stop::Cancel);
         }
-        let deadline = Instant::now() + SHUTDOWN_GRACE;
         let mut alive = lock(&self.shared.alive);
         while *alive > 0 {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -344,10 +353,14 @@ impl Drop for DownloadManager {
                 .0;
         }
         drop(alive);
-        if let Some(runtime) = self.runtime.take() {
-            // Never blocks, and is allowed even when dropped from inside an async context.
-            runtime.shutdown_background();
-        }
+        // Never blocks, and is allowed even when dropped from inside an async context.
+        runtime.shutdown_background();
+    }
+}
+
+impl Drop for DownloadManager {
+    fn drop(&mut self) {
+        self.stop(Instant::now() + SHUTDOWN_GRACE);
     }
 }
 
