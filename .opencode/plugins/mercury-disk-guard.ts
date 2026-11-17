@@ -35,14 +35,25 @@ const SWEEP_MS = 5 * 60_000
 const SCRATCH_MAX_AGE_MS = 24 * 60 * 60_000
 const BUILD_OUTPUT = ["target", "dist"]
 
+// Only words in command position count, so prose that merely mentions `make test` (a heredoc, an
+// echo) is left alone: the start of a line, after ; & | ( or a quote, after then/do/else, after
+// wrappers such as `time`, `nice`, `env`, `timeout 600`, and after `VAR=value` assignments.
+const AT_COMMAND =
+  String.raw`(?:^|[\n;&|('"]|\b(?:then|do|else)\b)\s*` +
+  String.raw`(?:(?:time|nice|env|exec|xargs|caffeinate(?:\s+-\w+)*|timeout\s+\S+)\s+)*` +
+  String.raw`(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*(?:\S*\/)?`
+const END = String.raw`(?=$|[\s;&|)'"])`
 // Commands that compile. `make fmt-check`, `deny`, `lint-scripts` and `ci-tools` do not.
-const END = String.raw`(?=$|[\s;&|)])`
 const BUILD_COMMAND = new RegExp(
-  String.raw`(\bcargo\s+(\+\S+\s+)?(build|b|test|t|clippy|check|c|run|r|doc|bench|nextest|rustc|install)${END})` +
-    String.raw`|(\bmake\b[^;&|\n]*\b(lint|test|build|build-release|check|app-macos|package-macos|run|run-release|run-debug|docs-api)${END})` +
-    String.raw`|(scripts/macos/bundle\.sh)`,
+  `${AT_COMMAND}(?:` +
+    String.raw`cargo\s+(?:\+\S+\s+)?(?:build|b|test|t|clippy|check|c|run|r|doc|bench|nextest|rustc|install)${END}` +
+    String.raw`|make\b(?:[^;&|\n]*\s)?(?:lint|test|build|build-release|check|app-macos|package-macos|run|run-release|run-debug|docs-api)${END}` +
+    String.raw`|bundle\.sh${END})`,
 )
-const COPIES_BUILD_OUTPUT = /\b(cp|rsync|ditto)\b[^;&|\n]*\/target(\/|\s|$)/
+// Copies: quotes do not count as a command start here, so quoted text naming a copy is not refused.
+const COPIES_BUILD_OUTPUT = new RegExp(
+  `${AT_COMMAND.replace(String.raw`[\n;&|('"]`, String.raw`[\n;&|(]`)}(?:cp|rsync|ditto)\\s[^;&|\\n]*\\/target(?:\\/|\\s|$)`,
+)
 const PUSHES = /\bgit\b[^;&|\n]*\bpush\b/
 
 function log(message: string) {
