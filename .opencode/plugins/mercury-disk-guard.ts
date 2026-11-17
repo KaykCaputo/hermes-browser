@@ -47,7 +47,7 @@ const END = String.raw`(?=$|[\s;&|)'"])`
 const BUILD_COMMAND = new RegExp(
   `${AT_COMMAND}(?:` +
     String.raw`cargo\s+(?:\+\S+\s+)?(?:build|b|test|t|clippy|check|c|run|r|doc|bench|nextest|rustc|install)${END}` +
-    String.raw`|make\b(?:[^;&|\n]*\s)?(?:lint|test|build|build-release|check|app-macos|package-macos|run|run-release|run-debug|docs-api)${END}` +
+    String.raw`|make\b(?:[^;&|\n]*\s)?(?:lint|test|build|build-release|check|app-macos|package-macos|run|run-release|run-debug|docs-api|"?\$\{?\w+\}?"?)${END}` +
     String.raw`|bundle\.sh${END})`,
 )
 // Copies: quotes do not count as a command start here, so quoted text naming a copy is not refused.
