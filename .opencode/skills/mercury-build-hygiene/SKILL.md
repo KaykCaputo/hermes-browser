@@ -20,7 +20,7 @@ whatever you do. Follow the rules below so that it never deletes something you s
   `scripts/macos/bundle.sh`) runs through `scripts/dev/build-slot.sh`. It waits until one of the two
   build slots is free and at least 40 GB of disk is free, then runs your command unchanged and returns
   its exit status. While it waits it prints `mercury-disk-guard: waiting …`. Exit status 75 means it gave
-  up after two hours.
+  up after six hours.
 - **Copying build output** (`cp`/`rsync`/`ditto` of a `…/target`) is refused.
 - **`target/` and `dist/` of a worktree are deleted:**
   - seconds after a successful `git push` from that worktree;
@@ -42,9 +42,12 @@ whatever you do. Follow the rules below so that it never deletes something you s
 2. **Do a round in this order:** edit → narrow tests (`cargo test -p <crate> <filter>`) → the full `make`
    gates → runs and screenshots with the built binary → commit → push → reply. Pushing deletes the build,
    so finish everything that needs `target/` first.
-3. **Batch your builds.** Each one may wait for a slot and starts cold, so it can take 20–60 minutes.
-   - Give long commands a timeout of at least 120 minutes, or use the shell tool's background mode.
+3. **Batch your builds.** Each one may wait for a slot and starts cold, so it can take 20–60 minutes,
+   plus up to a few hours of waiting when other lanes are building.
+   - Run builds in the shell tool's background mode (no timeout), and end your turn while it waits. You
+     are woken when it finishes.
    - Run the full gates once per round, not after every edit.
+   - Don't set `CARGO_BUILD_JOBS`; with two slots the default fits this Mac. If you must set it, use 4.
 4. **Build only inside your own worktree** under `~/mercury-worktrees/<lane>`.
    - Never set `CARGO_TARGET_DIR` to another place, and never copy or move a `target/`.
    - Never build in the main clone `~/mercury-browser`; only the lead's `integration` worktree builds merges.

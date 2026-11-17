@@ -14,7 +14,7 @@ run_shell="${MERCURY_GUARDED_SHELL:-/bin/zsh}"
 worktrees="${MERCURY_GUARDED_WORKTREE:-}"
 slots="${MERCURY_BUILD_SLOTS:-2}"
 min_free_gb="${MERCURY_MIN_FREE_GB:-40}"
-wait_minutes="${MERCURY_SLOT_WAIT_MINUTES:-120}"
+wait_minutes="${MERCURY_SLOT_WAIT_MINUTES:-360}"
 
 slot_root="$state_dir/slots"
 mkdir -p "$slot_root"
