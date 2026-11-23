@@ -68,6 +68,8 @@ pub enum BrowserCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserEvent {
     FullscreenChanged(bool),
+    MediaPlaying(bool),
+    MediaMuted(bool),
     BlockedRequest,
     AddressChanged {
         url: String,
@@ -94,6 +96,8 @@ pub struct BrowserState {
     page_icon: Option<PageIcon>,
     fullscreen: bool,
     blocked_requests: u32,
+    media_playing: bool,
+    media_muted: bool,
     load_state: LoadState,
     can_go_back: bool,
     can_go_forward: bool,
@@ -107,6 +111,8 @@ impl Default for BrowserState {
             page_icon: None,
             fullscreen: false,
             blocked_requests: 0,
+            media_playing: false,
+            media_muted: false,
             load_state: LoadState::Idle,
             can_go_back: false,
             can_go_forward: false,
@@ -123,6 +129,12 @@ impl BrowserState {
     }
     pub fn page_icon(&self) -> Option<&PageIcon> {
         self.page_icon.as_ref()
+    }
+    pub fn media_playing(&self) -> bool {
+        self.media_playing
+    }
+    pub fn media_muted(&self) -> bool {
+        self.media_muted
     }
     pub fn blocked_requests(&self) -> u32 {
         self.blocked_requests
@@ -142,6 +154,8 @@ impl BrowserState {
 
     pub fn apply(&mut self, event: BrowserEvent) {
         match event {
+            BrowserEvent::MediaPlaying(playing) => self.media_playing = playing,
+            BrowserEvent::MediaMuted(muted) => self.media_muted = muted,
             BrowserEvent::BlockedRequest => {
                 self.blocked_requests = self.blocked_requests.saturating_add(1)
             }
@@ -166,6 +180,8 @@ impl BrowserState {
                 }
                 if matches!(state, LoadState::Loading) && self.load_state != LoadState::Loading {
                     self.blocked_requests = 0;
+                    self.media_playing = false;
+                    self.media_muted = false;
                 }
                 self.load_state = state;
             }

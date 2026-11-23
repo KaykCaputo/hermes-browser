@@ -28,6 +28,8 @@ export enum WebViewPointerButton {
 export struct BrowserTab {
     title: string,
     pinned: bool,
+    media-playing: bool,
+    media-muted: bool,
     icon: image,
     has-icon: bool,
     active: bool,
@@ -102,6 +104,7 @@ component BrowserTabButton inherits Rectangle {
     callback closed;
     callback dragged(int);
     callback toggle-pin;
+    callback toggle-mute;
     in property <bool> vertical;
     in property <bool> collapsed;
     in property <length> tab-step: 190px;
@@ -166,6 +169,14 @@ component BrowserTabButton inherits Rectangle {
             vertical-alignment: center;
         }
 
+        if !root.collapsed && (!root.tab.pinned || root.vertical) && (root.tab.media-playing || root.tab.media-muted): ChromeButton {
+            width: 24px;
+            height: 24px;
+            label: root.tab.media-muted ? "♬̸" : "♬";
+            accessible-label: root.tab.media-muted ? "Unmute tab media" : "Mute tab media";
+            clicked => { root.toggle-mute(); }
+        }
+
         if root.tab.loading: Rectangle {
             width: 6px;
             height: 6px;
@@ -201,6 +212,11 @@ component BrowserTabButton inherits Rectangle {
             MenuItem {
                 title: root.tab.pinned ? "Unpin tab" : "Pin tab";
                 activated => { root.toggle-pin(); }
+            }
+            MenuItem {
+                title: root.tab.media-muted ? "Unmute tab media" : "Mute tab media";
+                enabled: root.tab.media-playing || root.tab.media-muted;
+                activated => { root.toggle-mute(); }
             }
             MenuItem {
                 title: "Close tab";
@@ -269,6 +285,7 @@ export component MainWindow inherits Window {
     callback close-tab(int);
     callback move-tab(int, int);
     callback toggle-tab-pin(int);
+    callback toggle-tab-mute(int);
     in property <bool> vertical-tabs;
     in property <bool> collapsed-tabs;
     callback tab-layout-changed(bool, bool);
@@ -358,6 +375,7 @@ export component MainWindow inherits Window {
                             width: tab.pinned ? 40px : 184px;
                             tab-step: tab.pinned ? 46px : 190px;
                             toggle-pin => { root.toggle-tab-pin(index); }
+                            toggle-mute => { root.toggle-tab-mute(index); }
                             tab: tab;
                             closable: root.tabs.length > 1;
 
@@ -600,6 +618,7 @@ export component MainWindow inherits Window {
                             selected => { root.select-tab(index); }
                             closed => { root.close-tab(index); }
                             toggle-pin => { root.toggle-tab-pin(index); }
+                            toggle-mute => { root.toggle-tab-mute(index); }
                             dragged(steps) => { root.move-tab(index, Math.max(0, Math.min(root.tabs.length - 1, index + steps))); }
                         }
                     }

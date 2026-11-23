@@ -326,6 +326,30 @@ fn connect_servo_runtime(
         });
     });
 
+    let media_requests = Rc::new(RefCell::new(Vec::new()));
+    let media_requests_for_ui = Rc::clone(&media_requests);
+    let media_controller = Rc::clone(&controller);
+    let media_window = window.as_weak();
+    window.on_toggle_tab_mute(move |index| {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        let mut controller = media_controller.borrow_mut();
+        let Some((tab_id, muted)) = controller
+            .tabs()
+            .nth(index)
+            .map(|tab| (tab.id(), !tab.state().media_muted()))
+        else {
+            return;
+        };
+        media_requests_for_ui.borrow_mut().push((tab_id, muted));
+        controller.handle_event(tab_id, BrowserEvent::MediaMuted(muted));
+        if let Some(window) = media_window.upgrade() {
+            sync_ui(&window, &controller);
+            window.window().request_redraw();
+        }
+    });
+
     let mut runtime = None;
     let mut applied_exceptions = HashSet::new();
     let mut last_tab_revision = None;
@@ -373,6 +397,11 @@ fn connect_servo_runtime(
                 if *shield_exceptions.borrow() != applied_exceptions {
                     applied_exceptions.clone_from(&shield_exceptions.borrow());
                     runtime.set_shield_exceptions(applied_exceptions.clone());
+                }
+                for (tab_id, muted) in media_requests.borrow_mut().drain(..) {
+                    if let Some(view) = web_views.get(&tab_id) {
+                        view.set_html_media_muted(muted);
+                    }
                 }
                 runtime.spin_event_loop();
 
@@ -667,6 +696,8 @@ fn sync_ui(window: &MainWindow, controller: &BrowserController) {
             BrowserTab {
                 title: state.page_title().into(),
                 pinned: tab.pinned(),
+                media_playing: state.media_playing(),
+                media_muted: state.media_muted(),
                 icon,
                 has_icon,
                 active: tab.id() == active_tab_id,

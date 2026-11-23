@@ -315,6 +315,15 @@ impl servo::WebViewDelegate for BrowserDelegate {
         self.send_browser_event(BrowserEvent::PageIconChanged { icon });
     }
 
+    fn notify_media_session_event(&self, _: servo::WebView, event: servo::MediaSessionEvent) {
+        if let servo::MediaSessionEvent::PlaybackStateChange(state) = event {
+            self.send_browser_event(BrowserEvent::MediaPlaying(matches!(
+                state,
+                servo::MediaSessionPlaybackState::Playing
+            )));
+        }
+    }
+
     fn notify_load_status_changed(&self, _web_view: servo::WebView, status: LoadStatus) {
         match status {
             LoadStatus::Started => {

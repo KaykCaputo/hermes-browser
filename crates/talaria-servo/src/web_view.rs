@@ -25,6 +25,42 @@ pub struct ServoWebView {
 }
 
 impl ServoWebView {
+    /// Servo 0.8 exposes playback events but no WebView-level audio mixer.
+    /// Control the HTML media in this document and its same-origin frames.
+    pub fn set_html_media_muted(&self, muted: bool) {
+        let script = r#"
+            (function install(frame, muted) {
+                let document;
+                try { document = frame.document; } catch (_) { return; }
+                const key = Symbol.for("hermes-browser.html-media-mute");
+                let state = document[key];
+                if (muted && !state) {
+                    const changed = new Set();
+                    const apply = media => {
+                        if (media instanceof frame.HTMLMediaElement && !media.muted) {
+                            changed.add(media);
+                            media.muted = true;
+                        }
+                    };
+                    state = document[key] = { changed, apply: event => apply(event.target) };
+                    document.addEventListener("play", state.apply, true);
+                    document.querySelectorAll("audio, video").forEach(apply);
+                } else if (!muted && state) {
+                    document.removeEventListener("play", state.apply, true);
+                    for (const media of state.changed) media.muted = false;
+                    delete document[key];
+                }
+                for (let index = 0; index < frame.frames.length; index++) {
+                    install(frame.frames[index], muted);
+                }
+            })(window, MUTED);
+        "#;
+        self.inner.evaluate_javascript(
+            script.replace("MUTED", if muted { "true" } else { "false" }),
+            |_| {},
+        );
+    }
+
     pub(crate) fn new(
         inner: servo::WebView,
         frame_ready: FrameReadySignal,
