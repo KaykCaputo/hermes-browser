@@ -25,6 +25,13 @@ pub enum PointerButtonAction {
     Up,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomAction {
+    In,
+    Out,
+    Reset,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum BrowserCommand {
     Navigate {
@@ -33,6 +40,8 @@ pub enum BrowserCommand {
     GoBack,
     GoForward,
     Reload,
+    Zoom(ZoomAction),
+    ExitFullscreen,
     PointerMoved {
         x: f32,
         y: f32,
@@ -58,6 +67,7 @@ pub enum BrowserCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserEvent {
+    FullscreenChanged(bool),
     AddressChanged {
         url: String,
     },
@@ -81,6 +91,7 @@ pub struct BrowserState {
     url: String,
     page_title: String,
     page_icon: Option<PageIcon>,
+    fullscreen: bool,
     load_state: LoadState,
     can_go_back: bool,
     can_go_forward: bool,
@@ -92,6 +103,7 @@ impl Default for BrowserState {
             url: INITIAL_ADDRESS.to_owned(),
             page_title: DEFAULT_PAGE_TITLE.to_owned(),
             page_icon: None,
+            fullscreen: false,
             load_state: LoadState::Idle,
             can_go_back: false,
             can_go_forward: false,
@@ -109,6 +121,9 @@ impl BrowserState {
     pub fn page_icon(&self) -> Option<&PageIcon> {
         self.page_icon.as_ref()
     }
+    pub fn fullscreen(&self) -> bool {
+        self.fullscreen
+    }
     pub fn load_state(&self) -> &LoadState {
         &self.load_state
     }
@@ -121,6 +136,7 @@ impl BrowserState {
 
     pub fn apply(&mut self, event: BrowserEvent) {
         match event {
+            BrowserEvent::FullscreenChanged(value) => self.fullscreen = value,
             BrowserEvent::AddressChanged { url } => {
                 if self.url != url {
                     self.url = url;
@@ -136,6 +152,9 @@ impl BrowserState {
                 self.page_icon = icon;
             }
             BrowserEvent::LoadStateChanged { state } => {
+                if matches!(state, LoadState::Failed { .. }) {
+                    self.fullscreen = false;
+                }
                 self.load_state = state;
             }
             BrowserEvent::HistoryChanged {

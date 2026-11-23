@@ -7,6 +7,7 @@ use servo::{
     MouseButtonAction as ServoMouseButtonAction, MouseButtonEvent, MouseMoveEvent, NamedKey,
     WebViewPoint, WheelDelta, WheelEvent, WheelMode,
 };
+use std::{cell::Cell, rc::Rc, time::Instant};
 use talaria_core::{
     CompositionState, ImeInput, KeyLocation, KeyState, KeyboardInput, PointerButton,
     PointerButtonAction, TabId, WebView as TalariaWebView,
@@ -17,14 +18,21 @@ use crate::frame_ready::FrameReadySignal;
 use crate::{ServoWebViewError, ViewportSize};
 
 pub struct ServoWebView {
+    last_activation: Rc<Cell<Option<Instant>>>,
     inner: servo::WebView,
     frame_ready: FrameReadySignal,
     tab_id: TabId,
 }
 
 impl ServoWebView {
-    pub(crate) fn new(inner: servo::WebView, frame_ready: FrameReadySignal, tab_id: TabId) -> Self {
+    pub(crate) fn new(
+        inner: servo::WebView,
+        frame_ready: FrameReadySignal,
+        tab_id: TabId,
+        last_activation: Rc<Cell<Option<Instant>>>,
+    ) -> Self {
         Self {
+            last_activation,
             inner,
             frame_ready,
             tab_id,
@@ -83,6 +91,21 @@ impl TalariaWebView for ServoWebView {
         Ok(())
     }
 
+    fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
+        self.inner.exit_fullscreen();
+        Ok(())
+    }
+    fn zoom(&mut self, action: talaria_core::ZoomAction) -> Result<(), Self::Error> {
+        use talaria_core::ZoomAction;
+        let zoom = match action {
+            ZoomAction::In => self.inner.page_zoom() * 1.2,
+            ZoomAction::Out => self.inner.page_zoom() / 1.2,
+            ZoomAction::Reset => 1.0,
+        };
+        self.inner.set_page_zoom(zoom.clamp(0.3, 5.0));
+        Ok(())
+    }
+
     fn reload(&mut self) -> Result<(), Self::Error> {
         self.inner.reload();
         Ok(())
@@ -105,6 +128,9 @@ impl TalariaWebView for ServoWebView {
         x: f32,
         y: f32,
     ) -> Result<(), Self::Error> {
+        if button == PointerButton::Left && action == PointerButtonAction::Down {
+            self.last_activation.set(Some(Instant::now()));
+        }
         let _event_id =
             self.inner
                 .notify_input_event(InputEvent::MouseButton(MouseButtonEvent::new(
@@ -134,11 +160,20 @@ impl TalariaWebView for ServoWebView {
     }
 
     fn set_focus(&mut self, focused: bool) -> Result<(), Self::Error> {
+        if !focused {
+            self.last_activation.set(None);
+        }
         self.inner.set_focused(focused);
         Ok(())
     }
 
     fn keyboard_input(&mut self, event: KeyboardInput) -> Result<(), Self::Error> {
+        if event.state == KeyState::Down
+            && !event.repeat
+            && matches!(event.key.as_str(), "Enter" | " ")
+        {
+            self.last_activation.set(Some(Instant::now()));
+        }
         let keyboard_event = ServoKeyboardEvent::new_without_event(
             servo_key_state(event.state),
             event

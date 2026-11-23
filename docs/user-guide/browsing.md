@@ -13,6 +13,13 @@ Hermes follows familiar desktop-browser shortcuts while keeping the interface in
 | --- | --- |
 | ++ctrl+l++ | Focus and select the address bar |
 | ++ctrl+t++ | Open a new tab |
+| ++ctrl+d++ | Save or remove the current bookmark |
+| ++ctrl+shift+t++ | Reopen the most recently closed tab |
+| ++ctrl+1++ through ++ctrl+8++ | Select a tab by position |
+| ++ctrl+9++ | Select the last tab |
+| Ctrl and + / − / 0 | Zoom in, zoom out, or reset page zoom |
+| ++f11++ | Toggle fullscreen |
+| ++ctrl+q++ | Quit and save open tabs |
 | ++ctrl+w++ | Close the active tab |
 | ++ctrl+tab++ | Select the next tab |
 | ++ctrl+shift+tab++ | Select the previous tab |
@@ -22,7 +29,7 @@ Hermes follows familiar desktop-browser shortcuts while keeping the interface in
 
 ## Mouse and trackpad input
 
-The active page receives pointer movement, primary and secondary button events, and pixel-based scrolling. Navigation controls remain native UI elements outside the web content surface.
+The active page receives pointer movement, primary and secondary button events, and pixel-based scrolling. Links that request a new window after a click or keyboard activation open in a new tab. Video players can request fullscreen. Escape returns to the page.
 
 ## Text input and IME
 
@@ -32,7 +39,7 @@ If typing works in the address bar but not inside a page, first click the page t
 
 ## Background tabs
 
-Background tabs are throttled to reduce needless work. They are not yet suspended or discarded, so every open tab still keeps its WebView and browser state in memory.
+Restoring a session loads the selected page first. Each other saved tab starts loading when you select it. Previously visited background tabs keep their WebViews and are throttled.
 
-There is currently no session restore. Closing Hermes discards open tabs and navigation history.
+Hermes saves the open tab addresses, their order, and the selected tab on normal exit. Reopening a tab loads its address again. Select a saved bookmark from the new-tab page.
 

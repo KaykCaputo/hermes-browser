@@ -1,5 +1,5 @@
 use crate::browser::{BrowserCommand, PointerButton, PointerButtonAction};
-use crate::{ImeInput, KeyboardInput};
+use crate::{ImeInput, KeyboardInput, ZoomAction};
 
 pub trait WebView {
     type Error;
@@ -7,6 +7,8 @@ pub trait WebView {
     fn navigate(&mut self, url: &str) -> Result<(), Self::Error>;
     fn go_back(&mut self) -> Result<(), Self::Error>;
     fn go_forward(&mut self) -> Result<(), Self::Error>;
+    fn exit_fullscreen(&mut self) -> Result<(), Self::Error>;
+    fn zoom(&mut self, action: ZoomAction) -> Result<(), Self::Error>;
     fn reload(&mut self) -> Result<(), Self::Error>;
     fn pointer_moved(&mut self, x: f32, y: f32) -> Result<(), Self::Error>;
     fn pointer_button(
@@ -30,6 +32,8 @@ where
         BrowserCommand::Navigate { url } => web_view.navigate(url.as_str()),
         BrowserCommand::GoBack => web_view.go_back(),
         BrowserCommand::GoForward => web_view.go_forward(),
+        BrowserCommand::ExitFullscreen => web_view.exit_fullscreen(),
+        BrowserCommand::Zoom(action) => web_view.zoom(action),
         BrowserCommand::Reload => web_view.reload(),
         BrowserCommand::PointerMoved { x, y } => web_view.pointer_moved(x, y),
         BrowserCommand::PointerButton {

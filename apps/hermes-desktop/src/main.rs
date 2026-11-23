@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
@@ -8,8 +8,8 @@ use hermes_ui::{BrowserTab, MainWindow, WebViewPointerButton};
 use rendering::BrowserRenderingContext;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{
-    BackendSelector, ComponentHandle, GraphicsAPI, Image, ModelRc, RenderingState, Rgba8Pixel,
-    SharedPixelBuffer, VecModel,
+    BackendSelector, ComponentHandle, GraphicsAPI, Image, Model, ModelRc, RenderingState,
+    Rgba8Pixel, SharedPixelBuffer, VecModel,
 };
 use talaria_core::{
     BrowserCommand, BrowserController, BrowserEvent, CompositionState, ImeInput, KeyLocation,
@@ -25,6 +25,7 @@ use winit::keyboard::{Key, KeyLocation as WinitKeyLocation, ModifiersState, Phys
 
 const MAX_COMMANDS_PER_FRAME: usize = 128;
 
+mod profile;
 mod rendering;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -36,13 +37,42 @@ fn main() -> Result<(), Box<dyn Error>> {
     select_hardware_accelerated_backend()?;
 
     let window = MainWindow::new()?;
-    let controller = Rc::new(RefCell::new(BrowserController::default()));
+    let temporary = std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--temporary-profile");
+    let profile = profile::profile_directory()
+        .filter(|_| !temporary)
+        .and_then(|directory| {
+            profile::Profile::open(&directory)
+                .map_err(|error| {
+                    eprintln!("Session persistence unavailable: {error}");
+                })
+                .ok()
+        });
+    let mut initial = profile
+        .as_ref()
+        .map(|profile| profile.data.restore())
+        .unwrap_or_default();
+    for address in std::env::args()
+        .skip(1)
+        .filter(|arg| arg != "--temporary-profile")
+    {
+        let target = talaria_core::resolve_address(&address)?;
+        if initial.tabs().len() > 1 || !initial.state().url().is_empty() {
+            initial.open_tab();
+        }
+        initial.queue_navigation(target.as_str())?;
+    }
+    let controller = Rc::new(RefCell::new(initial));
     let web_view_focused = Rc::new(Cell::new(false));
 
     connect_servo_runtime(
         &window,
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
+        profile
+            .as_ref()
+            .map(|profile| profile.directory().to_owned()),
     )?;
     sync_ui(&window, &controller.borrow());
     connect_ui_callbacks(
@@ -50,10 +80,73 @@ fn main() -> Result<(), Box<dyn Error>> {
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
     );
-    connect_native_keyboard_input(&window, controller, web_view_focused);
+    let profile = Rc::new(RefCell::new(profile));
+    connect_bookmarks(&window, &controller, &profile);
+    connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
 
     window.run()?;
+    drop(window);
+    if let Some(profile) = profile.borrow_mut().as_mut() {
+        profile.data.remember_tabs(&controller.borrow());
+        profile.save()?;
+    }
     Ok(())
+}
+
+fn connect_bookmarks(
+    window: &MainWindow,
+    controller: &Rc<RefCell<BrowserController>>,
+    profile: &Rc<RefCell<Option<profile::Profile>>>,
+) {
+    if let Some(profile) = profile.borrow().as_ref() {
+        window.set_profile_available(true);
+        set_bookmarks(window, &profile.data.bookmarks);
+    }
+    let weak = window.as_weak();
+    let controller = Rc::clone(controller);
+    let profile = Rc::clone(profile);
+    window.on_toggle_bookmark(move || {
+        let Some(window) = weak.upgrade() else { return };
+        let mut borrowed = profile.borrow_mut();
+        let Some(profile) = borrowed.as_mut() else {
+            return;
+        };
+        let controller = controller.borrow();
+        let address = controller.state().url();
+        if address.is_empty() {
+            return;
+        }
+        let bookmarks = &mut profile.data.bookmarks;
+        if let Some(index) = bookmarks.iter().position(|saved| saved == address) {
+            bookmarks.remove(index);
+        } else {
+            bookmarks.push(address.to_owned());
+        }
+        set_bookmarks(&window, bookmarks);
+        profile.data.remember_tabs(&controller);
+        if let Err(error) = profile.save() {
+            eprintln!("Could not save bookmarks: {error}");
+        }
+    });
+}
+
+fn sync_bookmark_state(window: &MainWindow) {
+    window.set_is_bookmarked(
+        window
+            .get_bookmarks()
+            .iter()
+            .any(|address| address == window.get_committed_address()),
+    );
+}
+
+fn set_bookmarks(window: &MainWindow, bookmarks: &[String]) {
+    window.set_bookmarks(ModelRc::new(VecModel::from(
+        bookmarks
+            .iter()
+            .map(|url| url.as_str().into())
+            .collect::<Vec<_>>(),
+    )));
+    sync_bookmark_state(window);
 }
 
 fn use_automatic_gpu_selection() {
@@ -93,6 +186,7 @@ fn connect_servo_runtime(
     window: &MainWindow,
     controller: Rc<RefCell<BrowserController>>,
     web_view_focused: Rc<Cell<bool>>,
+    profile_directory: Option<std::path::PathBuf>,
 ) -> Result<(), slint::SetRenderingNotifierError> {
     let weak_window_for_waker = window.as_weak();
     let event_loop_waker = EventLoopWaker::new(move || {
@@ -101,7 +195,8 @@ fn connect_servo_runtime(
         });
     });
 
-    let runtime = ServoRuntime::new(event_loop_waker);
+    let mut runtime = None;
+    let mut last_tab_revision = None;
     let weak_window_for_rendering = window.as_weak();
     let mut rendering_context: Option<Rc<BrowserRenderingContext>> = None;
     let mut wgpu_device: Option<slint::wgpu_29::wgpu::Device> = None;
@@ -130,31 +225,19 @@ fn connect_servo_runtime(
                     );
                     return;
                 };
-                let window_size = window.window().size();
-                let Some(viewport_size) = ViewportSize::new(window_size.width, window_size.height)
-                else {
-                    window
-                        .set_content_message("The OpenGL viewport has invalid dimensions.".into());
-                    return;
-                };
-
-                let context = match BrowserRenderingContext::new(viewport_size, device) {
-                    Ok(context) => context,
-                    Err(error) => {
-                        window.set_content_message(
-                            format!("Failed to create Servo's rendering context: {error}").into(),
-                        );
-                        return;
-                    }
-                };
-
-                rendering_context = Some(Rc::new(context));
                 wgpu_device = Some(device.clone());
-                window.set_content_message(
-                    "Offscreen rendering initialized. Waiting for Servo WebView.".into(),
-                );
             }
             RenderingState::BeforeRendering => {
+                if runtime.is_none() {
+                    let tabs = controller.borrow();
+                    if tabs.state().url().is_empty() && tabs.pending_navigations().next().is_none()
+                    {
+                        return;
+                    }
+                }
+                let runtime = runtime.get_or_insert_with(|| {
+                    ServoRuntime::with_profile(event_loop_waker.clone(), profile_directory.clone())
+                });
                 runtime.spin_event_loop();
 
                 let Some(window) = weak_window_for_rendering.upgrade() else {
@@ -165,9 +248,6 @@ fn connect_servo_runtime(
                     sync_ui(&window, &controller.borrow());
                 }
 
-                let Some(rendering_context) = rendering_context.as_ref() else {
-                    return;
-                };
                 let scale_factor = window.window().scale_factor();
                 let Some(viewport_size) = ViewportSize::from_logical(
                     window.get_web_view_width(),
@@ -179,21 +259,82 @@ fn connect_servo_runtime(
                     return;
                 };
 
-                let (active_tab_id, tab_ids) = {
-                    let controller = controller.borrow();
-                    let active_tab_id = controller.active_tab_id();
-                    let tab_ids = controller.tabs().map(|tab| tab.id()).collect::<Vec<_>>();
-                    (active_tab_id, tab_ids)
-                };
-                web_views.retain(|tab_id, _| tab_ids.contains(tab_id));
-                for tab_id in tab_ids {
-                    if web_views.contains_key(&tab_id) {
-                        continue;
+                if rendering_context.is_none() {
+                    let Some(device) = wgpu_device.as_ref() else {
+                        return;
+                    };
+                    match BrowserRenderingContext::new(viewport_size, device) {
+                        Ok(context) => rendering_context = Some(Rc::new(context)),
+                        Err(error) => {
+                            window.set_web_view_visible(false);
+                            window.set_content_message(
+                                format!("Failed to create Servo's rendering context: {error}")
+                                    .into(),
+                            );
+                            return;
+                        }
                     }
-
+                }
+                let Some(rendering_context) = rendering_context.as_ref() else {
+                    return;
+                };
+                while let Some(request) = runtime.next_tab_request() {
+                    match request {
+                        talaria_servo::TabRequest::Open(opener, request) => {
+                            if controller.borrow().active_tab_id() != opener {
+                                continue;
+                            }
+                            let tab_id = controller.borrow_mut().open_tab();
+                            let view = runtime.create_auxiliary_web_view(
+                                request,
+                                rendering_context.clone(),
+                                scale_factor,
+                                tab_id,
+                                browser_event_sender.clone(),
+                            );
+                            web_views.insert(tab_id, view);
+                        }
+                        talaria_servo::TabRequest::Close(tab_id) => {
+                            controller.borrow_mut().close_tab(tab_id);
+                        }
+                    }
+                    sync_ui(&window, &controller.borrow());
+                }
+                let (active_tab_id, missing_views) = {
+                    let tabs = controller.borrow();
+                    let active = tabs.active_tab_id();
+                    if last_tab_revision != Some(tabs.tab_revision()) {
+                        if !web_views.is_empty() {
+                            let live: HashSet<_> = tabs.tabs().map(|tab| tab.id()).collect();
+                            web_views.retain(|id, _| live.contains(id));
+                        }
+                        last_tab_revision = Some(tabs.tab_revision());
+                    }
+                    let mut missing = HashMap::new();
+                    if web_views.len() < tabs.tabs().len() {
+                        for id in tabs
+                            .pending_navigations()
+                            .filter(|id| !web_views.contains_key(id))
+                        {
+                            missing.entry(id).or_insert_with(|| NEW_TAB_URL.to_owned());
+                        }
+                        if !web_views.contains_key(&active) && !tabs.state().url().is_empty() {
+                            missing
+                                .entry(active)
+                                .or_insert_with(|| tabs.state().url().to_owned());
+                        }
+                    }
+                    (active, missing)
+                };
+                let active_view_created = missing_views.contains_key(&active_tab_id);
+                for (tab_id, fallback_url) in missing_views {
+                    let initial_url = controller
+                        .borrow_mut()
+                        .take_initial_navigation(tab_id)
+                        .unwrap_or(fallback_url);
                     let create_result = runtime.create_web_view(
                         rendering_context.clone(),
-                        NEW_TAB_URL,
+                        &initial_url,
                         scale_factor,
                         tab_id,
                         browser_event_sender.clone(),
@@ -211,8 +352,10 @@ fn connect_servo_runtime(
                     }
                 }
 
-                let active_tab_changed = visible_tab_id != Some(active_tab_id);
+                let active_tab_changed =
+                    active_view_created || visible_tab_id != Some(active_tab_id);
                 if active_tab_changed {
+                    window.set_web_view_texture(Image::default());
                     if let Some(previous_tab_id) = visible_tab_id
                         && let Some(previous_web_view) = web_views.get_mut(&previous_tab_id)
                     {
@@ -221,7 +364,7 @@ fn connect_servo_runtime(
                     }
 
                     if let Some(active_web_view) = web_views.get_mut(&active_tab_id) {
-                        // Servo 0.7 couples visibility and throttling: show() resumes the active
+                        // Servo couples visibility and throttling: show() resumes the active
                         // pipeline and hide() throttles background tabs.
                         active_web_view.show();
                         let _focus_result = active_web_view.set_focus(web_view_focused.get());
@@ -345,8 +488,21 @@ fn dispatch_pending_commands<W: TalariaWebView>(
 
 fn sync_ui(window: &MainWindow, controller: &BrowserController) {
     let state = controller.active_state();
+    if window.get_page_fullscreen() != state.fullscreen() {
+        window.set_page_fullscreen(state.fullscreen());
+        window
+            .window()
+            .set_fullscreen(state.fullscreen() || window.get_user_fullscreen());
+    }
     window.set_page_title(state.page_title().into());
-    window.set_address(state.url().into());
+    if window.get_committed_address() != state.url()
+        || window.get_displayed_tab() != controller.active_tab_id().value().to_string()
+    {
+        window.set_address(state.url().into());
+        window.set_committed_address(state.url().into());
+        window.set_displayed_tab(controller.active_tab_id().value().to_string().into());
+        sync_bookmark_state(window);
+    }
     window.set_is_new_tab(state.url().is_empty());
     window.set_can_go_back(state.can_go_back());
     window.set_can_go_forward(state.can_go_forward());
@@ -385,8 +541,8 @@ fn sync_ui(window: &MainWindow, controller: &BrowserController) {
 
     let content_message = match state.load_state() {
         LoadState::Failed { message } => message.as_str(),
-        _ if state.url().is_empty() => "Search privately with DuckDuckGo.",
-        LoadState::Idle => "Servo runtime initialized. Waiting for WebView.",
+        _ if state.url().is_empty() => "",
+        LoadState::Idle => "",
         LoadState::Loading => "The page is loading.",
         LoadState::Loaded => "",
     };
@@ -423,6 +579,7 @@ fn connect_ui_callbacks(
             return;
         };
 
+        let navigated = result.is_ok();
         if let Err(error) = result {
             let tab_id = navigate_controller.borrow().active_tab_id();
             navigate_controller.borrow_mut().handle_event(
@@ -435,6 +592,9 @@ fn connect_ui_callbacks(
             );
         }
         sync_ui(&window, &navigate_controller.borrow());
+        if navigated {
+            window.invoke_focus_web_content();
+        }
         window.window().request_redraw();
     });
 
@@ -622,6 +782,7 @@ fn connect_native_keyboard_input(
                     window.window().request_redraw();
                 }
                 WindowEvent::Focused(false) => {
+                    modifiers = ModifiersState::empty();
                     dismiss_composition(&controller, &mut composition_tab_id);
                 }
                 _ => {}
@@ -631,6 +792,68 @@ fn connect_native_keyboard_input(
         });
 }
 
+#[derive(Debug, PartialEq)]
+enum Shortcut {
+    Command(BrowserCommand),
+    AddressBar,
+    NewTab,
+    CloseTab,
+    ReopenTab,
+    CycleTabs { backwards: bool },
+    SelectTab(usize),
+    Bookmark,
+    Fullscreen,
+    Quit,
+}
+
+fn browser_shortcut(
+    key: &Key,
+    modifiers: ModifiersState,
+    page_fullscreen: bool,
+) -> Option<Shortcut> {
+    use talaria_core::ZoomAction;
+    use winit::keyboard::NamedKey;
+
+    let primary = (modifiers.control_key() || modifiers.super_key()) && !modifiers.alt_key();
+    Some(match key {
+        Key::Character(key) if primary => match key.to_ascii_lowercase().as_str() {
+            "l" => Shortcut::AddressBar,
+            "t" if modifiers.shift_key() => Shortcut::ReopenTab,
+            "t" => Shortcut::NewTab,
+            "w" => Shortcut::CloseTab,
+            "q" => Shortcut::Quit,
+            "d" => Shortcut::Bookmark,
+            "r" => Shortcut::Command(BrowserCommand::Reload),
+            "+" | "=" => Shortcut::Command(BrowserCommand::Zoom(ZoomAction::In)),
+            "-" => Shortcut::Command(BrowserCommand::Zoom(ZoomAction::Out)),
+            "0" => Shortcut::Command(BrowserCommand::Zoom(ZoomAction::Reset)),
+            number if !modifiers.shift_key() => {
+                let digit = number
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|digit| (1..=9).contains(digit))?;
+                Shortcut::SelectTab(digit)
+            }
+            _ => return None,
+        },
+        Key::Named(NamedKey::Tab) if primary => Shortcut::CycleTabs {
+            backwards: modifiers.shift_key(),
+        },
+        Key::Named(NamedKey::F5) => Shortcut::Command(BrowserCommand::Reload),
+        Key::Named(NamedKey::F11 | NamedKey::Escape) if page_fullscreen => {
+            Shortcut::Command(BrowserCommand::ExitFullscreen)
+        }
+        Key::Named(NamedKey::F11) => Shortcut::Fullscreen,
+        Key::Named(NamedKey::ArrowLeft) if modifiers == ModifiersState::ALT => {
+            Shortcut::Command(BrowserCommand::GoBack)
+        }
+        Key::Named(NamedKey::ArrowRight) if modifiers == ModifiersState::ALT => {
+            Shortcut::Command(BrowserCommand::GoForward)
+        }
+        _ => return None,
+    })
+}
+
 fn handle_browser_shortcut(
     window: &MainWindow,
     controller: &RefCell<BrowserController>,
@@ -638,96 +861,69 @@ fn handle_browser_shortcut(
     event: &winit::event::KeyEvent,
     modifiers: ModifiersState,
 ) -> bool {
-    let primary = modifiers.control_key() || modifiers.super_key();
-    let character = match &event.logical_key {
-        Key::Character(character) => Some(character.to_ascii_lowercase()),
-        _ => None,
+    let Some(shortcut) =
+        browser_shortcut(&event.logical_key, modifiers, window.get_page_fullscreen())
+    else {
+        return false;
     };
-    let is_pressed = event.state == ElementState::Pressed;
-
-    let shortcut = if primary && character.as_deref() == Some("l") {
-        if is_pressed {
-            if web_view_focused.replace(false) {
-                controller
-                    .borrow_mut()
-                    .queue_command(BrowserCommand::FocusChanged { focused: false });
-            }
-            window.invoke_focus_address_bar();
-        }
-        true
-    } else if primary && character.as_deref() == Some("t") {
-        if is_pressed {
-            if web_view_focused.replace(false) {
-                controller
-                    .borrow_mut()
-                    .queue_command(BrowserCommand::FocusChanged { focused: false });
-            }
-            controller.borrow_mut().open_tab();
-            sync_ui(window, &controller.borrow());
-            window.invoke_focus_address_bar();
-        }
-        true
-    } else if primary && character.as_deref() == Some("w") {
-        if is_pressed {
-            let active_tab_id = controller.borrow().active_tab_id();
-            controller.borrow_mut().close_tab(active_tab_id);
-            sync_ui(window, &controller.borrow());
-        }
-        true
-    } else if primary
-        && matches!(
-            event.logical_key,
-            Key::Named(winit::keyboard::NamedKey::Tab)
-        )
-    {
-        if is_pressed {
-            controller
-                .borrow_mut()
-                .select_next_tab(modifiers.shift_key());
-            sync_ui(window, &controller.borrow());
-        }
-        true
-    } else if (primary && character.as_deref() == Some("r"))
-        || matches!(event.logical_key, Key::Named(winit::keyboard::NamedKey::F5))
-    {
-        if is_pressed {
-            controller
-                .borrow_mut()
-                .queue_command(BrowserCommand::Reload);
-        }
-        true
-    } else if modifiers.alt_key()
-        && matches!(
-            event.logical_key,
-            Key::Named(winit::keyboard::NamedKey::ArrowLeft)
-        )
-    {
-        if is_pressed {
-            controller
-                .borrow_mut()
-                .queue_command(BrowserCommand::GoBack);
-        }
-        true
-    } else if modifiers.alt_key()
-        && matches!(
-            event.logical_key,
-            Key::Named(winit::keyboard::NamedKey::ArrowRight)
-        )
-    {
-        if is_pressed {
-            controller
-                .borrow_mut()
-                .queue_command(BrowserCommand::GoForward);
-        }
-        true
-    } else {
-        false
-    };
-
-    if shortcut && is_pressed {
-        window.window().request_redraw();
+    if event.state != ElementState::Pressed || event.repeat {
+        return true;
     }
-    shortcut
+
+    match shortcut {
+        Shortcut::Command(command) => controller.borrow_mut().queue_command(command),
+        Shortcut::AddressBar | Shortcut::NewTab => {
+            if web_view_focused.replace(false) {
+                controller
+                    .borrow_mut()
+                    .queue_command(BrowserCommand::FocusChanged { focused: false });
+            }
+            if window.get_page_fullscreen() {
+                controller
+                    .borrow_mut()
+                    .queue_command(BrowserCommand::ExitFullscreen);
+            }
+            if shortcut == Shortcut::NewTab {
+                controller.borrow_mut().open_tab();
+                sync_ui(window, &controller.borrow());
+            }
+            window.invoke_focus_address_bar();
+        }
+        Shortcut::ReopenTab => {
+            if controller.borrow_mut().reopen_closed_tab() {
+                sync_ui(window, &controller.borrow());
+            }
+        }
+        Shortcut::CloseTab => {
+            let active = controller.borrow().active_tab_id();
+            controller.borrow_mut().close_tab(active);
+            sync_ui(window, &controller.borrow());
+        }
+        Shortcut::CycleTabs { backwards } => {
+            controller.borrow_mut().select_next_tab(backwards);
+            sync_ui(window, &controller.borrow());
+        }
+        Shortcut::SelectTab(digit) => {
+            let index = if digit == 9 {
+                controller.borrow().tabs().len() - 1
+            } else {
+                digit - 1
+            };
+            controller.borrow_mut().select_tab_at(index);
+            sync_ui(window, &controller.borrow());
+        }
+        Shortcut::Bookmark => window.invoke_toggle_bookmark(),
+        Shortcut::Fullscreen => {
+            let fullscreen = !window.window().is_fullscreen();
+            window.set_user_fullscreen(fullscreen);
+            window.window().set_fullscreen(fullscreen);
+        }
+        Shortcut::Quit => {
+            let _ = slint::quit_event_loop();
+        }
+    }
+    window.window().request_redraw();
+    true
 }
 
 fn keyboard_input_from_winit(
@@ -851,6 +1047,23 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn tab_shortcuts_distinguish_shift_and_leave_altgr_to_the_page() {
+        let key = Key::Character("T".into());
+        assert_eq!(
+            browser_shortcut(&key, ModifiersState::CONTROL, false),
+            Some(Shortcut::NewTab)
+        );
+        assert_eq!(
+            browser_shortcut(&key, ModifiersState::CONTROL | ModifiersState::SHIFT, false),
+            Some(Shortcut::ReopenTab)
+        );
+        assert_eq!(
+            browser_shortcut(&key, ModifiersState::CONTROL | ModifiersState::ALT, false),
+            None
+        );
+    }
+
     #[derive(Default)]
     struct CountingWebView {
         reload_count: usize,
@@ -866,6 +1079,12 @@ mod tests {
             Ok(())
         }
         fn go_forward(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+        fn zoom(&mut self, _action: talaria_core::ZoomAction) -> Result<(), Self::Error> {
             Ok(())
         }
         fn reload(&mut self) -> Result<(), Self::Error> {

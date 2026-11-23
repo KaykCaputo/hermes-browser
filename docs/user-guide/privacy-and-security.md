@@ -17,14 +17,16 @@ There are currently no per-site controls, exception lists, cosmetic filtering co
 
 ## Local data
 
-The current preview does not implement persistent sessions, history, bookmarks, settings, extensions, or private profiles. Do not interpret the absence of those features as a complete privacy mode: Servo and native media libraries may still use normal process and system resources during a session.
+On Linux, Hermes stores bookmarks and open tab addresses in `$XDG_STATE_HOME/hermes-browser/browser.json` (by default `~/.local/state/hermes-browser/browser.json`). Servo uses the same profile directory for site data, including cookies, HSTS and its HTTP authentication cache. These files contain personal browsing data. Close Hermes before removing its profile directory to clear it.
+
+Launch with `--temporary-profile` to skip opening or saving the normal profile. Native libraries can still use system caches. When another process holds the profile lock, new instances use an in-memory profile.
 
 ## Sandboxing status
 
 !!! danger "Do not use Hermes for sensitive browsing"
     Web content runs in separate Servo content processes, but those child processes currently have no operating-system sandbox restrictions. Process isolation improves fault containment, but it is not the hardened security boundary expected in a mature browser.
 
-Hermes enables Servo 0.7.0 multiprocess mode: navigation, visible rendering, input, audio, and video cross the process boundary. The separate Linux `gaol` sandbox mode is still unreliable, so Hermes keeps `sandbox` disabled until it can enforce restrictions without breaking content processes.
+Hermes enables Servo multiprocess mode: navigation, visible rendering, input, audio, and video cross the process boundary. The separate Linux `gaol` sandbox mode is still unreliable, so Hermes keeps `sandbox` disabled until it can enforce restrictions without breaking content processes.
 
 Use Hermes with local test pages, known public sites, and non-sensitive data. Do not enter passwords, payment information, private documents, or account recovery details.
 

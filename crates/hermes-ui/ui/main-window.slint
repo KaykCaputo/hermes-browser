@@ -1,3 +1,5 @@
+import { ListView } from "std-widgets.slint";
+
 export enum WebViewPointerButton {
     left,
     middle,
@@ -18,6 +20,9 @@ component ChromeButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked;
 
+    accessible-role: button;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
     width: 36px;
     height: 34px;
     border-radius: 7px;
@@ -156,6 +161,14 @@ export component MainWindow inherits Window {
     out property <length> web-view-height: web-view-area.height;
     in property <string> content-message: "Type an address or search with DuckDuckGo.";
 
+    in property <bool> page-fullscreen;
+    in property <bool> user-fullscreen;
+    in property <string> committed-address;
+    in property <string> displayed-tab;
+    in property <[string]> bookmarks;
+    in property <bool> profile-available;
+    in property <bool> is-bookmarked;
+    callback toggle-bookmark();
     callback navigate(string);
     callback go-back;
     callback go-forward;
@@ -167,6 +180,10 @@ export component MainWindow inherits Window {
     callback web-view-pointer-button(WebViewPointerButton, bool, float, float);
     callback web-view-scrolled(float, float, float, float);
     callback web-view-focus-changed(bool);
+
+    public function focus-web-content() {
+        web-view-focus.focus();
+    }
 
     public function focus-address-bar() {
         address-input.focus();
@@ -197,7 +214,8 @@ export component MainWindow inherits Window {
         spacing: 0px;
 
         Rectangle {
-            height: 48px;
+            visible: !root.page-fullscreen;
+            height: root.page-fullscreen ? 0px : 48px;
             background: #0b0f14;
 
             HorizontalLayout {
@@ -236,6 +254,7 @@ export component MainWindow inherits Window {
                     width: 34px;
                     height: 34px;
                     label: "+";
+                    accessible-label: "New tab";
                     clicked => {
                         root.new-tab();
                     }
@@ -244,7 +263,8 @@ export component MainWindow inherits Window {
         }
 
         Rectangle {
-            height: 60px;
+            visible: !root.page-fullscreen;
+            height: root.page-fullscreen ? 0px : 60px;
             background: #11171f;
 
             HorizontalLayout {
@@ -256,6 +276,7 @@ export component MainWindow inherits Window {
 
                 ChromeButton {
                     label: "‹";
+                    accessible-label: "Back";
                     enabled: root.can-go-back;
                     clicked => {
                         root.go-back();
@@ -264,6 +285,7 @@ export component MainWindow inherits Window {
 
                 ChromeButton {
                     label: "›";
+                    accessible-label: "Forward";
                     enabled: root.can-go-forward;
                     clicked => {
                         root.go-forward();
@@ -272,6 +294,7 @@ export component MainWindow inherits Window {
 
                 ChromeButton {
                     label: "↻";
+                    accessible-label: "Reload";
                     clicked => {
                         root.reload();
                     }
@@ -286,6 +309,7 @@ export component MainWindow inherits Window {
                     background: #1a222c;
 
                     address-input := TextInput {
+                        accessible-label: "Address or search";
                         x: 14px;
                         width: parent.width - 28px;
                         height: parent.height;
@@ -301,7 +325,10 @@ export component MainWindow inherits Window {
                 }
 
                 ChromeButton {
-                    label: "⋮";
+                    label: root.is-bookmarked ? "★" : "☆";
+                    accessible-label: root.is-bookmarked ? "Remove bookmark" : "Bookmark this page";
+                    enabled: root.profile-available && !root.is-new-tab;
+                    clicked => { root.toggle-bookmark(); }
                 }
             }
 
@@ -366,12 +393,6 @@ export component MainWindow inherits Window {
                             horizontal-alignment: center;
                         }
 
-                        Text {
-                            text: "Fast, lightweight and private by default";
-                            color: #8c99a9;
-                            font-size: 14px;
-                            horizontal-alignment: center;
-                        }
 
                         Rectangle {
                             height: 48px;
@@ -431,7 +452,34 @@ export component MainWindow inherits Window {
                             }
                         }
 
-                        Text {
+                        if root.bookmarks.length > 0: Text {
+                            text: "Bookmarks";
+                            color: #a4b2bf;
+                            font-size: 13px;
+                            font-weight: 600;
+                        }
+                        if root.bookmarks.length > 0: ListView {
+                            height: 88px;
+                            for address in root.bookmarks: Rectangle {
+                                height: 30px;
+                                background: link.has-hover ? #202c38 : transparent;
+                                Text {
+                                    x: 12px;
+                                    width: parent.width - 24px;
+                                    text: address;
+                                    color: #71c5ff;
+                                    overflow: elide;
+                                    vertical-alignment: center;
+                                }
+                                accessible-role: button;
+                                accessible-label: address;
+                                accessible-action-default => { root.navigate(address); }
+                                link := TouchArea {
+                                    clicked => { root.navigate(address); }
+                                }
+                            }
+                        }
+                        if root.content-message != "": Text {
                             text: root.content-message;
                             color: #727f8f;
                             font-size: 12px;

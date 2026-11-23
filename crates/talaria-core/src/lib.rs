@@ -9,6 +9,7 @@ mod web_view;
 pub use address::{AddressResolutionError, NavigationTarget, classify_address, resolve_address};
 pub use browser::{
     BrowserCommand, BrowserEvent, BrowserState, LoadState, PointerButton, PointerButtonAction,
+    ZoomAction,
 };
 pub use controller::BrowserController;
 pub use input::{

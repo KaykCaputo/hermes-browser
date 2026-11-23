@@ -10,5 +10,5 @@ mod web_view;
 pub use content_process::{ContentProcessArgumentError, run_content_process_if_requested};
 pub use error::ServoWebViewError;
 pub use opengl_context::ViewportSize;
-pub use runtime::{EventLoopWaker, NEW_TAB_URL, ServoRuntime};
+pub use runtime::{EventLoopWaker, NEW_TAB_URL, ServoRuntime, TabRequest};
 pub use web_view::ServoWebView;

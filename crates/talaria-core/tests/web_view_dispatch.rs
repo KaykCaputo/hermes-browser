@@ -9,6 +9,7 @@ enum FakeCall {
     GoBack,
     GoForward,
     Reload,
+    Zoom(talaria_core::ZoomAction),
     PointerMoved {
         x: f32,
         y: f32,
@@ -71,6 +72,12 @@ impl WebView for FakeWebView {
         self.record(FakeCall::GoForward)
     }
 
+    fn exit_fullscreen(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+    fn zoom(&mut self, action: talaria_core::ZoomAction) -> Result<(), Self::Error> {
+        self.record(FakeCall::Zoom(action))
+    }
     fn reload(&mut self) -> Result<(), Self::Error> {
         self.record(FakeCall::Reload)
     }

@@ -12,6 +12,9 @@ gleam.workspace = true
 glow.workspace = true
 hermes-ui = { path = "../../crates/hermes-ui" }
 log.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
 servo.workspace = true
 slint.workspace = true
 surfman.workspace = true

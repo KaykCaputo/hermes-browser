@@ -1,8 +1,8 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Instant;
 
 use euclid::Scale;
@@ -58,7 +58,14 @@ impl servo::EventLoopWaker for EventLoopWaker {
     }
 }
 
+pub enum TabRequest {
+    Open(TabId, servo::CreateNewWebViewRequest),
+    Close(TabId),
+}
+
 pub struct ServoRuntime {
+    tab_requests: Receiver<TabRequest>,
+    tab_request_sender: Sender<TabRequest>,
     inner: servo::Servo,
     redraw_waker: EventLoopWaker,
     content_blocker: Rc<ContentBlocker>,
@@ -66,10 +73,20 @@ pub struct ServoRuntime {
 
 impl ServoRuntime {
     pub fn new(event_loop_waker: EventLoopWaker) -> Self {
+        Self::with_profile(event_loop_waker, None)
+    }
+
+    pub fn with_profile(
+        event_loop_waker: EventLoopWaker,
+        config_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         ensure_crypto_provider();
 
         let redraw_waker = event_loop_waker.clone();
-        let options = hermes_options();
+        let options = Opts {
+            config_dir,
+            ..hermes_options()
+        };
         let multiprocess_enabled = options.multiprocess;
         let sandbox_enabled = options.sandbox;
         let inner = ServoBuilder::default()
@@ -95,7 +112,10 @@ impl ServoRuntime {
             content_blocker: Rc::clone(&content_blocker),
         }));
 
+        let (tab_request_sender, tab_requests) = mpsc::channel();
         Self {
+            tab_request_sender,
+            tab_requests,
             inner,
             redraw_waker,
             content_blocker,
@@ -110,9 +130,46 @@ impl ServoRuntime {
         tab_id: TabId,
         browser_event_sender: Sender<TabEvent>,
     ) -> Result<ServoWebView, ServoWebViewError> {
-        let initial_url = Url::parse(initial_url)?;
+        let builder =
+            WebViewBuilder::new(&self.inner, rendering_context).url(Url::parse(initial_url)?);
+        Ok(self.build_web_view(builder, scale_factor, tab_id, browser_event_sender, false))
+    }
+
+    pub fn next_tab_request(&self) -> Option<TabRequest> {
+        self.tab_requests.try_recv().ok()
+    }
+
+    pub fn create_auxiliary_web_view(
+        &self,
+        request: servo::CreateNewWebViewRequest,
+        rendering_context: Rc<dyn RenderingContext>,
+        scale_factor: f32,
+        tab_id: TabId,
+        browser_event_sender: Sender<TabEvent>,
+    ) -> ServoWebView {
+        self.build_web_view(
+            request.builder(rendering_context),
+            scale_factor,
+            tab_id,
+            browser_event_sender,
+            true,
+        )
+    }
+
+    fn build_web_view(
+        &self,
+        builder: WebViewBuilder,
+        scale_factor: f32,
+        tab_id: TabId,
+        browser_event_sender: Sender<TabEvent>,
+        auxiliary: bool,
+    ) -> ServoWebView {
+        let last_activation = Rc::new(Cell::new(None));
         let frame_ready = FrameReadySignal::default();
         let delegate = Rc::new(BrowserDelegate {
+            auxiliary,
+            last_activation: Rc::clone(&last_activation),
+            tab_requests: self.tab_request_sender.clone(),
             tab_id,
             browser_event_sender,
             frame_ready: frame_ready.clone(),
@@ -120,14 +177,13 @@ impl ServoRuntime {
             content_blocker: Rc::clone(&self.content_blocker),
         });
 
-        let inner = WebViewBuilder::new(&self.inner, rendering_context)
-            .url(initial_url)
+        let inner = builder
             .hidpi_scale_factor(Scale::new(scale_factor))
             .delegate(delegate)
             .build();
 
         info!("created Servo WebView for tab {}", tab_id.value());
-        Ok(ServoWebView::new(inner, frame_ready, tab_id))
+        ServoWebView::new(inner, frame_ready, tab_id, last_activation)
     }
 
     pub fn spin_event_loop(&self) {
@@ -138,7 +194,7 @@ impl ServoRuntime {
 
 fn hermes_options() -> Opts {
     Opts {
-        // Servo 0.7.0 content-process isolation renders correctly in Hermes.
+        // Servo content-process isolation renders correctly in Hermes.
         // Keep the operating-system sandbox disabled independently: the
         // current Linux gaol path is not yet reliable enough for a release.
         multiprocess: true,
@@ -166,6 +222,9 @@ fn hermes_preferences() -> Preferences {
 }
 
 struct BrowserDelegate {
+    auxiliary: bool,
+    last_activation: Rc<Cell<Option<Instant>>>,
+    tab_requests: Sender<TabRequest>,
     tab_id: TabId,
     browser_event_sender: Sender<TabEvent>,
     frame_ready: FrameReadySignal,
@@ -198,6 +257,28 @@ impl BrowserDelegate {
 }
 
 impl servo::WebViewDelegate for BrowserDelegate {
+    fn request_create_new(&self, _: servo::WebView, request: servo::CreateNewWebViewRequest) {
+        if self
+            .last_activation
+            .take()
+            .is_some_and(|time| time.elapsed() <= std::time::Duration::from_secs(1))
+        {
+            let _ = self
+                .tab_requests
+                .send(TabRequest::Open(self.tab_id, request));
+        }
+    }
+
+    fn notify_fullscreen_state_changed(&self, _: servo::WebView, fullscreen: bool) {
+        self.send_browser_event(BrowserEvent::FullscreenChanged(fullscreen));
+    }
+
+    fn notify_closed(&self, _: servo::WebView) {
+        if self.auxiliary {
+            let _ = self.tab_requests.send(TabRequest::Close(self.tab_id));
+        }
+    }
+
     fn load_web_resource(&self, web_view: servo::WebView, load: servo::WebResourceLoad) {
         self.content_blocker
             .handle_web_resource_load(Some(&web_view), load);

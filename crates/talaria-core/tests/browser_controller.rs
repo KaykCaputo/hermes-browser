@@ -305,3 +305,37 @@ fn next_tab_selection_wraps_in_both_directions() {
     controller.select_next_tab(true);
     assert_eq!(controller.active_tab_id(), second_tab_id);
 }
+
+#[test]
+fn reopening_a_closed_tab_restores_its_position_and_address() {
+    let mut controller = BrowserController::default();
+    let closed = controller.open_tab();
+    controller.queue_navigation("https://example.org/").unwrap();
+    controller.open_tab();
+    assert!(controller.close_tab(closed));
+    assert!(controller.reopen_closed_tab());
+    assert_ne!(controller.active_tab_id(), closed);
+    assert_eq!(
+        controller.tabs().nth(1).unwrap().id(),
+        controller.active_tab_id()
+    );
+    assert_eq!(controller.state().url(), "https://example.org/");
+    assert!(!controller.reopen_closed_tab());
+}
+
+#[test]
+fn session_restore_keeps_tabs_dormant_and_uses_saved_addresses_literally() {
+    let addresses = [
+        String::from("https://example.org/a"),
+        String::from("invalid saved address"),
+        String::from("https://example.net/b"),
+    ];
+    let controller = BrowserController::from_session(&addresses, 2);
+    assert_eq!(controller.state().url(), "https://example.net/b");
+    assert_eq!(
+        controller.tabs().next().unwrap().state().page_title(),
+        "example.org"
+    );
+    assert_eq!(controller.tabs().nth(1).unwrap().state().url(), "");
+    assert!(!controller.has_pending_commands());
+}

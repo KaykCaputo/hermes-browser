@@ -3668,11 +3668,14 @@ dependencies = [
  "glow",
  "hermes-ui",
  "log",
+ "serde",
+ "serde_json",
  "servo",
  "slint",
  "surfman",
  "talaria-core",
  "talaria-servo",
+ "tempfile",
  "thiserror 2.0.19",
 ]
 
