@@ -114,6 +114,25 @@ fn connect_bookmarks(
         window.set_profile_available(true);
         set_bookmarks(window, &profile.data.bookmarks);
     }
+    let remove_window = window.as_weak();
+    let remove_profile = Rc::clone(profile);
+    window.on_remove_bookmark(move |address| {
+        let Some(window) = remove_window.upgrade() else {
+            return;
+        };
+        let mut profile = remove_profile.borrow_mut();
+        let Some(profile) = profile.as_mut() else {
+            return;
+        };
+        profile
+            .data
+            .bookmarks
+            .retain(|bookmark| bookmark != address.as_str());
+        set_bookmarks(&window, &profile.data.bookmarks);
+        if let Err(error) = profile.save() {
+            eprintln!("Could not remove shortcut: {error}");
+        }
+    });
     let weak = window.as_weak();
     let controller = Rc::clone(controller);
     let profile = Rc::clone(profile);

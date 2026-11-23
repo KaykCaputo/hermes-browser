@@ -1,5 +1,3 @@
-import { Button } from "std-widgets.slint";
-
 export global ChromeTheme {
     in property <int> mode: 0;
     in property <bool> system-light;
@@ -39,6 +37,8 @@ export struct BrowserTab {
 component ChromeButton inherits Rectangle {
     in property <string> label;
     in property <bool> enabled: true;
+    in property <bool> highlighted;
+    in property <length> label-size: 17px;
     callback clicked;
 
     border-width: keyboard.has-focus ? 1px : 0px;
@@ -57,18 +57,18 @@ component ChromeButton inherits Rectangle {
     accessible-role: button;
     accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
-    width: 36px;
+    preferred-width: 36px;
     height: 34px;
     border-radius: 7px;
     background: button-area.pressed && root.enabled
         ? (ChromeTheme.light ? #cddceb : #222d39)
-        : button-area.has-hover && root.enabled ? (ChromeTheme.light ? #dbe6f1 : #19222c) : transparent;
+        : (button-area.has-hover || root.highlighted) && root.enabled ? (ChromeTheme.light ? #dbe6f1 : #19222c) : transparent;
     opacity: root.enabled ? 1 : 0.32;
 
     Text {
         text: root.label;
         color: button-area.has-hover && root.enabled ? (ChromeTheme.light ? #125f98 : #71c5ff) : (ChromeTheme.light ? #40536a : #9aa6b5);
-        font-size: 17px;
+        font-size: root.label-size;
         font-weight: 500;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -80,6 +80,15 @@ component ChromeButton inherits Rectangle {
             root.clicked();
         }
     }
+}
+
+component ActionButton inherits ChromeButton {
+    preferred-width: 72px;
+    min-width: 24px;
+    height: 30px;
+    horizontal-stretch: 1;
+    label-size: 13px;
+    accessible-label: self.label;
 }
 
 component TabIcon inherits Rectangle {
@@ -276,6 +285,7 @@ export component MainWindow inherits Window {
     }
     callback appearance-changed(int, bool);
     callback toggle-bookmark();
+    callback remove-bookmark(string);
     callback navigate(string);
     callback go-back;
     callback go-forward;
@@ -448,6 +458,8 @@ export component MainWindow inherits Window {
                     background: (ChromeTheme.light ? #e9eff7 : #1a222c);
 
                     ChromeButton {
+                        x: 0px;
+                        y: 0px;
                         width: 34px;
                         label: "ⓘ";
                         enabled: !root.is-new-tab;
@@ -512,19 +524,19 @@ export component MainWindow inherits Window {
                     VerticalLayout {
                         padding: 10px;
                         spacing: 5px;
-                        Button { text: "New tab"; clicked => { browser-menu.close(); root.new-tab(); } }
-                        Button { text: "Reopen closed tab"; clicked => { browser-menu.close(); root.browser-action("reopen"); } }
+                        ActionButton { label: "New tab"; clicked => { browser-menu.close(); root.new-tab(); } }
+                        ActionButton { label: "Reopen closed tab"; clicked => { browser-menu.close(); root.browser-action("reopen"); } }
                         HorizontalLayout {
                             spacing: 4px;
-                            Button { text: "−"; accessible-label: "Zoom out"; clicked => { root.browser-action("zoom-out"); } }
-                            Button { text: "Reset zoom"; clicked => { root.browser-action("zoom-reset"); } }
-                            Button { text: "+"; accessible-label: "Zoom in"; clicked => { root.browser-action("zoom-in"); } }
+                            ActionButton { label: "−"; accessible-label: "Zoom out"; clicked => { root.browser-action("zoom-out"); } }
+                            ActionButton { label: "Reset zoom"; clicked => { root.browser-action("zoom-reset"); } }
+                            ActionButton { label: "+"; accessible-label: "Zoom in"; clicked => { root.browser-action("zoom-in"); } }
                         }
-                        Button {
-                            text: root.vertical-tabs ? "Use horizontal tabs" : "Use vertical tabs";
+                        ActionButton {
+                            label: root.vertical-tabs ? "Use horizontal tabs" : "Use vertical tabs";
                             clicked => { browser-menu.close(); root.tab-layout-changed(!root.vertical-tabs, root.collapsed-tabs); }
                         }
-                        Button { text: root.user-fullscreen ? "Exit fullscreen" : "Fullscreen"; clicked => { browser-menu.close(); root.browser-action("fullscreen"); } }
+                        ActionButton { label: root.user-fullscreen ? "Exit fullscreen" : "Fullscreen"; clicked => { browser-menu.close(); root.browser-action("fullscreen"); } }
                     }
                 }
             }
@@ -555,8 +567,7 @@ export component MainWindow inherits Window {
                             text: root.shield-paused ? "Blocking paused for this site" : "Requests blocked on this page: " + root.blocked-requests;
                             color: (ChromeTheme.light ? #40536a : #a4b2bf);
                         }
-                        if root.site-host != "": ChromeButton {
-                            width: 254px;
+                        if root.site-host != "": ActionButton {
                             label: root.shield-paused ? "Resume and reload" : "Pause and reload";
                             accessible-label: self.label;
                             clicked => { site-panel.close(); root.toggle-shield(); }
@@ -671,18 +682,17 @@ export component MainWindow inherits Window {
                                 Text { text: "Theme"; color: ChromeTheme.light ? #142337 : #edf4fa; }
                                 HorizontalLayout {
                                     spacing: 4px;
-                                    for name[i] in ["System", "Light", "Dark"]: Button {
-                                        text: name;
-                                        checkable: true;
-                                        checked: ChromeTheme.mode == i;
+                                    for name[i] in ["System", "Light", "Dark"]: ActionButton {
+                                        label: name;
+                                        highlighted: ChromeTheme.mode == i;
                                         clicked => { root.appearance-changed(i, root.new-tab-gradient); }
                                     }
                                 }
                                 Text { text: "New tab background"; color: ChromeTheme.light ? #142337 : #edf4fa; }
                                 HorizontalLayout {
                                     spacing: 4px;
-                                    Button { text: "Solid"; checkable: true; checked: !root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, false); } }
-                                    Button { text: "Gradient"; checkable: true; checked: root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, true); } }
+                                    ActionButton { label: "Solid"; highlighted: !root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, false); } }
+                                    ActionButton { label: "Gradient"; highlighted: root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, true); } }
                                 }
                             }
                         }
@@ -821,6 +831,14 @@ export component MainWindow inherits Window {
                                             overflow: elide;
                                         }
                                         hit := TouchArea { clicked => { root.navigate(bookmark.address); } }
+                                        ContextMenuArea {
+                                            Menu {
+                                                MenuItem {
+                                                    title: "Remove shortcut";
+                                                    activated => { root.remove-bookmark(bookmark.address); }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -833,10 +851,11 @@ export component MainWindow inherits Window {
                             }
                         }
                     }
-                    Button {
+                    ActionButton {
                         x: Math.max(0px, parent.width - self.width - 16px);
                         y: Math.max(0px, parent.height - self.height - 16px);
-                        text: "Customize";
+                        width: 104px;
+                        label: "Customize";
                         clicked => { appearance.show(); }
                     }
 
