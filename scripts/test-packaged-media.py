@@ -35,7 +35,7 @@ def has_visible_video(window):
     geometry = dict(line.split("=", 1) for line in
                     run("xdotool", "getwindowgeometry", "--shell", window).splitlines())
     # Inside the 320 x 180 test video, below the browser toolbar on Xvfb.
-    x, y = int(geometry["X"]) + 16, int(geometry["Y"]) + 145
+    x, y = int(geometry["X"]) + 16, int(geometry["Y"]) + 121
     pixels = subprocess.check_output([
         "ffmpeg", "-loglevel", "error", "-f", "x11grab", "-video_size", "256x80",
         "-i", f"{os.environ['DISPLAY']}+{x},{y}", "-frames:v", "1",

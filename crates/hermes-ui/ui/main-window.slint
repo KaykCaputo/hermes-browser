@@ -74,15 +74,15 @@ component BrowserTabButton inherits Rectangle {
     horizontal-stretch: 1;
     border-radius: 8px;
     background: root.tab.active
-        ? #161e28
+        ? #11171f
         : tab-touch.has-hover ? #111820 : transparent;
 
-    if root.tab.active: Rectangle {
-        x: 14px;
-        y: parent.height - 2px;
-        width: parent.width - 28px;
-        height: 2px;
-        background: #62bfff;
+    if !root.tab.active && !tab-touch.has-hover: Rectangle {
+        x: parent.width - 1px;
+        y: 9px;
+        width: 1px;
+        height: parent.height - 18px;
+        background: #29323d;
     }
 
     tab-touch := TouchArea {
@@ -215,14 +215,14 @@ export component MainWindow inherits Window {
 
         Rectangle {
             visible: !root.page-fullscreen;
-            height: root.page-fullscreen ? 0px : 48px;
+            height: root.page-fullscreen ? 0px : 38px;
             background: #0b0f14;
 
             HorizontalLayout {
                 padding-left: 10px;
                 padding-right: 14px;
-                padding-top: 7px;
-                padding-bottom: 3px;
+                padding-top: 4px;
+                padding-bottom: 0px;
                 spacing: 8px;
 
                 tab-strip := Flickable {
@@ -264,14 +264,14 @@ export component MainWindow inherits Window {
 
         Rectangle {
             visible: !root.page-fullscreen;
-            height: root.page-fullscreen ? 0px : 60px;
+            height: root.page-fullscreen ? 0px : 46px;
             background: #11171f;
 
             HorizontalLayout {
                 padding-left: 14px;
                 padding-right: 14px;
-                padding-top: 11px;
-                padding-bottom: 11px;
+                padding-top: 5px;
+                padding-bottom: 5px;
                 spacing: 8px;
 
                 ChromeButton {
@@ -302,8 +302,8 @@ export component MainWindow inherits Window {
 
                 Rectangle {
                     horizontal-stretch: 1;
-                    height: 38px;
-                    border-radius: 9px;
+                    height: 34px;
+                    border-radius: 17px;
                     border-width: 1px;
                     border-color: address-input.has-focus ? #62bfff : #29323d;
                     background: #1a222c;
