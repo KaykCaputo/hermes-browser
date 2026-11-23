@@ -1,4 +1,5 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 
 use adblock::Engine;
 use adblock::request::Request;
@@ -11,6 +12,7 @@ const COMPILED_ENGINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/adblock
 
 pub(crate) struct ContentBlocker {
     engine: Engine,
+    pub(crate) exceptions: RefCell<HashSet<String>>,
     blocked_requests: Cell<u64>,
 }
 
@@ -24,6 +26,7 @@ impl ContentBlocker {
         info!("ad and tracker blocking enabled with the Brave default filter snapshot");
         Self {
             engine,
+            exceptions: RefCell::default(),
             blocked_requests: Cell::new(0),
         }
     }
@@ -32,14 +35,22 @@ impl ContentBlocker {
         &self,
         web_view: Option<&WebView>,
         load: WebResourceLoad,
-    ) {
+    ) -> bool {
+        let page = web_view.and_then(WebView::url);
+        if page
+            .as_ref()
+            .and_then(Url::host_str)
+            .is_some_and(|host| self.exceptions.borrow().contains(host))
+        {
+            return false;
+        }
         let request = load.request();
         let should_block = match &request.referrer_url {
             Some(source) => self.should_block(request, Some(source.as_url())),
-            None => self.should_block(request, web_view.and_then(WebView::url).as_ref()),
+            None => self.should_block(request, page.as_ref()),
         };
         if !should_block {
-            return;
+            return false;
         }
 
         let blocked_url = load.request().url.clone().into_url();
@@ -53,6 +64,7 @@ impl ContentBlocker {
 
         load.intercept(WebResourceResponse::new(blocked_url))
             .cancel();
+        true
     }
 
     fn should_block(&self, request: &WebResourceRequest, source_url: Option<&Url>) -> bool {

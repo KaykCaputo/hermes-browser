@@ -186,6 +186,10 @@ impl ServoRuntime {
         ServoWebView::new(inner, frame_ready, tab_id, last_activation)
     }
 
+    pub fn set_shield_exceptions(&self, sites: std::collections::HashSet<String>) {
+        *self.content_blocker.exceptions.borrow_mut() = sites;
+    }
+
     pub fn spin_event_loop(&self) {
         self.redraw_waker.acknowledge();
         self.inner.spin_event_loop();
@@ -280,8 +284,12 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn load_web_resource(&self, web_view: servo::WebView, load: servo::WebResourceLoad) {
-        self.content_blocker
-            .handle_web_resource_load(Some(&web_view), load);
+        if self
+            .content_blocker
+            .handle_web_resource_load(Some(&web_view), load)
+        {
+            self.send_browser_event(BrowserEvent::BlockedRequest);
+        }
     }
 
     fn notify_url_changed(&self, _web_view: servo::WebView, url: Url) {

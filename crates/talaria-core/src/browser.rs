@@ -68,6 +68,7 @@ pub enum BrowserCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserEvent {
     FullscreenChanged(bool),
+    BlockedRequest,
     AddressChanged {
         url: String,
     },
@@ -92,6 +93,7 @@ pub struct BrowserState {
     page_title: String,
     page_icon: Option<PageIcon>,
     fullscreen: bool,
+    blocked_requests: u32,
     load_state: LoadState,
     can_go_back: bool,
     can_go_forward: bool,
@@ -104,6 +106,7 @@ impl Default for BrowserState {
             page_title: DEFAULT_PAGE_TITLE.to_owned(),
             page_icon: None,
             fullscreen: false,
+            blocked_requests: 0,
             load_state: LoadState::Idle,
             can_go_back: false,
             can_go_forward: false,
@@ -121,6 +124,9 @@ impl BrowserState {
     pub fn page_icon(&self) -> Option<&PageIcon> {
         self.page_icon.as_ref()
     }
+    pub fn blocked_requests(&self) -> u32 {
+        self.blocked_requests
+    }
     pub fn fullscreen(&self) -> bool {
         self.fullscreen
     }
@@ -136,6 +142,9 @@ impl BrowserState {
 
     pub fn apply(&mut self, event: BrowserEvent) {
         match event {
+            BrowserEvent::BlockedRequest => {
+                self.blocked_requests = self.blocked_requests.saturating_add(1)
+            }
             BrowserEvent::FullscreenChanged(value) => self.fullscreen = value,
             BrowserEvent::AddressChanged { url } => {
                 if self.url != url {
@@ -154,6 +163,9 @@ impl BrowserState {
             BrowserEvent::LoadStateChanged { state } => {
                 if matches!(state, LoadState::Failed { .. }) {
                     self.fullscreen = false;
+                }
+                if matches!(state, LoadState::Loading) && self.load_state != LoadState::Loading {
+                    self.blocked_requests = 0;
                 }
                 self.load_state = state;
             }

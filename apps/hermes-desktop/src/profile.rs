@@ -11,6 +11,8 @@ pub struct ProfileData {
     #[serde(default)]
     pub bookmarks: Vec<String>,
     #[serde(default)]
+    pub shield_exceptions: std::collections::BTreeSet<String>,
+    #[serde(default)]
     tabs: Vec<String>,
     #[serde(default)]
     active: usize,

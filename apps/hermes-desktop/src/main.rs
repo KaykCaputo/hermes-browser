@@ -66,6 +66,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     let controller = Rc::new(RefCell::new(initial));
     let web_view_focused = Rc::new(Cell::new(false));
 
+    let shield_exceptions = Rc::new(RefCell::new(
+        profile
+            .as_ref()
+            .map(|profile| profile.data.shield_exceptions.iter().cloned().collect())
+            .unwrap_or_default(),
+    ));
     connect_servo_runtime(
         &window,
         Rc::clone(&controller),
@@ -73,6 +79,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         profile
             .as_ref()
             .map(|profile| profile.directory().to_owned()),
+        Rc::clone(&shield_exceptions),
     )?;
     sync_ui(&window, &controller.borrow());
     connect_ui_callbacks(
@@ -82,6 +89,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let profile = Rc::new(RefCell::new(profile));
     connect_bookmarks(&window, &controller, &profile);
+    connect_shields(&window, &controller, &profile, &shield_exceptions);
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
 
     window.run()?;
@@ -127,6 +135,57 @@ fn connect_bookmarks(
         if let Err(error) = profile.save() {
             eprintln!("Could not save bookmarks: {error}");
         }
+    });
+}
+
+fn connect_shields(
+    window: &MainWindow,
+    controller: &Rc<RefCell<BrowserController>>,
+    profile: &Rc<RefCell<Option<profile::Profile>>>,
+    exceptions: &Rc<RefCell<HashSet<String>>>,
+) {
+    let weak = window.as_weak();
+    let exceptions_for_panel = Rc::clone(exceptions);
+    window.on_open_site_panel(move || {
+        let Some(window) = weak.upgrade() else { return };
+        let address = window.get_committed_address();
+        let url = talaria_core::resolve_address(address.as_str())
+            .ok()
+            .filter(|url| matches!(url.scheme(), "http" | "https"));
+        let host = url
+            .as_ref()
+            .and_then(|url| url.host_str())
+            .unwrap_or_default();
+        window.set_site_host(host.into());
+        window.set_site_https(url.as_ref().is_some_and(|url| url.scheme() == "https"));
+        window.set_shield_paused(exceptions_for_panel.borrow().contains(host));
+    });
+
+    let weak = window.as_weak();
+    let exceptions = Rc::clone(exceptions);
+    let controller = Rc::clone(controller);
+    let profile = Rc::clone(profile);
+    window.on_toggle_shield(move || {
+        let Some(window) = weak.upgrade() else { return };
+        let host = window.get_site_host().to_string();
+        let controller_ref = controller.borrow();
+        let url = talaria_core::resolve_address(controller_ref.state().url()).ok();
+        if host.is_empty() || url.as_ref().and_then(|url| url.host_str()) != Some(host.as_str()) {
+            return;
+        }
+        let mut exceptions = exceptions.borrow_mut();
+        if !exceptions.remove(&host) {
+            exceptions.insert(host);
+        }
+        if let Some(profile) = profile.borrow_mut().as_mut() {
+            profile.data.shield_exceptions = exceptions.iter().cloned().collect();
+            profile.data.remember_tabs(&controller_ref);
+            if let Err(error) = profile.save() {
+                eprintln!("Could not save site preferences: {error}");
+            }
+        }
+        drop(controller_ref);
+        window.invoke_reload();
     });
 }
 
@@ -204,6 +263,7 @@ fn connect_servo_runtime(
     controller: Rc<RefCell<BrowserController>>,
     web_view_focused: Rc<Cell<bool>>,
     profile_directory: Option<std::path::PathBuf>,
+    shield_exceptions: Rc<RefCell<HashSet<String>>>,
 ) -> Result<(), slint::SetRenderingNotifierError> {
     let weak_window_for_waker = window.as_weak();
     let event_loop_waker = EventLoopWaker::new(move || {
@@ -213,6 +273,7 @@ fn connect_servo_runtime(
     });
 
     let mut runtime = None;
+    let mut applied_exceptions = HashSet::new();
     let mut last_tab_revision = None;
     let weak_window_for_rendering = window.as_weak();
     let mut rendering_context: Option<Rc<BrowserRenderingContext>> = None;
@@ -255,6 +316,10 @@ fn connect_servo_runtime(
                 let runtime = runtime.get_or_insert_with(|| {
                     ServoRuntime::with_profile(event_loop_waker.clone(), profile_directory.clone())
                 });
+                if *shield_exceptions.borrow() != applied_exceptions {
+                    applied_exceptions.clone_from(&shield_exceptions.borrow());
+                    runtime.set_shield_exceptions(applied_exceptions.clone());
+                }
                 runtime.spin_event_loop();
 
                 let Some(window) = weak_window_for_rendering.upgrade() else {
@@ -521,6 +586,7 @@ fn sync_ui(window: &MainWindow, controller: &BrowserController) {
         sync_bookmark_state(window);
     }
     window.set_is_new_tab(state.url().is_empty());
+    window.set_blocked_requests(i32::try_from(state.blocked_requests()).unwrap_or(i32::MAX));
     window.set_can_go_back(state.can_go_back());
     window.set_can_go_forward(state.can_go_forward());
     window.set_is_loading(matches!(state.load_state(), LoadState::Loading));

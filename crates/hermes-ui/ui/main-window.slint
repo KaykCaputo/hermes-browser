@@ -172,6 +172,12 @@ export component MainWindow inherits Window {
     in property <[BookmarkTile]> bookmarks;
     in property <bool> profile-available;
     in property <bool> is-bookmarked;
+    in property <int> blocked-requests;
+    in property <string> site-host;
+    in property <bool> site-https;
+    in property <bool> shield-paused;
+    callback open-site-panel();
+    callback toggle-shield();
     callback toggle-bookmark();
     callback navigate(string);
     callback go-back;
@@ -312,10 +318,18 @@ export component MainWindow inherits Window {
                     border-color: address-input.has-focus ? #62bfff : #29323d;
                     background: #1a222c;
 
+                    ChromeButton {
+                        width: 34px;
+                        label: "ⓘ";
+                        enabled: !root.is-new-tab;
+                        accessible-label: "Site information";
+                        clicked => { root.open-site-panel(); site-panel.show(); }
+                    }
+
                     address-input := TextInput {
                         accessible-label: "Address or search";
-                        x: 14px;
-                        width: parent.width - 28px;
+                        x: 38px;
+                        width: parent.width - 48px;
                         height: parent.height;
                         text <=> root.address;
                         color: #edf4fa;
@@ -334,8 +348,52 @@ export component MainWindow inherits Window {
                     enabled: root.profile-available && !root.is-new-tab;
                     clicked => { root.toggle-bookmark(); }
                 }
+
+                ChromeButton {
+                    label: root.blocked-requests > 0 ? "⛨ " + root.blocked-requests : "⛨";
+                    width: root.blocked-requests > 0 ? 52px : 34px;
+                    enabled: !root.is-new-tab;
+                    accessible-label: "Ad and tracker blocking";
+                    clicked => { root.open-site-panel(); site-panel.show(); }
+                }
             }
 
+            site-panel := PopupWindow {
+                x: Math.max(0px, root.width - 300px);
+                y: 44px;
+                width: 284px;
+                height: 142px;
+                Rectangle {
+                    background: #171f29;
+                    border-color: #344454;
+                    border-width: 1px;
+                    border-radius: 12px;
+                    VerticalLayout {
+                        padding: 14px;
+                        spacing: 6px;
+                        Text {
+                            text: root.site-host == "" ? "Site information" : root.site-host;
+                            font-weight: 650;
+                            color: #edf4fa;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: root.site-host == "" ? "Internal page" : root.site-https ? "HTTPS connection" : "Unencrypted HTTP connection";
+                            color: #a4b2bf;
+                        }
+                        if root.site-host != "": Text {
+                            text: root.shield-paused ? "Blocking paused for this site" : "Requests blocked on this page: " + root.blocked-requests;
+                            color: #a4b2bf;
+                        }
+                        if root.site-host != "": ChromeButton {
+                            width: 254px;
+                            label: root.shield-paused ? "Resume and reload" : "Pause and reload";
+                            accessible-label: self.label;
+                            clicked => { site-panel.close(); root.toggle-shield(); }
+                        }
+                    }
+                }
+            }
             Rectangle {
                 x: 0px;
                 y: parent.height - 1px;
