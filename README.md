@@ -52,7 +52,8 @@ Hermes takes its name from the Greek messenger associated with speed and travel.
 
 ## Highlights
 
-- **Servo-powered browsing** — modern web content through an embeddable Rust engine
+- **Servo 0.8.0** with WebGL, Web Crypto, and Brotli compression streams
+- **Saved tabs and bookmarks** with session restoration after a normal exit
 - **GPU-accelerated experience** — WebRender and Vello Canvas 2D rendered offscreen, then composed by Slint through WGPU
 - **Native Linux multimedia** — HTML audio, video, Web Audio, and WebRTC through GStreamer
 - **Native content blocking** — ads and trackers are intercepted before network resources are loaded
@@ -90,8 +91,10 @@ The browser core can be tested with fake WebViews without starting Servo. UI cod
 
 ### Runtime compatibility patches
 
-Hermes currently carries focused patches for two dependencies used by Servo 0.7.0:
+Hermes currently carries focused patches for four dependencies used by Servo 0.8.0:
 
+- `servo-canvas`, to keep the Vello GPU canvas compatible with WGPU 30 buffer mapping;
+- `servo-net`, to accept HTTP/2 responses with large security headers on sites such as YouTube;
 - `gaol`, to support current Linux system calls and allow Servo's shared-memory IPC regions to be sized correctly;
 - `surfman`, to avoid process-global GPU selection through `DRI_PRIME`.
 
@@ -99,7 +102,7 @@ Each vendored directory documents why the patch exists and when it can be remove
 
 ## Quick start
 
-Hermes uses the current stable Rust toolchain and the Rust 2024 edition.
+Hermes uses the Rust toolchain pinned in `rust-toolchain.toml` and the Rust 2024 edition.
 
 ```bash
 git clone https://github.com/KaykCaputo/hermes-browser.git
@@ -118,6 +121,14 @@ an unoptimized browser-engine build. For a development build with full debug inf
 
 ```bash
 make run-debug
+```
+
+Open a link directly with `hermes-browser https://example.org`. The star in the toolbar saves or removes the current page. Saved links appear on new tabs. Hermes restores the open tabs after a normal shutdown. Use `--temporary-profile` to start with an empty profile and keep that window’s session out of the saved profile.
+
+On Debian or Ubuntu the `.deb` installs the playback dependencies through apt. For the Linux release archive on Debian or Ubuntu, install the playback runtime:
+
+```bash
+sudo apt install gstreamer1.0-gl gstreamer1.0-libav gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-pulseaudio
 ```
 
 ### Windows
@@ -205,7 +216,7 @@ git tag v0.1.2
 git push origin v0.1.2
 ```
 
-The release workflow produces `hermes-browser-linux-x86_64.tar.gz` with a SHA-256 checksum.
+The release workflow produces `hermes-browser-linux-x86_64.tar.gz` and an apt-installable amd64 Debian package, each with a SHA-256 checksum.
 
 The Linux executable is built on Ubuntu 22.04 and targets glibc 2.35 or newer.
 The workflow verifies this compatibility baseline before publishing the package.
@@ -216,7 +227,7 @@ Manual workflow runs keep the Linux package as a downloadable Actions artifact w
 
 - Package the native GStreamer runtime with Windows releases
 - Add permission prompts, downloads, native form controls, and site information
-- Persist sessions, history, bookmarks, cookies, and settings
+- Add searchable browsing history and profile settings
 - Add operating-system sandbox enforcement and content-process crash recovery once Servo's Linux `gaol` path is reliable
 - Add per-site content-blocking controls and cosmetic filtering
 - Suspend and discard tabs under memory pressure
@@ -229,10 +240,10 @@ The current version is an engineering preview with known limitations:
 
 - Web compatibility follows Servo's current implementation maturity.
 - Linux builds use Servo's production GStreamer backend for multimedia playback. Codec availability still depends on the installed GStreamer plugins.
-- Direct MP4/WebM playback and YouTube playback are supported on Linux when the required GStreamer plugins are installed. Website and codec compatibility still follows Servo and the host media stack.
+- Direct MP4/WebM playback and YouTube playback are supported on Linux when the required GStreamer plugins are installed. Hermes requests the tablet player on YouTube. Website and codec compatibility still follows Servo and the host media stack.
 - Windows remains a source-build foundation and is not currently published as a release artifact.
 - Web content runs in isolated Servo content processes, but those child processes currently run without operating-system sandbox restrictions.
-- Persistence, downloads, permission prompts, extensions, and private profiles are not implemented yet.
+- Open tabs and bookmarks are saved locally. Downloads, permission prompts, and extensions remain under development.
 - Background tabs are throttled but are not yet suspended or discarded.
 - Linux packages currently target x86-64, glibc 2.35 or newer, and compatible system libraries.
 

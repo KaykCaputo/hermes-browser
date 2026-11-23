@@ -16,7 +16,7 @@ make install-linux-deps
 make setup
 ```
 
-`make setup` uses the current stable Rust toolchain, installs formatting and lint components, and fetches dependencies with `--locked`.
+`make setup` uses the Rust toolchain pinned in `rust-toolchain.toml`, installs formatting and lint components, and fetches dependencies with `--locked`.
 
 ## Check your tools
 

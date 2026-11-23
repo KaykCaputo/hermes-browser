@@ -7,7 +7,11 @@ description: Build and run Hermes Browser on Linux, with the required Rust, grap
 
 The fastest supported route is a source build on Debian or Ubuntu. The repository includes a command that installs the native packages needed by Servo, Slint, graphics, and GStreamer.
 
-## Before you begin
+## Install a release on Debian or Ubuntu
+
+For releases offering an amd64 Debian package, download the `.deb` from the GitHub release and run `sudo apt install ./hermes-browser_<version>_amd64.deb`, substituting the downloaded filename. Apt installs the GStreamer plugins and registers Hermes in the desktop application menu. The tar archive uses the same executable and relies on the media runtime already installed on your system.
+
+## Before building from source
 
 You need:
 

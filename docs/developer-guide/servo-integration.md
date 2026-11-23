@@ -48,7 +48,7 @@ Matched subresources are intercepted and cancelled. Main-frame navigations remai
 
 ## Linux media
 
-The Linux target enables Servo's upstream `media-gstreamer` feature. Hermes uses the `servo-media-gstreamer` 0.7.0 release unchanged; this is important because its GL frame-transfer path remains compatible with Servo's isolated content processes.
+The Linux target enables Servo's upstream `media-gstreamer` feature. Hermes uses the `servo-media-gstreamer` 0.8.0 release unchanged; this is important because its GL frame-transfer path remains compatible with Servo's isolated content processes.
 
 GStreamer remains a native system dependency. Cargo selects the Rust backend, but the machine must still provide the runtime plugins and codecs.
 
@@ -63,4 +63,4 @@ multiprocess: true,
 sandbox: false,
 ```
 
-Servo 0.7.0 content processes complete navigation and deliver visible frames, input, audio, and video in Hermes. The operating-system sandbox is a separate option: keep it disabled until Linux `gaol` can enforce its profile without destabilizing child processes. A sandbox acceptance test must cover navigation, visible pixels, audio and video, input, and clean shutdown together.
+Servo content processes complete navigation and deliver visible frames, input, audio, and video in Hermes. The operating-system sandbox is a separate option: keep it disabled until Linux `gaol` can enforce its profile without destabilizing child processes. A sandbox acceptance test must cover navigation, visible pixels, audio and video, input, and clean shutdown together.

@@ -86,6 +86,6 @@ The same stable `TabId` routes asynchronous title, favicon, load, and history up
 
 ## Rendering ownership
 
-Slint owns the native window and event loop. Servo renders into a separate offscreen Surfman context; on Linux, Hermes imports each completed frame through Vulkan external memory and gives the resulting WGPU texture to Slint. The two renderers never share OpenGL state or the window framebuffer. A consumable frame-ready signal also prevents repainting a page when Servo has not produced a new frame.
+Slint owns the native window and event loop. Servo renders into a separate offscreen Surfman context; on Linux, Hermes imports each completed frame through Vulkan external memory and gives the resulting WGPU texture to Slint. On drivers without compatible external memory support Hermes reads pixels back from the Surfman framebuffer. A consumable frame-ready signal also prevents repainting a page when Servo has not produced a new frame.
 
 On Linux, Mesa and the desktop session choose the default graphics adapter. Hermes removes inherited `DRI_PRIME` overrides before graphics or media threads start, and the vendored Surfman patch avoids applying a process-global GPU preference during context creation.

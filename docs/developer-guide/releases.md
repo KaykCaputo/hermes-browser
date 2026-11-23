@@ -30,6 +30,8 @@ make package-linux PROJECT_VERSION=0.2.0
 
 ## Continuous integration
 
+`make package-deb` also creates an amd64 Debian package with runtime dependencies and a desktop entry. The release workflow compares its executable to the extracted tarball and tests decoded VP9 playback over HTTP/2 with a large response header list.
+
 The Linux quality job installs the same native GStreamer families used by development, verifies required plugins, runs formatting and Clippy, and executes workspace and media tests.
 
 The release workflow builds on Ubuntu 22.04 to preserve the glibc 2.35 compatibility baseline. Windows release packaging remains deferred until the native build and GStreamer runtime can be validated together.

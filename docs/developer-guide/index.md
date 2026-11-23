@@ -38,4 +38,4 @@ The codebase is small enough to read, but the engine underneath it is not. This 
 
 ## Current engineering constraint
 
-The normal runtime enables Servo 0.7.0 content-process isolation. Navigation, rendering, input, audio, and video have been validated across that boundary. The independent operating-system sandbox remains disabled because the Linux `gaol` path is not yet reliable enough for a release.
+The normal runtime enables Servo content-process isolation. Navigation, rendering, input, audio, and video have been validated across that boundary. The independent operating-system sandbox remains disabled because the Linux `gaol` path is not yet reliable enough for a release.
