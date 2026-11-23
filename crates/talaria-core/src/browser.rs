@@ -164,8 +164,14 @@ impl BrowserState {
             BrowserEvent::FullscreenChanged(value) => self.fullscreen = value,
             BrowserEvent::AddressChanged { url } => {
                 if self.url != url {
+                    if self.page_icon.is_some() {
+                        let old = url::Url::parse(&self.url).ok();
+                        let new = url::Url::parse(&url).ok();
+                        if !old.zip(new).is_some_and(|(a, b)| a.origin() == b.origin()) {
+                            self.page_icon = None;
+                        }
+                    }
                     self.url = url;
-                    self.page_icon = None;
                 }
             }
             BrowserEvent::PageTitleChanged { title } => {

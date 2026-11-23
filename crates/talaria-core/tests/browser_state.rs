@@ -93,6 +93,26 @@ fn receiving_the_same_address_preserves_the_current_icon() {
 }
 
 #[test]
+fn same_origin_routes_keep_the_icon_until_a_new_site_is_opened() {
+    let mut state = BrowserState::default();
+    let icon = PageIcon::from_rgba(1, 1, vec![1, 2, 3, 255]).unwrap();
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://example.org/".into(),
+    });
+    state.apply(BrowserEvent::PageIconChanged {
+        icon: Some(icon.clone()),
+    });
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://example.org/watch?v=2".into(),
+    });
+    assert_eq!(state.page_icon(), Some(&icon));
+    state.apply(BrowserEvent::AddressChanged {
+        url: "https://example.net/".into(),
+    });
+    assert_eq!(state.page_icon(), None);
+}
+
+#[test]
 fn missing_page_title_restores_the_default_title() {
     let mut state = BrowserState::default();
 

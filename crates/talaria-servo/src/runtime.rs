@@ -334,13 +334,30 @@ impl servo::WebViewDelegate for BrowserDelegate {
         }
     }
 
-    fn notify_load_status_changed(&self, _web_view: servo::WebView, status: LoadStatus) {
+    fn notify_load_status_changed(&self, web_view: servo::WebView, status: LoadStatus) {
         match status {
             LoadStatus::Started => {
                 self.load_metrics.borrow_mut().start(Instant::now());
                 info!("tab {}: page load started", self.tab_id.value());
             }
-            LoadStatus::HeadParsed => self.record_load_milestone(LoadMilestone::HeadParsed),
+            LoadStatus::HeadParsed => {
+                self.record_load_milestone(LoadMilestone::HeadParsed);
+                if web_view
+                    .url()
+                    .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+                {
+                    // Servo loads declared icons. Supply the conventional site icon for
+                    // documents that only advertise a touch icon or rely on /favicon.ico.
+                    web_view.evaluate_javascript(r#"(() => {
+                        if (!document.head || document.querySelector('link[rel~="icon" i][href]')) return;
+                        const touch = document.querySelector('link[rel~="apple-touch-icon" i][href]');
+                        const link = document.createElement('link');
+                        link.rel = 'icon';
+                        link.href = touch ? touch.href : new URL('/favicon.ico', location.href).href;
+                        document.head.appendChild(link);
+                    })()"#, |_| {});
+                }
+            }
             LoadStatus::Complete => self.record_load_milestone(LoadMilestone::Complete),
             LoadStatus::Stopped => *self.load_metrics.borrow_mut() = PageLoadMetrics::default(),
         }
