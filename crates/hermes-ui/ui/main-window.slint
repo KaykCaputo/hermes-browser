@@ -6,6 +6,12 @@ export global ChromeTheme {
     out property <bool> light: mode == 1 || (mode == 0 && system-light);
 }
 
+export struct AddressSuggestion {
+    label: string,
+    address: string,
+    tab-index: int,
+}
+
 export struct BookmarkTile {
     address: string,
     label: string,
@@ -201,6 +207,22 @@ export component MainWindow inherits Window {
     callback toggle-shield();
     callback browser-action(string);
     in property <bool> new-tab-gradient;
+    in property <[AddressSuggestion]> suggestions;
+    in-out property <int> selected-suggestion: -1;
+    out property <bool> address-focused: address-input.has-focus;
+    callback address-edited(string);
+
+    public function accept-suggestion(index: int) {
+        if index >= 0 && index < root.suggestions.length {
+            if root.suggestions[index].tab-index >= 0 {
+                root.select-tab(root.suggestions[index].tab-index);
+                root.focus-web-content();
+            } else {
+                root.navigate(root.suggestions[index].address);
+            }
+            root.address-edited("");
+        }
+    }
     callback appearance-changed(int, bool);
     callback toggle-bookmark();
     callback navigate(string);
@@ -220,6 +242,7 @@ export component MainWindow inherits Window {
     }
 
     public function focus-address-bar() {
+        root.address-edited("");
         address-input.focus();
         address-input.select-all();
     }
@@ -360,8 +383,14 @@ export component MainWindow inherits Window {
                         font-size: 14px;
                         vertical-alignment: center;
                         single-line: true;
+                        edited => { root.address-edited(self.text); }
                         accepted => {
-                            root.navigate(self.text);
+                            if root.selected-suggestion >= 0 {
+                                root.accept-suggestion(root.selected-suggestion);
+                            } else {
+                                root.address-edited("");
+                                root.navigate(self.text);
+                            }
                         }
                     }
                 }
@@ -766,6 +795,45 @@ export component MainWindow inherits Window {
                         );
 
                         accept
+                    }
+                }
+            }
+            if root.address-focused && root.suggestions.length > 0 && !root.page-fullscreen: Rectangle {
+                x: Math.min(146px, parent.width / 4);
+                y: 1px;
+                width: parent.width - self.x - 10px;
+                height: 10px + root.suggestions.length * 42px;
+                background: ChromeTheme.light ? #ffffff : #171f29;
+                border-color: ChromeTheme.light ? #b4c4d7 : #344454;
+                border-width: 1px;
+                border-radius: 10px;
+                VerticalLayout {
+                    padding: 5px;
+                    for suggestion[i] in root.suggestions: Rectangle {
+                        height: 42px;
+                        border-radius: 6px;
+                        background: row.has-hover || root.selected-suggestion == i
+                            ? (ChromeTheme.light ? #dce7f2 : #263746) : transparent;
+                        accessible-role: button;
+                        accessible-label: suggestion.label;
+                        accessible-action-default => { root.accept-suggestion(i); }
+                        VerticalLayout {
+                            padding-left: 10px;
+                            padding-right: 10px;
+                            alignment: center;
+                            Text {
+                                text: suggestion.label;
+                                color: ChromeTheme.light ? #142337 : #edf4fa;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: suggestion.address;
+                                color: ChromeTheme.light ? #40536a : #a4b2bf;
+                                font-size: 11px;
+                                overflow: elide;
+                            }
+                        }
+                        row := TouchArea { clicked => { root.accept-suggestion(i); } }
                     }
                 }
             }

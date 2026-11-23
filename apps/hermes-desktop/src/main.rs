@@ -4,7 +4,9 @@ use std::error::Error;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 
-use hermes_ui::{BookmarkTile, BrowserTab, ChromeTheme, MainWindow, WebViewPointerButton};
+use hermes_ui::{
+    AddressSuggestion, BookmarkTile, BrowserTab, ChromeTheme, MainWindow, WebViewPointerButton,
+};
 use rendering::BrowserRenderingContext;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{
@@ -609,6 +611,7 @@ fn sync_ui(window: &MainWindow, controller: &BrowserController) {
     if window.get_committed_address() != state.url()
         || window.get_displayed_tab() != controller.active_tab_id().value().to_string()
     {
+        window.invoke_address_edited("".into());
         window.set_address(state.url().into());
         window.set_committed_address(state.url().into());
         window.set_displayed_tab(controller.active_tab_id().value().to_string().into());
@@ -708,6 +711,54 @@ fn connect_ui_callbacks(
             window.invoke_focus_web_content();
         }
         window.window().request_redraw();
+    });
+
+    let suggestion_controller = Rc::clone(&controller);
+    let suggestion_window = window.as_weak();
+    window.on_address_edited(move |input| {
+        let Some(window) = suggestion_window.upgrade() else {
+            return;
+        };
+        let query = input.trim().to_lowercase();
+        let mut results = Vec::new();
+        if !query.is_empty() {
+            let browser = suggestion_controller.borrow();
+            let mut seen = HashSet::new();
+            for (index, tab) in browser.tabs().enumerate() {
+                let state = tab.state();
+                if tab.id() != browser.active_tab_id()
+                    && !state.url().is_empty()
+                    && (state.url().to_lowercase().contains(&query)
+                        || state.page_title().to_lowercase().contains(&query))
+                    && seen.insert(state.url().to_owned())
+                {
+                    results.push(AddressSuggestion {
+                        label: format!("Switch to tab · {}", state.page_title()).into(),
+                        address: state.url().into(),
+                        tab_index: i32::try_from(index).unwrap_or(i32::MAX),
+                    });
+                }
+                if results.len() == 6 {
+                    break;
+                }
+            }
+            for bookmark in window.get_bookmarks().iter() {
+                if results.len() == 6 {
+                    break;
+                }
+                if bookmark.address.to_lowercase().contains(&query)
+                    && seen.insert(bookmark.address.to_string())
+                {
+                    results.push(AddressSuggestion {
+                        label: bookmark.label,
+                        address: bookmark.address,
+                        tab_index: -1,
+                    });
+                }
+            }
+        }
+        window.set_selected_suggestion(-1);
+        window.set_suggestions(ModelRc::new(VecModel::from(results)));
     });
 
     let menu_controller = Rc::clone(&controller);
@@ -901,6 +952,42 @@ fn connect_native_keyboard_input(
                     modifiers = changed.state();
                 }
                 WindowEvent::KeyboardInput { event, .. } => {
+                    let suggestion_count =
+                        i32::try_from(window.get_suggestions().row_count()).unwrap_or(i32::MAX);
+                    if window.get_address_focused() && suggestion_count > 0 && modifiers.is_empty()
+                    {
+                        use winit::keyboard::NamedKey;
+                        let selected = window.get_selected_suggestion();
+                        let handled = match event.logical_key {
+                            Key::Named(NamedKey::ArrowDown) => {
+                                if event.state == ElementState::Pressed {
+                                    window
+                                        .set_selected_suggestion((selected + 1) % suggestion_count);
+                                }
+                                true
+                            }
+                            Key::Named(NamedKey::ArrowUp) => {
+                                if event.state == ElementState::Pressed {
+                                    window.set_selected_suggestion(if selected <= 0 {
+                                        suggestion_count - 1
+                                    } else {
+                                        selected - 1
+                                    });
+                                }
+                                true
+                            }
+                            Key::Named(NamedKey::Escape) => {
+                                if event.state == ElementState::Pressed {
+                                    window.invoke_address_edited("".into());
+                                }
+                                true
+                            }
+                            _ => false,
+                        };
+                        if handled {
+                            return EventResult::PreventDefault;
+                        }
+                    }
                     if handle_browser_shortcut(
                         &window,
                         &controller,
