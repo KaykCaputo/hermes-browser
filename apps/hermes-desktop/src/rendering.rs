@@ -10,8 +10,8 @@ mod platform {
     use gleam::gl::{self, Gl};
     use glow::HasContext;
     use servo::{DeviceIntRect, RenderingContext, RgbaImage};
-    use slint::Image;
     use slint::wgpu_29::wgpu::{self, hal};
+    use slint::{Image, SharedPixelBuffer};
     use surfman::chains::{PreserveBuffer, SwapChain};
     use surfman::{
         Adapter, Connection, Context, ContextAttributeFlags, ContextAttributes, Device, GLApi,
@@ -42,6 +42,8 @@ mod platform {
         Vulkan(#[from] vk::Result),
         #[error("OpenGL texture import failed: {0}")]
         OpenGl(String),
+        #[error("could not read pixels from the Servo framebuffer")]
+        ReadbackFailed,
         #[error("Slint rejected the imported WGPU texture: {0}")]
         SlintTexture(String),
     }
@@ -49,6 +51,23 @@ mod platform {
     impl From<surfman::Error> for RenderingBridgeError {
         fn from(error: surfman::Error) -> Self {
             Self::Surfman(error)
+        }
+    }
+
+    // The HAL retains this owner until its last texture reference is released.
+    // Earlier failures release whichever Vulkan resources have been created.
+    struct SharedImage {
+        device: ash::Device,
+        image: vk::Image,
+        memory: vk::DeviceMemory,
+    }
+
+    impl Drop for SharedImage {
+        fn drop(&mut self) {
+            unsafe {
+                self.device.destroy_image(self.image, None);
+                self.device.free_memory(self.memory, None);
+            }
         }
     }
 
@@ -72,7 +91,12 @@ mod platform {
             };
             let descriptor =
                 device.create_context_descriptor(&ContextAttributes { flags, version })?;
-            let context = device.create_context(&descriptor, None)?;
+            let mut context = device.create_context(&descriptor, None)?;
+            // Glow reads GL_VERSION while loading its entry points.
+            if let Err(error) = device.make_context_current(&context) {
+                let _ = device.destroy_context(&mut context);
+                return Err(error);
+            }
 
             let gleam_gl: Rc<dyn Gl> = match gl_api {
                 GLApi::GL => unsafe {
@@ -123,6 +147,8 @@ mod platform {
         size: Cell<ViewportSize>,
         swap_chain: SwapChain<Device>,
         surfman: SurfmanContext,
+        shared_frames: Cell<bool>,
+        gl_ext: gl_bindings::Gles2,
     }
 
     impl BrowserRenderingContext {
@@ -162,7 +188,26 @@ mod platform {
                 SwapChain::create_attached(&*device, &mut *context, SurfaceAccess::GPUOnly)?
             };
 
+            let gl_ext = gl_bindings::Gles2::load_with(|name| {
+                surfman
+                    .device
+                    .borrow()
+                    .get_proc_address(&surfman.context.borrow(), name)
+            });
+            let shared_frames = surfman
+                .glow_gl
+                .supported_extensions()
+                .contains("GL_EXT_memory_object_fd")
+                && unsafe { wgpu_device.as_hal::<wgpu::wgc::api::Vulkan>() }.is_some_and(
+                    |device| {
+                        device
+                            .enabled_device_extensions()
+                            .contains(&ash::khr::external_memory_fd::NAME)
+                    },
+                );
             Ok(Self {
+                gl_ext,
+                shared_frames: Cell::new(shared_frames),
                 size: Cell::new(size),
                 swap_chain,
                 surfman,
@@ -174,9 +219,33 @@ mod platform {
             &self,
             wgpu_device: &wgpu::Device,
         ) -> Result<Image, RenderingBridgeError> {
-            let texture = self.import_frame_into_wgpu(wgpu_device)?;
-            Image::try_from(texture)
-                .map_err(|error| RenderingBridgeError::SlintTexture(error.to_string()))
+            if self.shared_frames.get() {
+                let imported = self
+                    .import_frame_into_wgpu(wgpu_device)
+                    .and_then(|texture| {
+                        Image::try_from(texture)
+                            .map_err(|error| RenderingBridgeError::SlintTexture(error.to_string()))
+                    });
+                match imported {
+                    Ok(image) => return Ok(image),
+                    Err(error) => {
+                        log::warn!("Switching to framebuffer readback: {error}");
+                        self.shared_frames.set(false);
+                    }
+                }
+            }
+            let size = self.size2d().to_i32();
+            let pixels = self
+                .read_to_image(DeviceIntRect::from_origin_and_size(
+                    euclid::Point2D::zero(),
+                    size.cast_unit(),
+                ))
+                .ok_or(RenderingBridgeError::ReadbackFailed)?;
+            Ok(Image::from_rgba8(SharedPixelBuffer::clone_from_slice(
+                pixels.as_raw(),
+                pixels.width(),
+                pixels.height(),
+            )))
         }
 
         fn import_frame_into_wgpu(
@@ -224,6 +293,11 @@ mod platform {
                         .push_next(&mut external_image),
                     None,
                 )?;
+                let mut allocation = SharedImage {
+                    device: vulkan_device.clone(),
+                    image,
+                    memory: vk::DeviceMemory::null(),
+                };
                 let requirements = vulkan_device.get_image_memory_requirements(image);
                 let memory_properties = vulkan_instance
                     .get_physical_device_memory_properties(hal_device.raw_physical_device());
@@ -242,11 +316,8 @@ mod platform {
                         .push_next(&mut export),
                     None,
                 )?;
-                if let Err(error) = vulkan_device.bind_image_memory(image, memory, 0) {
-                    vulkan_device.free_memory(memory, None);
-                    vulkan_device.destroy_image(image, None);
-                    return Err(error.into());
-                }
+                allocation.memory = memory;
+                vulkan_device.bind_image_memory(image, memory, 0)?;
 
                 let external_memory =
                     ash::khr::external_memory_fd::Device::new(vulkan_instance, &vulkan_device);
@@ -257,8 +328,7 @@ mod platform {
                 )?;
 
                 let gl = &self.surfman.glow_gl;
-                let gl_ext =
-                    gl_bindings::Gles2::load_with(|name| device.get_proc_address(&context, name));
+                let gl_ext = &self.gl_ext;
                 let mut memory_object = 0;
                 gl_ext.CreateMemoryObjectsEXT(1, &mut memory_object);
                 gl_ext.MemoryObjectParameterivEXT(
@@ -273,7 +343,10 @@ mod platform {
                     memory_fd,
                 );
 
-                let texture = gl.create_texture().map_err(RenderingBridgeError::OpenGl)?;
+                let texture = gl.create_texture().map_err(|error| {
+                    gl_ext.DeleteMemoryObjectsEXT(1, &memory_object);
+                    RenderingBridgeError::OpenGl(error)
+                })?;
                 gl.bind_texture(glow::TEXTURE_2D, Some(texture));
                 gl_ext.TexStorageMem2DEXT(
                     glow::TEXTURE_2D,
@@ -284,9 +357,11 @@ mod platform {
                     memory_object,
                     0,
                 );
-                let draw_framebuffer = gl
-                    .create_framebuffer()
-                    .map_err(RenderingBridgeError::OpenGl)?;
+                let draw_framebuffer = gl.create_framebuffer().map_err(|error| {
+                    gl.delete_texture(texture);
+                    gl_ext.DeleteMemoryObjectsEXT(1, &memory_object);
+                    RenderingBridgeError::OpenGl(error)
+                })?;
                 gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(draw_framebuffer));
                 gl.framebuffer_texture_2d(
                     glow::DRAW_FRAMEBUFFER,
@@ -316,6 +391,13 @@ mod platform {
                 gl.delete_texture(texture);
                 gl_ext.DeleteMemoryObjectsEXT(1, &memory_object);
 
+                let error = gl.get_error();
+                if error != glow::NO_ERROR {
+                    return Err(RenderingBridgeError::OpenGl(format!(
+                        "framebuffer transfer returned {error:#x}"
+                    )));
+                }
+
                 let texture = wgpu_device.create_texture_from_hal::<wgpu::wgc::api::Vulkan>(
                     hal_device.texture_from_raw(
                         image,
@@ -334,10 +416,7 @@ mod platform {
                             view_formats: Vec::new(),
                             memory_flags: hal::MemoryFlags::empty(),
                         },
-                        Some(Box::new(move || {
-                            vulkan_device.destroy_image(image, None);
-                            vulkan_device.free_memory(memory, None);
-                        })),
+                        Some(Box::new(move || drop(allocation))),
                         hal::vulkan::TextureMemory::External,
                     ),
                     &wgpu::TextureDescriptor {
@@ -391,8 +470,32 @@ mod platform {
                 .bind_framebuffer(gl::FRAMEBUFFER, framebuffer);
         }
 
-        fn read_to_image(&self, _source_rectangle: DeviceIntRect) -> Option<RgbaImage> {
-            None
+        fn read_to_image(&self, rect: DeviceIntRect) -> Option<RgbaImage> {
+            if rect.is_empty() {
+                return None;
+            }
+            self.surfman.make_current().ok()?;
+            let framebuffer = self.surfman.framebuffer()?;
+            let gl = &self.surfman.gleam_gl;
+            gl.bind_framebuffer(gl::READ_FRAMEBUFFER, framebuffer.0.get());
+            let mut pixels = gl.read_pixels(
+                rect.min.x,
+                rect.min.y,
+                rect.width(),
+                rect.height(),
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+            );
+            if gl.get_error() != gl::NO_ERROR {
+                return None;
+            }
+            let height = rect.height() as usize;
+            let stride = rect.width() as usize * 4;
+            for row in 0..height / 2 {
+                let (top, bottom) = pixels.split_at_mut((height - row - 1) * stride);
+                top[row * stride..(row + 1) * stride].swap_with_slice(&mut bottom[..stride]);
+            }
+            RgbaImage::from_raw(rect.width() as u32, rect.height() as u32, pixels)
         }
 
         fn size(&self) -> PhysicalSize<u32> {
