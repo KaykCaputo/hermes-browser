@@ -681,6 +681,36 @@ fn connect_ui_callbacks(
         window.window().request_redraw();
     });
 
+    let menu_controller = Rc::clone(&controller);
+    let menu_window = window.as_weak();
+    window.on_browser_action(move |action| {
+        use talaria_core::ZoomAction;
+
+        let Some(window) = menu_window.upgrade() else {
+            return;
+        };
+        match action.as_str() {
+            "reopen" => {
+                if menu_controller.borrow_mut().reopen_closed_tab() {
+                    sync_ui(&window, &menu_controller.borrow());
+                }
+            }
+            "fullscreen" => toggle_fullscreen(&window),
+            action => {
+                let zoom = match action {
+                    "zoom-in" => ZoomAction::In,
+                    "zoom-out" => ZoomAction::Out,
+                    "zoom-reset" => ZoomAction::Reset,
+                    _ => return,
+                };
+                menu_controller
+                    .borrow_mut()
+                    .queue_command(BrowserCommand::Zoom(zoom));
+            }
+        }
+        window.window().request_redraw();
+    });
+
     let back_controller = Rc::clone(&controller);
     let back_window = window.as_weak();
     window.on_go_back(move || {
@@ -996,17 +1026,19 @@ fn handle_browser_shortcut(
             sync_ui(window, &controller.borrow());
         }
         Shortcut::Bookmark => window.invoke_toggle_bookmark(),
-        Shortcut::Fullscreen => {
-            let fullscreen = !window.window().is_fullscreen();
-            window.set_user_fullscreen(fullscreen);
-            window.window().set_fullscreen(fullscreen);
-        }
+        Shortcut::Fullscreen => toggle_fullscreen(window),
         Shortcut::Quit => {
             let _ = slint::quit_event_loop();
         }
     }
     window.window().request_redraw();
     true
+}
+
+fn toggle_fullscreen(window: &MainWindow) {
+    let fullscreen = !window.window().is_fullscreen();
+    window.set_user_fullscreen(fullscreen);
+    window.window().set_fullscreen(fullscreen);
 }
 
 fn keyboard_input_from_winit(

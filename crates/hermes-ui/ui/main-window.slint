@@ -1,3 +1,5 @@
+import { Button, Palette } from "std-widgets.slint";
+
 export struct BookmarkTile {
     address: string,
     label: string,
@@ -178,6 +180,7 @@ export component MainWindow inherits Window {
     in property <bool> shield-paused;
     callback open-site-panel();
     callback toggle-shield();
+    callback browser-action(string);
     callback toggle-bookmark();
     callback navigate(string);
     callback go-back;
@@ -356,8 +359,39 @@ export component MainWindow inherits Window {
                     accessible-label: "Ad and tracker blocking";
                     clicked => { root.open-site-panel(); site-panel.show(); }
                 }
+
+                ChromeButton {
+                    label: "⋮";
+                    accessible-label: "Browser menu";
+                    clicked => { browser-menu.show(); }
+                }
             }
 
+            browser-menu := PopupWindow {
+                x: Math.max(0px, root.width - 248px);
+                y: 44px;
+                width: 232px;
+                height: 210px;
+                Rectangle {
+                    background: #171f29;
+                    border-color: #344454;
+                    border-width: 1px;
+                    border-radius: 12px;
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 5px;
+                        Button { text: "New tab"; clicked => { browser-menu.close(); root.new-tab(); } }
+                        Button { text: "Reopen closed tab"; clicked => { browser-menu.close(); root.browser-action("reopen"); } }
+                        HorizontalLayout {
+                            spacing: 4px;
+                            Button { text: "−"; accessible-label: "Zoom out"; clicked => { root.browser-action("zoom-out"); } }
+                            Button { text: "Reset zoom"; clicked => { root.browser-action("zoom-reset"); } }
+                            Button { text: "+"; accessible-label: "Zoom in"; clicked => { root.browser-action("zoom-in"); } }
+                        }
+                        Button { text: root.user-fullscreen ? "Exit fullscreen" : "Fullscreen"; clicked => { browser-menu.close(); root.browser-action("fullscreen"); } }
+                    }
+                }
+            }
             site-panel := PopupWindow {
                 x: Math.max(0px, root.width - 300px);
                 y: 44px;
