@@ -13,7 +13,8 @@ export struct AddressSuggestion {
 export struct BookmarkTile {
     address: string,
     label: string,
-    initial: string,
+    icon: image,
+    has-icon: bool,
 }
 
 export enum WebViewPointerButton {
@@ -965,15 +966,13 @@ export component MainWindow inherits Window {
                                         accessible-role: button;
                                         accessible-label: bookmark.label;
                                         accessible-action-default => { root.navigate(bookmark.address); }
-                                        Text {
-                                            y: 7px;
-                                            width: parent.width;
+                                        Image {
+                                            x: (parent.width - self.width) / 2;
+                                            y: 8px;
+                                            width: 28px;
                                             height: 28px;
-                                            text: bookmark.initial;
-                                            color: (ChromeTheme.light ? #125f98 : #71c5ff);
-                                            font-size: 20px;
-                                            font-weight: 650;
-                                            horizontal-alignment: center;
+                                            image-fit: contain;
+                                            source: bookmark.has-icon ? bookmark.icon : @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
                                         }
                                         Text {
                                             x: 6px;

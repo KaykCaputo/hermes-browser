@@ -3,13 +3,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use talaria_core::BrowserController;
+use talaria_core::{BrowserController, BrowserState, PageIcon};
 use tempfile::NamedTempFile;
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct ProfileData {
     #[serde(default)]
     pub bookmarks: Vec<String>,
+    #[serde(default)]
+    pub bookmark_icons: std::collections::BTreeMap<String, BookmarkIcon>,
     #[serde(default)]
     pub theme: i32,
     #[serde(default)]
@@ -26,6 +28,42 @@ pub struct ProfileData {
     active: usize,
     #[serde(default)]
     pinned_tabs: usize,
+}
+
+#[derive(Serialize, Deserialize, PartialEq)]
+pub struct BookmarkIcon {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
+impl BookmarkIcon {
+    fn from_page(icon: &PageIcon) -> Self {
+        let longest = icon.width().max(icon.height());
+        let scale = |dimension: u32| {
+            ((u64::from(dimension) * u64::from(longest.min(32))) / u64::from(longest)).max(1) as u32
+        };
+        let width = scale(icon.width());
+        let height = scale(icon.height());
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let source_x = u64::from(x) * u64::from(icon.width()) / u64::from(width);
+                let source_y = u64::from(y) * u64::from(icon.height()) / u64::from(height);
+                let offset = ((source_y * u64::from(icon.width()) + source_x) * 4) as usize;
+                pixels.extend_from_slice(&icon.rgba()[offset..offset + 4]);
+            }
+        }
+        Self {
+            width,
+            height,
+            pixels,
+        }
+    }
+
+    pub fn page_icon(&self) -> Option<PageIcon> {
+        PageIcon::from_rgba(self.width, self.height, self.pixels.clone())
+    }
 }
 
 pub struct Profile {
@@ -73,6 +111,21 @@ impl Profile {
 }
 
 impl ProfileData {
+    pub fn update_bookmark_icon(&mut self, state: &BrowserState) -> bool {
+        let Some(icon) = state.page_icon() else {
+            return false;
+        };
+        if !self.bookmarks.iter().any(|url| url == state.url()) {
+            return false;
+        }
+        let saved = BookmarkIcon::from_page(icon);
+        if self.bookmark_icons.get(state.url()) == Some(&saved) {
+            return false;
+        }
+        self.bookmark_icons.insert(state.url().to_owned(), saved);
+        true
+    }
+
     pub fn restore(&self) -> BrowserController {
         let mut controller = BrowserController::from_session(&self.tabs, self.active);
         for index in 0..self.pinned_tabs.min(self.tabs.len()) {

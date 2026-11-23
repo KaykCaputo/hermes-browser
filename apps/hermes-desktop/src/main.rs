@@ -87,13 +87,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|profile| profile.data.shield_exceptions.iter().cloned().collect())
             .unwrap_or_default(),
     ));
+    let profile = Rc::new(RefCell::new(profile));
     connect_servo_runtime(
         &window,
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
-        profile
-            .as_ref()
-            .map(|profile| profile.directory().to_owned()),
+        Rc::clone(&profile),
         Rc::clone(&shield_exceptions),
     )?;
     sync_ui(&window, &controller.borrow());
@@ -102,7 +101,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         Rc::clone(&controller),
         Rc::clone(&web_view_focused),
     );
-    let profile = Rc::new(RefCell::new(profile));
     connect_bookmarks(&window, &controller, &profile);
     connect_appearance(&window, &profile);
     connect_tab_layout(&window, &profile);
@@ -125,7 +123,7 @@ fn connect_bookmarks(
 ) {
     if let Some(profile) = profile.borrow().as_ref() {
         window.set_profile_available(true);
-        set_bookmarks(window, &profile.data.bookmarks);
+        set_bookmarks(window, &profile.data);
     }
     let remove_window = window.as_weak();
     let remove_profile = Rc::clone(profile);
@@ -141,7 +139,8 @@ fn connect_bookmarks(
             .data
             .bookmarks
             .retain(|bookmark| bookmark != address.as_str());
-        set_bookmarks(&window, &profile.data.bookmarks);
+        profile.data.bookmark_icons.remove(address.as_str());
+        set_bookmarks(&window, &profile.data);
         if let Err(error) = profile.save() {
             eprintln!("Could not remove shortcut: {error}");
         }
@@ -163,10 +162,12 @@ fn connect_bookmarks(
         let bookmarks = &mut profile.data.bookmarks;
         if let Some(index) = bookmarks.iter().position(|saved| saved == address) {
             bookmarks.remove(index);
+            profile.data.bookmark_icons.remove(address);
         } else {
             bookmarks.push(address.to_owned());
+            profile.data.update_bookmark_icon(controller.state());
         }
-        set_bookmarks(&window, bookmarks);
+        set_bookmarks(&window, &profile.data);
         profile.data.remember_tabs(&controller);
         if let Err(error) = profile.save() {
             eprintln!("Could not save bookmarks: {error}");
@@ -284,9 +285,9 @@ fn sync_bookmark_state(window: &MainWindow) {
     );
 }
 
-fn set_bookmarks(window: &MainWindow, bookmarks: &[String]) {
+fn set_bookmarks(window: &MainWindow, data: &profile::ProfileData) {
     window.set_bookmarks(ModelRc::new(VecModel::from(
-        bookmarks
+        data.bookmarks
             .iter()
             .map(|address| {
                 let parsed = talaria_core::resolve_address(address).ok();
@@ -295,15 +296,18 @@ fn set_bookmarks(window: &MainWindow, bookmarks: &[String]) {
                     .and_then(|url| url.host_str())
                     .unwrap_or(address);
                 let label = label.strip_prefix("www.").unwrap_or(label);
+                let icon = data
+                    .bookmark_icons
+                    .get(address)
+                    .and_then(|saved| saved.page_icon());
                 BookmarkTile {
                     address: address.as_str().into(),
                     label: label.into(),
-                    initial: label
-                        .chars()
-                        .next()
-                        .map(|letter| letter.to_uppercase().to_string())
-                        .unwrap_or_default()
-                        .into(),
+                    has_icon: icon.is_some(),
+                    icon: icon
+                        .as_ref()
+                        .map(slint_image_from_page_icon)
+                        .unwrap_or_default(),
                 }
             })
             .collect::<Vec<_>>(),
@@ -348,9 +352,10 @@ fn connect_servo_runtime(
     window: &MainWindow,
     controller: Rc<RefCell<BrowserController>>,
     web_view_focused: Rc<Cell<bool>>,
-    profile_directory: Option<std::path::PathBuf>,
+    profile: Rc<RefCell<Option<profile::Profile>>>,
     shield_exceptions: Rc<RefCell<HashSet<String>>>,
 ) -> Result<(), slint::SetRenderingNotifierError> {
+    let profile_directory = profile.borrow().as_ref().map(|p| p.directory().to_owned());
     let weak_window_for_waker = window.as_weak();
     let event_loop_waker = EventLoopWaker::new(move || {
         let _wake_result = weak_window_for_waker.upgrade_in_event_loop(|window| {
@@ -441,7 +446,20 @@ fn connect_servo_runtime(
                     return;
                 };
 
-                if apply_pending_browser_events(&controller, &browser_event_receiver) {
+                let mut icons_changed = false;
+                let changed =
+                    apply_pending_browser_events(&controller, &browser_event_receiver, |state| {
+                        if let Some(profile) = profile.borrow_mut().as_mut() {
+                            icons_changed |= profile.data.update_bookmark_icon(state);
+                        }
+                    });
+                if icons_changed && let Some(profile) = profile.borrow().as_ref() {
+                    set_bookmarks(&window, &profile.data);
+                    if let Err(error) = profile.save() {
+                        eprintln!("Could not save bookmark icons: {error}");
+                    }
+                }
+                if changed {
                     sync_ui(&window, &controller.borrow());
                 }
 
@@ -651,13 +669,22 @@ fn report_web_view_error(
 fn apply_pending_browser_events(
     controller: &RefCell<BrowserController>,
     receiver: &Receiver<TabEvent>,
+    mut update_icon: impl FnMut(&talaria_core::BrowserState),
 ) -> bool {
     let mut state_changed = false;
     let mut controller = controller.borrow_mut();
 
     for tab_event in receiver.try_iter() {
         let tab_id = tab_event.tab_id();
-        state_changed |= controller.handle_event(tab_id, tab_event.into_event());
+        let event = tab_event.into_event();
+        let update = matches!(
+            event,
+            BrowserEvent::PageIconChanged { .. } | BrowserEvent::AddressChanged { .. }
+        );
+        state_changed |= controller.handle_event(tab_id, event);
+        if update && let Some(tab) = controller.tabs().find(|tab| tab.id() == tab_id) {
+            update_icon(tab.state());
+        }
     }
 
     state_changed
@@ -1499,7 +1526,7 @@ mod tests {
             ))
             .expect("the event receiver should be connected");
 
-        assert!(apply_pending_browser_events(&controller, &receiver));
+        assert!(apply_pending_browser_events(&controller, &receiver, |_| {}));
         let controller = controller.borrow();
         let titles = controller
             .tabs()
