@@ -78,12 +78,6 @@ jobs:
             build-essential \
             clang-14 \
             cmake \
-            ffmpeg \
-            mesa-vulkan-drivers \
-            pulseaudio \
-            xvfb \
-            xauth \
-            xdotool \
             gstreamer1.0-gl \
             gstreamer1.0-libav \
             gstreamer1.0-plugins-bad \
@@ -187,6 +181,40 @@ jobs:
       - name: Create Linux packages
         run: make package-deb LINUX_PACKAGE_NAME=hermes-browser-linux-x86_64
 
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: hermes-browser-linux-x86_64
+          path: |
+            dist/hermes-browser-linux-x86_64.tar.gz
+            dist/hermes-browser-linux-x86_64.tar.gz.sha256
+            dist/hermes-browser_*_amd64.deb*
+          if-no-files-found: error
+          retention-days: 14
+
+  test-linux-media:
+    name: Verify packaged Linux video and audio
+    needs: build-linux
+    # Ubuntu 22.04's software Vulkan driver can produce a black window under Xvfb.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v6
+
+      - name: Download Linux packages
+        uses: actions/download-artifact@v8
+        with:
+          name: hermes-browser-linux-x86_64
+          path: dist
+
+      - name: Install playback test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ffmpeg mesa-vulkan-drivers pulseaudio pulseaudio-utils xauth xdotool xvfb
+          sudo apt-get install --yes ./dist/hermes-browser_*_amd64.deb
+
       - name: Test video playback from the extracted archive
         env:
           # GitHub-hosted runners have no GPU. Allow Mesa's software Vulkan adapter.
@@ -204,22 +232,10 @@ jobs:
           pulseaudio --start --exit-idle-time=-1
           xvfb-run -a python3 scripts/test-packaged-media.py "${RUNNER_TEMP}/${package}/hermes-browser"
 
-      - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: hermes-browser-linux-x86_64
-          path: |
-            dist/hermes-browser-linux-x86_64.tar.gz
-            dist/hermes-browser-linux-x86_64.tar.gz.sha256
-            dist/hermes-browser_*_amd64.deb*
-          if-no-files-found: error
-          retention-days: 14
-
   publish-release:
     name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs:
-      - build-linux
+    needs: test-linux-media
     runs-on: ubuntu-24.04
     timeout-minutes: 15
 
