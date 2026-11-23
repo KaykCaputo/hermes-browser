@@ -30,7 +30,7 @@ gst-inspect-1.0 vp9dec
 
 ## YouTube and streaming sites
 
-Hermes' Servo 0.7.0 integration can play YouTube video and audio on Linux. Streaming sites change frequently, however, and their compatibility can depend on Servo's web-platform support, the selected stream format, and the codecs installed on the machine.
+Open a regular YouTube watch link. Hermes requests the tablet player on YouTube so that Servo can play video and audio through GStreamer. Streaming sites change frequently, however, and their compatibility can depend on Servo's web-platform support, the selected stream format, and the codecs installed on the machine.
 
 If a streaming site fails, first test a direct MP4 or WebM file. That comparison separates a website compatibility problem from a GStreamer, decoder, or audio-output problem.
 

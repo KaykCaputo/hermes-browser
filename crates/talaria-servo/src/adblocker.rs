@@ -33,17 +33,16 @@ impl ContentBlocker {
         web_view: Option<&WebView>,
         load: WebResourceLoad,
     ) {
-        let source_url = load
-            .request()
-            .referrer_url
-            .clone()
-            .or_else(|| web_view.and_then(WebView::url));
-
-        if !self.should_block(load.request(), source_url.as_ref()) {
+        let request = load.request();
+        let should_block = match &request.referrer_url {
+            Some(source) => self.should_block(request, Some(source.as_url())),
+            None => self.should_block(request, web_view.and_then(WebView::url).as_ref()),
+        };
+        if !should_block {
             return;
         }
 
-        let blocked_url = load.request().url.clone();
+        let blocked_url = load.request().url.clone().into_url();
         let blocked_count = self.blocked_requests.get() + 1;
         self.blocked_requests.set(blocked_count);
         if blocked_count == 1 {

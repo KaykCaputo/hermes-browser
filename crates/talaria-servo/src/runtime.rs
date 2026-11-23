@@ -234,6 +234,7 @@ impl servo::WebViewDelegate for BrowserDelegate {
             }
             LoadStatus::HeadParsed => self.record_load_milestone(LoadMilestone::HeadParsed),
             LoadStatus::Complete => self.record_load_milestone(LoadMilestone::Complete),
+            LoadStatus::Stopped => *self.load_metrics.borrow_mut() = PageLoadMetrics::default(),
         }
 
         self.send_browser_event(BrowserEvent::LoadStateChanged {
@@ -321,6 +322,7 @@ fn load_state_from_servo(status: LoadStatus) -> LoadState {
     match status {
         LoadStatus::Started | LoadStatus::HeadParsed => LoadState::Loading,
         LoadStatus::Complete => LoadState::Loaded,
+        LoadStatus::Stopped => LoadState::Idle,
     }
 }
 

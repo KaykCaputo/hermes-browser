@@ -11,6 +11,8 @@ Hermes vendors code when a pinned Servo dependency needs a small, reviewable com
 
 | Directory | Upstream version | Why Hermes carries it |
 | --- | --- | --- |
+| `third_party/servo-canvas` | 0.8.0 | Read mapped GPU buffers with the WGPU 30 API |
+| `third_party/servo-net` | 0.8.0 | Accept larger HTTP/2 response headers, request the compatible YouTube player, and skip unused inspector metadata |
 | `third_party/gaol` | 0.2.1 | Modern Linux syscall compatibility and a non-zero file-size limit for Servo shared-memory IPC |
 | `third_party/surfman` | 0.14.0 | Avoid process-global `DRI_PRIME=1` selection and its race with media initialization |
 
@@ -38,7 +40,7 @@ cargo test \
 
 The separate target directory avoids leaving an untracked build tree inside the vendored crate.
 
-Media uses Servo's upstream GStreamer backend without a local patch. It still needs a manual playback check because unit tests cannot prove that the host's plugins, decoder selection, audio sink, frame transfer, and isolated content process work together.
+Media uses Servo's upstream GStreamer backend without a local patch. The release smoke test checks the packaged executable with visible video frames and captured audio. Live streaming sites also need periodic manual checks.
 
 ## Remove a patch
 

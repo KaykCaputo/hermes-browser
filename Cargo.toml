@@ -23,7 +23,7 @@ gleam = "0.15"
 glow = "0.17"
 log = "0.4"
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std"] }
-servo = { version = "=0.7.0", features = ["vello"] }
+servo = { version = "=0.8.0", features = ["brotli-compression-stream", "subtlecrypto", "vello", "webgl"] }
 slint = { version = "~1.17.1", default-features = false, features = [
     "backend-winit",
     "compat-1-2",
@@ -38,6 +38,8 @@ thiserror = "2"
 url = "2.5"
 
 [patch.crates-io]
+servo-canvas = { path = "third_party/servo-canvas" }
+servo-net = { path = "third_party/servo-net" }
 gaol = { path = "third_party/gaol" }
 surfman = { path = "third_party/surfman" }
 
