@@ -4,7 +4,7 @@ use std::error::Error;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 
-use hermes_ui::{BookmarkTile, BrowserTab, MainWindow, WebViewPointerButton};
+use hermes_ui::{BookmarkTile, BrowserTab, ChromeTheme, MainWindow, WebViewPointerButton};
 use rendering::BrowserRenderingContext;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{
@@ -89,6 +89,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
     let profile = Rc::new(RefCell::new(profile));
     connect_bookmarks(&window, &controller, &profile);
+    connect_appearance(&window, &profile);
     connect_shields(&window, &controller, &profile, &shield_exceptions);
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
 
@@ -134,6 +135,34 @@ fn connect_bookmarks(
         profile.data.remember_tabs(&controller);
         if let Err(error) = profile.save() {
             eprintln!("Could not save bookmarks: {error}");
+        }
+    });
+}
+
+fn connect_appearance(window: &MainWindow, profile: &Rc<RefCell<Option<profile::Profile>>>) {
+    let weak = window.as_weak();
+    window.window().with_winit_window(|native| {
+        window
+            .global::<ChromeTheme>()
+            .set_system_light(native.theme() == Some(winit::window::Theme::Light));
+    });
+    if let Some(profile) = profile.borrow().as_ref() {
+        window
+            .global::<ChromeTheme>()
+            .set_mode(profile.data.theme.clamp(0, 2));
+        window.set_new_tab_gradient(profile.data.new_tab_gradient);
+    }
+    let profile = Rc::clone(profile);
+    window.on_appearance_changed(move |theme, gradient| {
+        let Some(window) = weak.upgrade() else { return };
+        window.global::<ChromeTheme>().set_mode(theme);
+        window.set_new_tab_gradient(gradient);
+        if let Some(profile) = profile.borrow_mut().as_mut() {
+            profile.data.theme = theme;
+            profile.data.new_tab_gradient = gradient;
+            if let Err(error) = profile.save() {
+                eprintln!("Could not save appearance: {error}");
+            }
         }
     });
 }
@@ -863,6 +892,11 @@ fn connect_native_keyboard_input(
             };
 
             match event {
+                WindowEvent::ThemeChanged(theme) => {
+                    window
+                        .global::<ChromeTheme>()
+                        .set_system_light(*theme == winit::window::Theme::Light);
+                }
                 WindowEvent::ModifiersChanged(changed) => {
                     modifiers = changed.state();
                 }

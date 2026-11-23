@@ -11,6 +11,10 @@ pub struct ProfileData {
     #[serde(default)]
     pub bookmarks: Vec<String>,
     #[serde(default)]
+    pub theme: i32,
+    #[serde(default)]
+    pub new_tab_gradient: bool,
+    #[serde(default)]
     pub shield_exceptions: std::collections::BTreeSet<String>,
     #[serde(default)]
     tabs: Vec<String>,

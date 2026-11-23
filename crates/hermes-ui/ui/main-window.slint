@@ -1,4 +1,10 @@
-import { Button, Palette } from "std-widgets.slint";
+import { Button } from "std-widgets.slint";
+
+export global ChromeTheme {
+    in property <int> mode: 0;
+    in property <bool> system-light;
+    out property <bool> light: mode == 1 || (mode == 0 && system-light);
+}
 
 export struct BookmarkTile {
     address: string,
@@ -26,6 +32,19 @@ component ChromeButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked;
 
+    border-width: keyboard.has-focus ? 1px : 0px;
+    border-color: ChromeTheme.light ? #1469a7 : #62bfff;
+    keyboard := FocusScope {
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == Key.Return || event.text == " " {
+                root.clicked();
+                return accept;
+            }
+            reject
+        }
+    }
+
     accessible-role: button;
     accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.clicked(); } }
@@ -33,13 +52,13 @@ component ChromeButton inherits Rectangle {
     height: 34px;
     border-radius: 7px;
     background: button-area.pressed && root.enabled
-        ? #222d39
-        : button-area.has-hover && root.enabled ? #19222c : transparent;
+        ? (ChromeTheme.light ? #cddceb : #222d39)
+        : button-area.has-hover && root.enabled ? (ChromeTheme.light ? #dbe6f1 : #19222c) : transparent;
     opacity: root.enabled ? 1 : 0.32;
 
     Text {
         text: root.label;
-        color: button-area.has-hover && root.enabled ? #71c5ff : #9aa6b5;
+        color: button-area.has-hover && root.enabled ? (ChromeTheme.light ? #125f98 : #71c5ff) : (ChromeTheme.light ? #40536a : #9aa6b5);
         font-size: 17px;
         font-weight: 500;
         horizontal-alignment: center;
@@ -80,15 +99,15 @@ component BrowserTabButton inherits Rectangle {
     horizontal-stretch: 1;
     border-radius: 8px;
     background: root.tab.active
-        ? #11171f
-        : tab-touch.has-hover ? #111820 : transparent;
+        ? (ChromeTheme.light ? #f7f9fc : #11171f)
+        : tab-touch.has-hover ? (ChromeTheme.light ? #dbe6f1 : #111820) : transparent;
 
     if !root.tab.active && !tab-touch.has-hover: Rectangle {
         x: parent.width - 1px;
         y: 9px;
         width: 1px;
         height: parent.height - 18px;
-        background: #29323d;
+        background: (ChromeTheme.light ? #c7d3e1 : #29323d);
     }
 
     tab-touch := TouchArea {
@@ -113,7 +132,7 @@ component BrowserTabButton inherits Rectangle {
         Text {
             horizontal-stretch: 1;
             text: root.tab.title;
-            color: root.tab.active ? #edf4fa : #8b98a8;
+            color: root.tab.active ? (ChromeTheme.light ? #142337 : #edf4fa) : (ChromeTheme.light ? #4a5e75 : #8b98a8);
             font-size: 13px;
             font-weight: root.tab.active ? 550 : 450;
             overflow: elide;
@@ -124,7 +143,7 @@ component BrowserTabButton inherits Rectangle {
             width: 6px;
             height: 6px;
             border-radius: 3px;
-            background: #62bfff;
+            background: (ChromeTheme.light ? #1469a7 : #62bfff);
         }
 
         if root.closable: Rectangle {
@@ -132,12 +151,12 @@ component BrowserTabButton inherits Rectangle {
             height: 22px;
             border-radius: 6px;
             background: close-touch.pressed
-                ? #2b3744
-                : close-touch.has-hover ? #222c37 : transparent;
+                ? (ChromeTheme.light ? #c9daec : #2b3744)
+                : close-touch.has-hover ? (ChromeTheme.light ? #dce7f2 : #222c37) : transparent;
 
             Text {
                 text: "×";
-                color: close-touch.has-hover ? #edf4fa : #7f8c9c;
+                color: close-touch.has-hover ? (ChromeTheme.light ? #142337 : #edf4fa) : (ChromeTheme.light ? #51667e : #7f8c9c);
                 font-size: 15px;
                 horizontal-alignment: center;
                 vertical-alignment: center;
@@ -181,6 +200,8 @@ export component MainWindow inherits Window {
     callback open-site-panel();
     callback toggle-shield();
     callback browser-action(string);
+    in property <bool> new-tab-gradient;
+    callback appearance-changed(int, bool);
     callback toggle-bookmark();
     callback navigate(string);
     callback go-back;
@@ -221,7 +242,7 @@ export component MainWindow inherits Window {
     min-height: 0px;
     max-width: 100000px;
     max-height: 100000px;
-    background: #0b0f14;
+    background: (ChromeTheme.light ? #e9eff7 : #0b0f14);
 
     VerticalLayout {
         spacing: 0px;
@@ -229,7 +250,7 @@ export component MainWindow inherits Window {
         Rectangle {
             visible: !root.page-fullscreen;
             height: root.page-fullscreen ? 0px : 38px;
-            background: #0b0f14;
+            background: (ChromeTheme.light ? #e9eff7 : #0b0f14);
 
             HorizontalLayout {
                 padding-left: 10px;
@@ -278,7 +299,7 @@ export component MainWindow inherits Window {
         Rectangle {
             visible: !root.page-fullscreen;
             height: root.page-fullscreen ? 0px : 46px;
-            background: #11171f;
+            background: (ChromeTheme.light ? #f7f9fc : #11171f);
 
             HorizontalLayout {
                 padding-left: 14px;
@@ -318,8 +339,8 @@ export component MainWindow inherits Window {
                     height: 34px;
                     border-radius: 17px;
                     border-width: 1px;
-                    border-color: address-input.has-focus ? #62bfff : #29323d;
-                    background: #1a222c;
+                    border-color: address-input.has-focus ? (ChromeTheme.light ? #1469a7 : #62bfff) : (ChromeTheme.light ? #c7d3e1 : #29323d);
+                    background: (ChromeTheme.light ? #e9eff7 : #1a222c);
 
                     ChromeButton {
                         width: 34px;
@@ -335,7 +356,7 @@ export component MainWindow inherits Window {
                         width: parent.width - 48px;
                         height: parent.height;
                         text <=> root.address;
-                        color: #edf4fa;
+                        color: (ChromeTheme.light ? #142337 : #edf4fa);
                         font-size: 14px;
                         vertical-alignment: center;
                         single-line: true;
@@ -373,8 +394,8 @@ export component MainWindow inherits Window {
                 width: 232px;
                 height: 210px;
                 Rectangle {
-                    background: #171f29;
-                    border-color: #344454;
+                    background: (ChromeTheme.light ? #ffffff : #171f29);
+                    border-color: (ChromeTheme.light ? #b4c4d7 : #344454);
                     border-width: 1px;
                     border-radius: 12px;
                     VerticalLayout {
@@ -398,8 +419,8 @@ export component MainWindow inherits Window {
                 width: 284px;
                 height: 142px;
                 Rectangle {
-                    background: #171f29;
-                    border-color: #344454;
+                    background: (ChromeTheme.light ? #ffffff : #171f29);
+                    border-color: (ChromeTheme.light ? #b4c4d7 : #344454);
                     border-width: 1px;
                     border-radius: 12px;
                     VerticalLayout {
@@ -408,16 +429,16 @@ export component MainWindow inherits Window {
                         Text {
                             text: root.site-host == "" ? "Site information" : root.site-host;
                             font-weight: 650;
-                            color: #edf4fa;
+                            color: (ChromeTheme.light ? #142337 : #edf4fa);
                             overflow: elide;
                         }
                         Text {
                             text: root.site-host == "" ? "Internal page" : root.site-https ? "HTTPS connection" : "Unencrypted HTTP connection";
-                            color: #a4b2bf;
+                            color: (ChromeTheme.light ? #40536a : #a4b2bf);
                         }
                         if root.site-host != "": Text {
                             text: root.shield-paused ? "Blocking paused for this site" : "Requests blocked on this page: " + root.blocked-requests;
-                            color: #a4b2bf;
+                            color: (ChromeTheme.light ? #40536a : #a4b2bf);
                         }
                         if root.site-host != "": ChromeButton {
                             width: 254px;
@@ -433,13 +454,13 @@ export component MainWindow inherits Window {
                 y: parent.height - 1px;
                 width: parent.width;
                 height: 1px;
-                background: #202832;
+                background: (ChromeTheme.light ? #cfdae7 : #202832);
             }
         }
 
         web-view-area := Rectangle {
             vertical-stretch: 1;
-            background: #0c1117;
+            background: (ChromeTheme.light ? #f5f8fd : #0c1117);
 
             if root.web-view-visible: Image {
                 width: parent.width;
@@ -453,11 +474,46 @@ export component MainWindow inherits Window {
                 y: 0px;
                 width: parent.width * 45%;
                 height: 2px;
-                background: #62bfff;
+                background: (ChromeTheme.light ? #1469a7 : #62bfff);
             }
 
             if root.is-new-tab: Rectangle {
-                background: #0c1117;
+                background: root.new-tab-gradient
+                    ? (ChromeTheme.light ? @linear-gradient(155deg, #f9fbff, #dce9fc) : @linear-gradient(155deg, #182b43, #0c1117 80%))
+                    : (ChromeTheme.light ? #f5f8fd : #0c1117);
+
+                appearance := PopupWindow {
+                    width: 254px;
+                    height: 184px;
+                    x: Math.max(0px, web-view-area.width - 270px);
+                    y: Math.max(0px, web-view-area.height - 232px);
+                    Rectangle {
+                        background: (ChromeTheme.light ? #ffffff : #171f29);
+                        border-width: 1px;
+                        border-color: (ChromeTheme.light ? #b4c4d7 : #344454);
+                        border-radius: 12px;
+                        VerticalLayout {
+                            padding: 12px;
+                            spacing: 6px;
+                            Text { text: "Theme"; color: ChromeTheme.light ? #142337 : #edf4fa; }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                for name[i] in ["System", "Light", "Dark"]: Button {
+                                    text: name;
+                                    checkable: true;
+                                    checked: ChromeTheme.mode == i;
+                                    clicked => { root.appearance-changed(i, root.new-tab-gradient); }
+                                }
+                            }
+                            Text { text: "New tab background"; color: ChromeTheme.light ? #142337 : #edf4fa; }
+                            HorizontalLayout {
+                                spacing: 4px;
+                                Button { text: "Solid"; checkable: true; checked: !root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, false); } }
+                                Button { text: "Gradient"; checkable: true; checked: root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, true); } }
+                            }
+                        }
+                    }
+                }
 
                 new-tab-content := Rectangle {
                     width: Math.max(0px, Math.min(parent.width - 32px, 560px));
@@ -483,7 +539,7 @@ export component MainWindow inherits Window {
 
                         Text {
                             text: "Hermes Browser";
-                            color: #edf4fa;
+                            color: (ChromeTheme.light ? #142337 : #edf4fa);
                             font-size: 28px;
                             font-weight: 650;
                             horizontal-alignment: center;
@@ -494,15 +550,15 @@ export component MainWindow inherits Window {
                             height: 48px;
                             border-radius: 10px;
                             border-width: 1px;
-                            border-color: new-tab-search.has-focus ? #62bfff : #29333e;
-                            background: #171f29;
+                            border-color: new-tab-search.has-focus ? (ChromeTheme.light ? #1469a7 : #62bfff) : (ChromeTheme.light ? #c7d3e1 : #29333e);
+                            background: (ChromeTheme.light ? #ffffff : #171f29);
 
                             if new-tab-search.text == "": Text {
                                 x: 18px;
                                 width: parent.width - 82px;
                                 height: parent.height;
                                 text: "Search with DuckDuckGo or enter an address";
-                                color: #717e8e;
+                                color: (ChromeTheme.light ? #4b6179 : #717e8e);
                                 font-size: 14px;
                                 vertical-alignment: center;
                                 overflow: elide;
@@ -512,7 +568,7 @@ export component MainWindow inherits Window {
                                 x: 18px;
                                 width: parent.width - 82px;
                                 height: parent.height;
-                                color: #edf4fa;
+                                color: (ChromeTheme.light ? #142337 : #edf4fa);
                                 font-size: 14px;
                                 vertical-alignment: center;
                                 single-line: true;
@@ -530,7 +586,7 @@ export component MainWindow inherits Window {
                                 border-radius: 8px;
                                 background: search-touch.pressed
                                     ? #45a9ed
-                                    : search-touch.has-hover ? #78caff : #62bfff;
+                                    : search-touch.has-hover ? #78caff : (ChromeTheme.light ? #1469a7 : #62bfff);
 
                                 Text {
                                     text: "→";
@@ -550,7 +606,7 @@ export component MainWindow inherits Window {
 
                         if root.bookmarks.length > 0: Text {
                             text: "Bookmarks";
-                            color: #a4b2bf;
+                            color: (ChromeTheme.light ? #40536a : #a4b2bf);
                             font-size: 13px;
                             font-weight: 600;
                         }
@@ -568,7 +624,7 @@ export component MainWindow inherits Window {
                                     x: Math.mod(index, tiles.columns) * (parent.width / tiles.columns);
                                     y: Math.floor(index / tiles.columns) * 78px;
                                     border-radius: 12px;
-                                    background: hit.has-hover ? #263746 : #171f29;
+                                    background: hit.has-hover ? (ChromeTheme.light ? #dce7f2 : #263746) : (ChromeTheme.light ? #ffffff : #171f29);
                                     accessible-role: button;
                                     accessible-label: bookmark.label;
                                     accessible-action-default => { root.navigate(bookmark.address); }
@@ -577,7 +633,7 @@ export component MainWindow inherits Window {
                                         width: parent.width;
                                         height: 28px;
                                         text: bookmark.initial;
-                                        color: #71c5ff;
+                                        color: (ChromeTheme.light ? #125f98 : #71c5ff);
                                         font-size: 20px;
                                         font-weight: 650;
                                         horizontal-alignment: center;
@@ -587,7 +643,7 @@ export component MainWindow inherits Window {
                                         y: 40px;
                                         width: parent.width - 12px;
                                         text: bookmark.label;
-                                        color: #edf4fa;
+                                        color: (ChromeTheme.light ? #142337 : #edf4fa);
                                         horizontal-alignment: center;
                                         overflow: elide;
                                     }
@@ -597,13 +653,20 @@ export component MainWindow inherits Window {
                         }
                         if root.content-message != "": Text {
                             text: root.content-message;
-                            color: #727f8f;
+                            color: (ChromeTheme.light ? #4b6179 : #727f8f);
                             font-size: 12px;
                             horizontal-alignment: center;
                             wrap: word-wrap;
                         }
                     }
                 }
+                Button {
+                    x: Math.max(0px, parent.width - self.width - 16px);
+                    y: Math.max(0px, parent.height - self.height - 16px);
+                    text: "Customize";
+                    clicked => { appearance.show(); }
+                }
+
             }
 
             if !root.web-view-visible && !root.is-new-tab: VerticalLayout {
@@ -614,7 +677,7 @@ export component MainWindow inherits Window {
 
                 Text {
                     text: root.content-message;
-                    color: #8c99a9;
+                    color: (ChromeTheme.light ? #42566e : #8c99a9);
                     font-size: 14px;
                     horizontal-alignment: center;
                     wrap: word-wrap;
