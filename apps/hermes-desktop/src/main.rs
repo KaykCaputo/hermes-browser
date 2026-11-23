@@ -92,6 +92,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let profile = Rc::new(RefCell::new(profile));
     connect_bookmarks(&window, &controller, &profile);
     connect_appearance(&window, &profile);
+    connect_tab_layout(&window, &profile);
     connect_shields(&window, &controller, &profile, &shield_exceptions);
     connect_native_keyboard_input(&window, Rc::clone(&controller), web_view_focused);
 
@@ -137,6 +138,28 @@ fn connect_bookmarks(
         profile.data.remember_tabs(&controller);
         if let Err(error) = profile.save() {
             eprintln!("Could not save bookmarks: {error}");
+        }
+    });
+}
+
+fn connect_tab_layout(window: &MainWindow, profile: &Rc<RefCell<Option<profile::Profile>>>) {
+    if let Some(profile) = profile.borrow().as_ref() {
+        window.set_vertical_tabs(profile.data.vertical_tabs);
+        window.set_collapsed_tabs(profile.data.collapsed_tabs);
+    }
+    let weak = window.as_weak();
+    let profile = Rc::clone(profile);
+    window.on_tab_layout_changed(move |vertical, collapsed| {
+        let Some(window) = weak.upgrade() else { return };
+        window.set_vertical_tabs(vertical);
+        window.set_collapsed_tabs(collapsed);
+        window.invoke_reveal_active_tab();
+        if let Some(profile) = profile.borrow_mut().as_mut() {
+            profile.data.vertical_tabs = vertical;
+            profile.data.collapsed_tabs = collapsed;
+            if let Err(error) = profile.save() {
+                eprintln!("Could not save tab layout: {error}");
+            }
         }
     });
 }

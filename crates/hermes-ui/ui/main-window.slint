@@ -103,9 +103,10 @@ component BrowserTabButton inherits Rectangle {
     callback dragged(int);
     callback toggle-pin;
     in property <bool> vertical;
+    in property <bool> collapsed;
     in property <length> tab-step: 190px;
 
-    min-width: root.tab.pinned && !root.vertical ? 40px : 112px;
+    min-width: root.collapsed || (root.tab.pinned && !root.vertical) ? 40px : 112px;
     max-width: 248px;
     horizontal-stretch: 1;
     border-radius: 8px;
@@ -155,7 +156,7 @@ component BrowserTabButton inherits Rectangle {
             source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
         }
 
-        if !root.tab.pinned || root.vertical: Text {
+        if !root.collapsed && (!root.tab.pinned || root.vertical): Text {
             horizontal-stretch: 1;
             text: root.tab.title;
             color: root.tab.active ? (ChromeTheme.light ? #142337 : #edf4fa) : (ChromeTheme.light ? #4a5e75 : #8b98a8);
@@ -172,7 +173,7 @@ component BrowserTabButton inherits Rectangle {
             background: (ChromeTheme.light ? #1469a7 : #62bfff);
         }
 
-        if root.closable && (!root.tab.pinned || root.vertical): Rectangle {
+        if !root.collapsed && root.closable && (!root.tab.pinned || root.vertical): Rectangle {
             width: 22px;
             height: 22px;
             border-radius: 6px;
@@ -268,6 +269,9 @@ export component MainWindow inherits Window {
     callback close-tab(int);
     callback move-tab(int, int);
     callback toggle-tab-pin(int);
+    in property <bool> vertical-tabs;
+    in property <bool> collapsed-tabs;
+    callback tab-layout-changed(bool, bool);
     in property <int> pinned-tabs;
     callback web-view-pointer-moved(float, float);
     callback web-view-pointer-button(WebViewPointerButton, bool, float, float);
@@ -285,6 +289,15 @@ export component MainWindow inherits Window {
     }
 
     public function reveal-active-tab() {
+        if root.vertical-tabs {
+            let offset = root.active-tab-index * 38px;
+            if offset < -side-tabs.viewport-y {
+                side-tabs.viewport-y = -offset;
+            } else if offset + 38px > side-tabs.height - side-tabs.viewport-y {
+                side-tabs.viewport-y = side-tabs.height - offset - 38px;
+            }
+            return;
+        }
         tab-strip.viewport-x = Math.min(
             0px,
             Math.max(
@@ -309,8 +322,8 @@ export component MainWindow inherits Window {
         spacing: 0px;
 
         Rectangle {
-            visible: !root.page-fullscreen;
-            height: root.page-fullscreen ? 0px : 38px;
+            visible: !root.page-fullscreen && !root.vertical-tabs;
+            height: root.page-fullscreen || root.vertical-tabs ? 0px : 38px;
             background: (ChromeTheme.light ? #e9eff7 : #0b0f14);
 
             HorizontalLayout {
@@ -472,7 +485,7 @@ export component MainWindow inherits Window {
                 x: Math.max(0px, root.width - 248px);
                 y: 44px;
                 width: 232px;
-                height: 210px;
+                height: 244px;
                 Rectangle {
                     background: (ChromeTheme.light ? #ffffff : #171f29);
                     border-color: (ChromeTheme.light ? #b4c4d7 : #344454);
@@ -488,6 +501,10 @@ export component MainWindow inherits Window {
                             Button { text: "−"; accessible-label: "Zoom out"; clicked => { root.browser-action("zoom-out"); } }
                             Button { text: "Reset zoom"; clicked => { root.browser-action("zoom-reset"); } }
                             Button { text: "+"; accessible-label: "Zoom in"; clicked => { root.browser-action("zoom-in"); } }
+                        }
+                        Button {
+                            text: root.vertical-tabs ? "Use horizontal tabs" : "Use vertical tabs";
+                            clicked => { browser-menu.close(); root.tab-layout-changed(!root.vertical-tabs, root.collapsed-tabs); }
                         }
                         Button { text: root.user-fullscreen ? "Exit fullscreen" : "Fullscreen"; clicked => { browser-menu.close(); root.browser-action("fullscreen"); } }
                     }
@@ -538,353 +555,411 @@ export component MainWindow inherits Window {
             }
         }
 
-        web-view-area := Rectangle {
+        HorizontalLayout {
             vertical-stretch: 1;
-            background: (ChromeTheme.light ? #f5f8fd : #0c1117);
+            Rectangle {
+                visible: root.vertical-tabs && !root.page-fullscreen;
+                width: !self.visible ? 0px : root.collapsed-tabs ? 50px : 208px;
+                background: ChromeTheme.light ? #e9eff7 : #0b0f14;
 
-            if root.web-view-visible: Image {
-                width: parent.width;
-                height: parent.height;
-                source: root.web-view-texture;
-                image-fit: fill;
-            }
-
-            if root.is-loading: Rectangle {
-                x: 0px;
-                y: 0px;
-                width: parent.width * 45%;
-                height: 2px;
-                background: (ChromeTheme.light ? #1469a7 : #62bfff);
-            }
-
-            if root.is-new-tab: Rectangle {
-                background: root.new-tab-gradient
-                    ? (ChromeTheme.light ? @linear-gradient(155deg, #f9fbff, #dce9fc) : @linear-gradient(155deg, #182b43, #0c1117 80%))
-                    : (ChromeTheme.light ? #f5f8fd : #0c1117);
-
-                appearance := PopupWindow {
-                    width: 254px;
-                    height: 184px;
-                    x: Math.max(0px, web-view-area.width - 270px);
-                    y: Math.max(0px, web-view-area.height - 232px);
-                    Rectangle {
-                        background: (ChromeTheme.light ? #ffffff : #171f29);
-                        border-width: 1px;
-                        border-color: (ChromeTheme.light ? #b4c4d7 : #344454);
-                        border-radius: 12px;
-                        VerticalLayout {
-                            padding: 12px;
-                            spacing: 6px;
-                            Text { text: "Theme"; color: ChromeTheme.light ? #142337 : #edf4fa; }
-                            HorizontalLayout {
-                                spacing: 4px;
-                                for name[i] in ["System", "Light", "Dark"]: Button {
-                                    text: name;
-                                    checkable: true;
-                                    checked: ChromeTheme.mode == i;
-                                    clicked => { root.appearance-changed(i, root.new-tab-gradient); }
-                                }
-                            }
-                            Text { text: "New tab background"; color: ChromeTheme.light ? #142337 : #edf4fa; }
-                            HorizontalLayout {
-                                spacing: 4px;
-                                Button { text: "Solid"; checkable: true; checked: !root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, false); } }
-                                Button { text: "Gradient"; checkable: true; checked: root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, true); } }
-                            }
-                        }
-                    }
-                }
-
-                new-tab-content := Rectangle {
-                    width: Math.max(0px, Math.min(parent.width - 32px, 560px));
-                    height: root.bookmarks.length > 0 ? 340px : 180px;
-                    x: (parent.width - self.width) / 2;
-                    y: Math.max(24px, (parent.height - self.height) / 2 - 24px);
-                    background: transparent;
-
-                    VerticalLayout {
-                        spacing: 11px;
-
-                        HorizontalLayout {
-                            alignment: center;
-                            height: 56px;
-
-                            Image {
-                                width: 54px;
-                                height: 54px;
-                                source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
-                                image-fit: contain;
-                            }
-                        }
-
-                        Text {
-                            text: "Hermes Browser";
-                            color: (ChromeTheme.light ? #142337 : #edf4fa);
-                            font-size: 28px;
-                            font-weight: 650;
-                            horizontal-alignment: center;
-                        }
-
-
-                        Rectangle {
-                            height: 48px;
-                            border-radius: 10px;
-                            border-width: 1px;
-                            border-color: new-tab-search.has-focus ? (ChromeTheme.light ? #1469a7 : #62bfff) : (ChromeTheme.light ? #c7d3e1 : #29333e);
-                            background: (ChromeTheme.light ? #ffffff : #171f29);
-
-                            if new-tab-search.text == "": Text {
-                                x: 18px;
-                                width: parent.width - 82px;
-                                height: parent.height;
-                                text: "Search with DuckDuckGo or enter an address";
-                                color: (ChromeTheme.light ? #4b6179 : #717e8e);
-                                font-size: 14px;
-                                vertical-alignment: center;
-                                overflow: elide;
-                            }
-
-                            new-tab-search := TextInput {
-                                x: 18px;
-                                width: parent.width - 82px;
-                                height: parent.height;
-                                color: (ChromeTheme.light ? #142337 : #edf4fa);
-                                font-size: 14px;
-                                vertical-alignment: center;
-                                single-line: true;
-
-                                accepted => {
-                                    root.navigate(self.text);
-                                }
-                            }
-
-                            search-button := Rectangle {
-                                x: parent.width - 52px;
-                                y: 6px;
-                                width: 42px;
-                                height: 36px;
-                                border-radius: 8px;
-                                background: search-touch.pressed
-                                    ? #45a9ed
-                                    : search-touch.has-hover ? #78caff : (ChromeTheme.light ? #1469a7 : #62bfff);
-
-                                Text {
-                                    text: "→";
-                                    color: #09131c;
-                                    font-size: 20px;
-                                    horizontal-alignment: center;
-                                    vertical-alignment: center;
-                                }
-
-                                search-touch := TouchArea {
-                                    clicked => {
-                                        root.navigate(new-tab-search.text);
-                                    }
-                                }
-                            }
-                        }
-
-                        if root.bookmarks.length > 0: Text {
-                            text: "Bookmarks";
-                            color: (ChromeTheme.light ? #40536a : #a4b2bf);
-                            font-size: 13px;
-                            font-weight: 600;
-                        }
-                        if root.bookmarks.length > 0: bookmark-grid := Flickable {
-                            height: 158px;
-                            viewport-width: self.width;
-                            viewport-height: Math.ceil(root.bookmarks.length / tiles.columns) * 78px;
-                            tiles := Rectangle {
-                                property <int> columns: Math.max(1, Math.min(4, Math.floor(self.width / 96px)));
-                                width: bookmark-grid.viewport-width;
-                                height: bookmark-grid.viewport-height;
-                                for bookmark[index] in root.bookmarks: Rectangle {
-                                    width: parent.width / tiles.columns - 6px;
-                                    height: 72px;
-                                    x: Math.mod(index, tiles.columns) * (parent.width / tiles.columns);
-                                    y: Math.floor(index / tiles.columns) * 78px;
-                                    border-radius: 12px;
-                                    background: hit.has-hover ? (ChromeTheme.light ? #dce7f2 : #263746) : (ChromeTheme.light ? #ffffff : #171f29);
-                                    accessible-role: button;
-                                    accessible-label: bookmark.label;
-                                    accessible-action-default => { root.navigate(bookmark.address); }
-                                    Text {
-                                        y: 7px;
-                                        width: parent.width;
-                                        height: 28px;
-                                        text: bookmark.initial;
-                                        color: (ChromeTheme.light ? #125f98 : #71c5ff);
-                                        font-size: 20px;
-                                        font-weight: 650;
-                                        horizontal-alignment: center;
-                                    }
-                                    Text {
-                                        x: 6px;
-                                        y: 40px;
-                                        width: parent.width - 12px;
-                                        text: bookmark.label;
-                                        color: (ChromeTheme.light ? #142337 : #edf4fa);
-                                        horizontal-alignment: center;
-                                        overflow: elide;
-                                    }
-                                    hit := TouchArea { clicked => { root.navigate(bookmark.address); } }
-                                }
-                            }
-                        }
-                        if root.content-message != "": Text {
-                            text: root.content-message;
-                            color: (ChromeTheme.light ? #4b6179 : #727f8f);
-                            font-size: 12px;
-                            horizontal-alignment: center;
-                            wrap: word-wrap;
-                        }
-                    }
-                }
-                Button {
-                    x: Math.max(0px, parent.width - self.width - 16px);
-                    y: Math.max(0px, parent.height - self.height - 16px);
-                    text: "Customize";
-                    clicked => { appearance.show(); }
-                }
-
-            }
-
-            if !root.web-view-visible && !root.is-new-tab: VerticalLayout {
-                alignment: center;
-                spacing: 10px;
-                padding-left: 32px;
-                padding-right: 32px;
-
-                Text {
-                    text: root.content-message;
-                    color: (ChromeTheme.light ? #42566e : #8c99a9);
-                    font-size: 14px;
-                    horizontal-alignment: center;
-                    wrap: word-wrap;
-                }
-            }
-
-            web-view-focus := FocusScope {
-                enabled: root.web-view-visible;
-                focus-on-click: false;
-                focus-on-tab-navigation: false;
-
-                focus-gained => {
-                    root.web-view-focus-changed(true);
-                }
-
-                focus-lost => {
-                    root.web-view-focus-changed(false);
-                }
-
-                web-view-input := TouchArea {
-                    enabled: root.web-view-visible;
-
-                    property <WebViewPointerButton> active-button: WebViewPointerButton.other;
-
-                    function map-pointer-button(
-                        button: PointerEventButton,
-                    ) -> WebViewPointerButton {
-                        if button == PointerEventButton.left {
-                            return WebViewPointerButton.left;
-                        }
-
-                        if button == PointerEventButton.middle {
-                            return WebViewPointerButton.middle;
-                        }
-
-                        if button == PointerEventButton.right {
-                            return WebViewPointerButton.right;
-                        }
-
-                        return WebViewPointerButton.other;
-                    }
-
-                    pointer-event(event) => {
-                        if event.kind == PointerEventKind.move {
-                            root.web-view-pointer-moved(
-                                self.mouse-x / 1px,
-                                self.mouse-y / 1px,
-                            );
-                        } else if event.kind == PointerEventKind.down {
-                            web-view-focus.focus();
-                            self.active-button = self.map-pointer-button(event.button);
-
-                            root.web-view-pointer-button(
-                                self.active-button,
-                                true,
-                                self.mouse-x / 1px,
-                                self.mouse-y / 1px,
-                            );
-                        } else if event.kind == PointerEventKind.up {
-                            root.web-view-pointer-button(
-                                self.map-pointer-button(event.button),
-                                false,
-                                self.mouse-x / 1px,
-                                self.mouse-y / 1px,
-                            );
-
-                            self.active-button = WebViewPointerButton.other;
-                        } else if event.kind == PointerEventKind.cancel {
-                            root.web-view-pointer-button(
-                                self.active-button,
-                                false,
-                                self.mouse-x / 1px,
-                                self.mouse-y / 1px,
-                            );
-
-                            self.active-button = WebViewPointerButton.other;
-                        }
-                    }
-
-                    scroll-event(event) => {
-                        root.web-view-scrolled(
-                            event.delta-x / 1px,
-                            event.delta-y / 1px,
-                            self.mouse-x / 1px,
-                            self.mouse-y / 1px,
-                        );
-
-                        accept
-                    }
-                }
-            }
-            if root.address-focused && root.suggestions.length > 0 && !root.page-fullscreen: Rectangle {
-                x: Math.min(146px, parent.width / 4);
-                y: 1px;
-                width: parent.width - self.x - 10px;
-                height: 10px + root.suggestions.length * 42px;
-                background: ChromeTheme.light ? #ffffff : #171f29;
-                border-color: ChromeTheme.light ? #b4c4d7 : #344454;
-                border-width: 1px;
-                border-radius: 10px;
                 VerticalLayout {
-                    padding: 5px;
-                    for suggestion[i] in root.suggestions: Rectangle {
-                        height: 42px;
-                        border-radius: 6px;
-                        background: row.has-hover || root.selected-suggestion == i
-                            ? (ChromeTheme.light ? #dce7f2 : #263746) : transparent;
-                        accessible-role: button;
-                        accessible-label: suggestion.label;
-                        accessible-action-default => { root.accept-suggestion(i); }
-                        VerticalLayout {
-                            padding-left: 10px;
-                            padding-right: 10px;
-                            alignment: center;
-                            Text {
-                                text: suggestion.label;
-                                color: ChromeTheme.light ? #142337 : #edf4fa;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: suggestion.address;
-                                color: ChromeTheme.light ? #40536a : #a4b2bf;
-                                font-size: 11px;
-                                overflow: elide;
+                    padding: 4px;
+                    spacing: 3px;
+                    ChromeButton {
+                        width: 42px;
+                        label: root.collapsed-tabs ? "›" : "‹";
+                        accessible-label: root.collapsed-tabs ? "Expand tab sidebar" : "Collapse tab sidebar";
+                        clicked => { root.tab-layout-changed(true, !root.collapsed-tabs); }
+                    }
+                    side-tabs := Flickable {
+                        vertical-stretch: 1;
+                        viewport-height: root.tabs.length * 38px;
+                        viewport-width: self.width;
+                        interactive: false;
+                        TouchArea {
+                            width: side-tabs.width;
+                            height: side-tabs.height;
+                            scroll-event(event) => {
+                                side-tabs.viewport-y = Math.min(0px, Math.max(
+                                    side-tabs.height - side-tabs.viewport-height,
+                                    side-tabs.viewport-y + event.delta-y
+                                ));
+                                accept
                             }
                         }
-                        row := TouchArea { clicked => { root.accept-suggestion(i); } }
+                        for tab[index] in root.tabs: BrowserTabButton {
+                            x: 0px;
+                            y: index * 38px;
+                            width: side-tabs.width;
+                            height: 35px;
+                            vertical: true;
+                            collapsed: root.collapsed-tabs;
+                            tab-step: 38px;
+                            tab: tab;
+                            closable: root.tabs.length > 1;
+                            selected => { root.select-tab(index); }
+                            closed => { root.close-tab(index); }
+                            toggle-pin => { root.toggle-tab-pin(index); }
+                            dragged(steps) => { root.move-tab(index, Math.max(0, Math.min(root.tabs.length - 1, index + steps))); }
+                        }
+                    }
+                    ChromeButton {
+                        width: 42px;
+                        label: "+";
+                        accessible-label: "New tab";
+                        clicked => { root.new-tab(); }
+                    }
+                }
+            }
+
+            web-view-area := Rectangle {
+                horizontal-stretch: 1;
+                background: (ChromeTheme.light ? #f5f8fd : #0c1117);
+
+                if root.web-view-visible: Image {
+                    width: parent.width;
+                    height: parent.height;
+                    source: root.web-view-texture;
+                    image-fit: fill;
+                }
+
+                if root.is-loading: Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width * 45%;
+                    height: 2px;
+                    background: (ChromeTheme.light ? #1469a7 : #62bfff);
+                }
+
+                if root.is-new-tab: Rectangle {
+                    background: root.new-tab-gradient
+                        ? (ChromeTheme.light ? @linear-gradient(155deg, #f9fbff, #dce9fc) : @linear-gradient(155deg, #182b43, #0c1117 80%))
+                        : (ChromeTheme.light ? #f5f8fd : #0c1117);
+
+                    appearance := PopupWindow {
+                        width: 254px;
+                        height: 184px;
+                        x: Math.max(0px, web-view-area.width - 270px);
+                        y: Math.max(0px, web-view-area.height - 232px);
+                        Rectangle {
+                            background: (ChromeTheme.light ? #ffffff : #171f29);
+                            border-width: 1px;
+                            border-color: (ChromeTheme.light ? #b4c4d7 : #344454);
+                            border-radius: 12px;
+                            VerticalLayout {
+                                padding: 12px;
+                                spacing: 6px;
+                                Text { text: "Theme"; color: ChromeTheme.light ? #142337 : #edf4fa; }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    for name[i] in ["System", "Light", "Dark"]: Button {
+                                        text: name;
+                                        checkable: true;
+                                        checked: ChromeTheme.mode == i;
+                                        clicked => { root.appearance-changed(i, root.new-tab-gradient); }
+                                    }
+                                }
+                                Text { text: "New tab background"; color: ChromeTheme.light ? #142337 : #edf4fa; }
+                                HorizontalLayout {
+                                    spacing: 4px;
+                                    Button { text: "Solid"; checkable: true; checked: !root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, false); } }
+                                    Button { text: "Gradient"; checkable: true; checked: root.new-tab-gradient; clicked => { root.appearance-changed(ChromeTheme.mode, true); } }
+                                }
+                            }
+                        }
+                    }
+
+                    new-tab-content := Rectangle {
+                        width: Math.max(0px, Math.min(parent.width - 32px, 560px));
+                        height: root.bookmarks.length > 0 ? 340px : 180px;
+                        x: (parent.width - self.width) / 2;
+                        y: Math.max(24px, (parent.height - self.height) / 2 - 24px);
+                        background: transparent;
+
+                        VerticalLayout {
+                            spacing: 11px;
+
+                            HorizontalLayout {
+                                alignment: center;
+                                height: 56px;
+
+                                Image {
+                                    width: 54px;
+                                    height: 54px;
+                                    source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
+                                    image-fit: contain;
+                                }
+                            }
+
+                            Text {
+                                text: "Hermes Browser";
+                                color: (ChromeTheme.light ? #142337 : #edf4fa);
+                                font-size: 28px;
+                                font-weight: 650;
+                                horizontal-alignment: center;
+                            }
+
+
+                            Rectangle {
+                                height: 48px;
+                                border-radius: 10px;
+                                border-width: 1px;
+                                border-color: new-tab-search.has-focus ? (ChromeTheme.light ? #1469a7 : #62bfff) : (ChromeTheme.light ? #c7d3e1 : #29333e);
+                                background: (ChromeTheme.light ? #ffffff : #171f29);
+
+                                if new-tab-search.text == "": Text {
+                                    x: 18px;
+                                    width: parent.width - 82px;
+                                    height: parent.height;
+                                    text: "Search with DuckDuckGo or enter an address";
+                                    color: (ChromeTheme.light ? #4b6179 : #717e8e);
+                                    font-size: 14px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+
+                                new-tab-search := TextInput {
+                                    x: 18px;
+                                    width: parent.width - 82px;
+                                    height: parent.height;
+                                    color: (ChromeTheme.light ? #142337 : #edf4fa);
+                                    font-size: 14px;
+                                    vertical-alignment: center;
+                                    single-line: true;
+
+                                    accepted => {
+                                        root.navigate(self.text);
+                                    }
+                                }
+
+                                search-button := Rectangle {
+                                    x: parent.width - 52px;
+                                    y: 6px;
+                                    width: 42px;
+                                    height: 36px;
+                                    border-radius: 8px;
+                                    background: search-touch.pressed
+                                        ? #45a9ed
+                                        : search-touch.has-hover ? #78caff : (ChromeTheme.light ? #1469a7 : #62bfff);
+
+                                    Text {
+                                        text: "→";
+                                        color: #09131c;
+                                        font-size: 20px;
+                                        horizontal-alignment: center;
+                                        vertical-alignment: center;
+                                    }
+
+                                    search-touch := TouchArea {
+                                        clicked => {
+                                            root.navigate(new-tab-search.text);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if root.bookmarks.length > 0: Text {
+                                text: "Bookmarks";
+                                color: (ChromeTheme.light ? #40536a : #a4b2bf);
+                                font-size: 13px;
+                                font-weight: 600;
+                            }
+                            if root.bookmarks.length > 0: bookmark-grid := Flickable {
+                                height: 158px;
+                                viewport-width: self.width;
+                                viewport-height: Math.ceil(root.bookmarks.length / tiles.columns) * 78px;
+                                tiles := Rectangle {
+                                    property <int> columns: Math.max(1, Math.min(4, Math.floor(self.width / 96px)));
+                                    width: bookmark-grid.viewport-width;
+                                    height: bookmark-grid.viewport-height;
+                                    for bookmark[index] in root.bookmarks: Rectangle {
+                                        width: parent.width / tiles.columns - 6px;
+                                        height: 72px;
+                                        x: Math.mod(index, tiles.columns) * (parent.width / tiles.columns);
+                                        y: Math.floor(index / tiles.columns) * 78px;
+                                        border-radius: 12px;
+                                        background: hit.has-hover ? (ChromeTheme.light ? #dce7f2 : #263746) : (ChromeTheme.light ? #ffffff : #171f29);
+                                        accessible-role: button;
+                                        accessible-label: bookmark.label;
+                                        accessible-action-default => { root.navigate(bookmark.address); }
+                                        Text {
+                                            y: 7px;
+                                            width: parent.width;
+                                            height: 28px;
+                                            text: bookmark.initial;
+                                            color: (ChromeTheme.light ? #125f98 : #71c5ff);
+                                            font-size: 20px;
+                                            font-weight: 650;
+                                            horizontal-alignment: center;
+                                        }
+                                        Text {
+                                            x: 6px;
+                                            y: 40px;
+                                            width: parent.width - 12px;
+                                            text: bookmark.label;
+                                            color: (ChromeTheme.light ? #142337 : #edf4fa);
+                                            horizontal-alignment: center;
+                                            overflow: elide;
+                                        }
+                                        hit := TouchArea { clicked => { root.navigate(bookmark.address); } }
+                                    }
+                                }
+                            }
+                            if root.content-message != "": Text {
+                                text: root.content-message;
+                                color: (ChromeTheme.light ? #4b6179 : #727f8f);
+                                font-size: 12px;
+                                horizontal-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                    Button {
+                        x: Math.max(0px, parent.width - self.width - 16px);
+                        y: Math.max(0px, parent.height - self.height - 16px);
+                        text: "Customize";
+                        clicked => { appearance.show(); }
+                    }
+
+                }
+
+                if !root.web-view-visible && !root.is-new-tab: VerticalLayout {
+                    alignment: center;
+                    spacing: 10px;
+                    padding-left: 32px;
+                    padding-right: 32px;
+
+                    Text {
+                        text: root.content-message;
+                        color: (ChromeTheme.light ? #42566e : #8c99a9);
+                        font-size: 14px;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+
+                web-view-focus := FocusScope {
+                    enabled: root.web-view-visible;
+                    focus-on-click: false;
+                    focus-on-tab-navigation: false;
+
+                    focus-gained => {
+                        root.web-view-focus-changed(true);
+                    }
+
+                    focus-lost => {
+                        root.web-view-focus-changed(false);
+                    }
+
+                    web-view-input := TouchArea {
+                        enabled: root.web-view-visible;
+
+                        property <WebViewPointerButton> active-button: WebViewPointerButton.other;
+
+                        function map-pointer-button(
+                            button: PointerEventButton,
+                        ) -> WebViewPointerButton {
+                            if button == PointerEventButton.left {
+                                return WebViewPointerButton.left;
+                            }
+
+                            if button == PointerEventButton.middle {
+                                return WebViewPointerButton.middle;
+                            }
+
+                            if button == PointerEventButton.right {
+                                return WebViewPointerButton.right;
+                            }
+
+                            return WebViewPointerButton.other;
+                        }
+
+                        pointer-event(event) => {
+                            if event.kind == PointerEventKind.move {
+                                root.web-view-pointer-moved(
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                );
+                            } else if event.kind == PointerEventKind.down {
+                                web-view-focus.focus();
+                                self.active-button = self.map-pointer-button(event.button);
+
+                                root.web-view-pointer-button(
+                                    self.active-button,
+                                    true,
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                );
+                            } else if event.kind == PointerEventKind.up {
+                                root.web-view-pointer-button(
+                                    self.map-pointer-button(event.button),
+                                    false,
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                );
+
+                                self.active-button = WebViewPointerButton.other;
+                            } else if event.kind == PointerEventKind.cancel {
+                                root.web-view-pointer-button(
+                                    self.active-button,
+                                    false,
+                                    self.mouse-x / 1px,
+                                    self.mouse-y / 1px,
+                                );
+
+                                self.active-button = WebViewPointerButton.other;
+                            }
+                        }
+
+                        scroll-event(event) => {
+                            root.web-view-scrolled(
+                                event.delta-x / 1px,
+                                event.delta-y / 1px,
+                                self.mouse-x / 1px,
+                                self.mouse-y / 1px,
+                            );
+
+                            accept
+                        }
+                    }
+                }
+                if root.address-focused && root.suggestions.length > 0 && !root.page-fullscreen: Rectangle {
+                    x: Math.min(146px, parent.width / 4);
+                    y: 1px;
+                    width: parent.width - self.x - 10px;
+                    height: 10px + root.suggestions.length * 42px;
+                    background: ChromeTheme.light ? #ffffff : #171f29;
+                    border-color: ChromeTheme.light ? #b4c4d7 : #344454;
+                    border-width: 1px;
+                    border-radius: 10px;
+                    VerticalLayout {
+                        padding: 5px;
+                        for suggestion[i] in root.suggestions: Rectangle {
+                            height: 42px;
+                            border-radius: 6px;
+                            background: row.has-hover || root.selected-suggestion == i
+                                ? (ChromeTheme.light ? #dce7f2 : #263746) : transparent;
+                            accessible-role: button;
+                            accessible-label: suggestion.label;
+                            accessible-action-default => { root.accept-suggestion(i); }
+                            VerticalLayout {
+                                padding-left: 10px;
+                                padding-right: 10px;
+                                alignment: center;
+                                Text {
+                                    text: suggestion.label;
+                                    color: ChromeTheme.light ? #142337 : #edf4fa;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: suggestion.address;
+                                    color: ChromeTheme.light ? #40536a : #a4b2bf;
+                                    font-size: 11px;
+                                    overflow: elide;
+                                }
+                            }
+                            row := TouchArea { clicked => { root.accept-suggestion(i); } }
+                        }
                     }
                 }
             }
