@@ -643,6 +643,7 @@ fn sync_ui(window: &MainWindow, controller: &BrowserController) {
 
             BrowserTab {
                 title: state.page_title().into(),
+                pinned: tab.pinned(),
                 icon,
                 has_icon,
                 active: tab.id() == active_tab_id,
@@ -650,6 +651,7 @@ fn sync_ui(window: &MainWindow, controller: &BrowserController) {
             }
         })
         .collect::<Vec<_>>();
+    window.set_pinned_tabs(i32::try_from(controller.pinned_tabs()).unwrap_or(i32::MAX));
     window.set_tabs(ModelRc::new(VecModel::from(tabs)));
     window.set_active_tab_index(i32::try_from(active_tab_index).unwrap_or(i32::MAX));
     window.invoke_reveal_active_tab();
@@ -844,6 +846,20 @@ fn connect_ui_callbacks(
             && let Some(window) = select_tab_window.upgrade()
         {
             sync_ui(&window, &select_tab_controller.borrow());
+            window.window().request_redraw();
+        }
+    });
+
+    let pin_controller = Rc::clone(&controller);
+    let pin_window = window.as_weak();
+    window.on_toggle_tab_pin(move |index| {
+        let Ok(index) = usize::try_from(index) else {
+            return;
+        };
+        if pin_controller.borrow_mut().toggle_tab_pin(index)
+            && let Some(window) = pin_window.upgrade()
+        {
+            sync_ui(&window, &pin_controller.borrow());
             window.window().request_redraw();
         }
     });

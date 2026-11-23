@@ -17,11 +17,24 @@ impl TabId {
 pub struct Tab {
     id: TabId,
     state: BrowserState,
+    pinned: bool,
 }
 
 impl Tab {
     pub fn new(id: TabId, state: BrowserState) -> Self {
-        Self { id, state }
+        Self {
+            id,
+            state,
+            pinned: false,
+        }
+    }
+
+    pub fn pinned(&self) -> bool {
+        self.pinned
+    }
+
+    pub(crate) fn set_pinned(&mut self, pinned: bool) {
+        self.pinned = pinned;
     }
 
     pub const fn id(&self) -> TabId {

@@ -183,7 +183,7 @@ impl BrowserController {
         self.next_tab_id += 1;
         self.tab_revision += 1;
         self.tabs.insert(
-            index.min(self.tabs.len()),
+            index.clamp(self.pinned_tabs(), self.tabs.len()),
             Tab::new(id, BrowserState::default()),
         );
         self.active_tab_id = id;
@@ -196,8 +196,29 @@ impl BrowserController {
         true
     }
 
+    pub fn pinned_tabs(&self) -> usize {
+        self.tabs.iter().take_while(|tab| tab.pinned()).count()
+    }
+
+    pub fn toggle_tab_pin(&mut self, index: usize) -> bool {
+        let Some(tab) = self.tabs.get(index) else {
+            return false;
+        };
+        let pinned = !tab.pinned();
+        let destination = self.pinned_tabs() - usize::from(!pinned);
+        let mut tab = self.tabs.remove(index);
+        tab.set_pinned(pinned);
+        self.tabs.insert(destination, tab);
+        self.tab_revision += 1;
+        true
+    }
+
     pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
-        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+        if from == to
+            || from >= self.tabs.len()
+            || to >= self.tabs.len()
+            || self.tabs[from].pinned() != self.tabs[to].pinned()
+        {
             return false;
         }
         let tab = self.tabs.remove(from);

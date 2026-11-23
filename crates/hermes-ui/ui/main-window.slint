@@ -27,6 +27,7 @@ export enum WebViewPointerButton {
 
 export struct BrowserTab {
     title: string,
+    pinned: bool,
     icon: image,
     has-icon: bool,
     active: bool,
@@ -100,10 +101,11 @@ component BrowserTabButton inherits Rectangle {
     callback selected;
     callback closed;
     callback dragged(int);
+    callback toggle-pin;
     in property <bool> vertical;
     in property <length> tab-step: 190px;
 
-    min-width: 112px;
+    min-width: root.tab.pinned && !root.vertical ? 40px : 112px;
     max-width: 248px;
     horizontal-stretch: 1;
     border-radius: 8px;
@@ -153,7 +155,7 @@ component BrowserTabButton inherits Rectangle {
             source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
         }
 
-        Text {
+        if !root.tab.pinned || root.vertical: Text {
             horizontal-stretch: 1;
             text: root.tab.title;
             color: root.tab.active ? (ChromeTheme.light ? #142337 : #edf4fa) : (ChromeTheme.light ? #4a5e75 : #8b98a8);
@@ -170,7 +172,7 @@ component BrowserTabButton inherits Rectangle {
             background: (ChromeTheme.light ? #1469a7 : #62bfff);
         }
 
-        if root.closable: Rectangle {
+        if root.closable && (!root.tab.pinned || root.vertical): Rectangle {
             width: 22px;
             height: 22px;
             border-radius: 6px;
@@ -193,6 +195,20 @@ component BrowserTabButton inherits Rectangle {
             }
         }
     }
+    ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: root.tab.pinned ? "Unpin tab" : "Pin tab";
+                activated => { root.toggle-pin(); }
+            }
+            MenuItem {
+                title: "Close tab";
+                enabled: root.closable;
+                activated => { root.closed(); }
+            }
+        }
+    }
+
 }
 
 export component MainWindow inherits Window {
@@ -251,6 +267,8 @@ export component MainWindow inherits Window {
     callback select-tab(int);
     callback close-tab(int);
     callback move-tab(int, int);
+    callback toggle-tab-pin(int);
+    in property <int> pinned-tabs;
     callback web-view-pointer-moved(float, float);
     callback web-view-pointer-button(WebViewPointerButton, bool, float, float);
     callback web-view-scrolled(float, float, float, float);
@@ -271,7 +289,8 @@ export component MainWindow inherits Window {
             0px,
             Math.max(
                 tab-strip.width - tab-strip.viewport-width,
-                -root.active-tab-index * 190px,
+                -(Math.min(root.active-tab-index, root.pinned-tabs) * 46px
+                    + Math.max(0, root.active-tab-index - root.pinned-tabs) * 190px),
             ),
         );
     }
@@ -303,7 +322,7 @@ export component MainWindow inherits Window {
 
                 tab-strip := Flickable {
                     horizontal-stretch: 1;
-                    viewport-width: Math.max(self.width, root.tabs.length * 190px);
+                    viewport-width: Math.max(self.width, root.pinned-tabs * 46px + (root.tabs.length - root.pinned-tabs) * 190px);
                     interactive: false;
                     viewport-height: self.height;
 
@@ -323,7 +342,9 @@ export component MainWindow inherits Window {
                         spacing: 6px;
 
                         for tab[index] in root.tabs: BrowserTabButton {
-                            width: 184px;
+                            width: tab.pinned ? 40px : 184px;
+                            tab-step: tab.pinned ? 46px : 190px;
+                            toggle-pin => { root.toggle-tab-pin(index); }
                             tab: tab;
                             closable: root.tabs.length > 1;
 

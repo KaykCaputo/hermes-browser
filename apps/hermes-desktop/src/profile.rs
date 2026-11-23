@@ -20,6 +20,8 @@ pub struct ProfileData {
     tabs: Vec<String>,
     #[serde(default)]
     active: usize,
+    #[serde(default)]
+    pinned_tabs: usize,
 }
 
 pub struct Profile {
@@ -68,7 +70,11 @@ impl Profile {
 
 impl ProfileData {
     pub fn restore(&self) -> BrowserController {
-        BrowserController::from_session(&self.tabs, self.active)
+        let mut controller = BrowserController::from_session(&self.tabs, self.active);
+        for index in 0..self.pinned_tabs.min(self.tabs.len()) {
+            controller.toggle_tab_pin(index);
+        }
+        controller
     }
 
     pub fn remember_tabs(&mut self, controller: &BrowserController) {
@@ -76,6 +82,7 @@ impl ProfileData {
             .tabs()
             .map(|tab| tab.state().url().to_owned())
             .collect();
+        self.pinned_tabs = controller.pinned_tabs();
         self.active = controller
             .tabs()
             .position(|tab| tab.id() == controller.active_tab_id())
