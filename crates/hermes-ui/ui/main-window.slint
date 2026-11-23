@@ -813,7 +813,7 @@ export component MainWindow inherits Window {
 
             web-view-area := Rectangle {
                 horizontal-stretch: 1;
-                background: (ChromeTheme.light ? #f6f8fc : #111722);
+                background: (ChromeTheme.light ? #f6f8fc : #0c1117);
 
                 if root.web-view-visible: Image {
                     width: parent.width;
@@ -833,7 +833,7 @@ export component MainWindow inherits Window {
                 if root.is-new-tab: Rectangle {
                     background: root.new-tab-gradient
                         ? (ChromeTheme.light ? @linear-gradient(155deg, #f9fbff, #dce9fc) : @linear-gradient(155deg, #182b43, #111722 80%))
-                        : (ChromeTheme.light ? #f6f8fc : #111722);
+                        : (ChromeTheme.light ? #f6f8fc : #0c1117);
 
                     appearance := PopupWindow {
 
@@ -870,8 +870,8 @@ export component MainWindow inherits Window {
                     }
 
                     new-tab-content := Rectangle {
-                        width: Math.max(0px, Math.min(parent.width - 32px, 560px));
-                        height: root.bookmarks.length > 0 ? 340px : 180px;
+                        width: Math.max(0px, Math.min(parent.width - 32px, 580px));
+                        height: root.bookmarks.length > 0 ? 490px : 300px;
                         x: (parent.width - self.width) / 2;
                         y: Math.max(24px, (parent.height - self.height) / 2 - 24px);
                         background: transparent;
@@ -881,27 +881,34 @@ export component MainWindow inherits Window {
 
                             HorizontalLayout {
                                 alignment: center;
-                                height: 56px;
+                                height: 84px;
 
                                 Image {
-                                    width: 54px;
-                                    height: 54px;
+                                    width: 80px;
+                                    height: 80px;
                                     source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
                                     image-fit: contain;
                                 }
                             }
 
                             Text {
-                                text: "Hermes";
+                                text: "Hermes Browser";
                                 color: (ChromeTheme.light ? #142337 : #eef3fa);
                                 font-size: 28px;
                                 font-weight: 650;
                                 horizontal-alignment: center;
                             }
 
+                            Text {
+                                text: "Fast, lightweight and private by default";
+                                color: ChromeTheme.light ? #4b6179 : #8c99a9;
+                                font-size: 14px;
+                                horizontal-alignment: center;
+                            }
+
                             Rectangle {
                                 height: 48px;
-                                border-radius: 16px;
+                                border-radius: 10px;
                                 border-width: 1px;
                                 border-color: new-tab-search.has-focus ? (ChromeTheme.light ? #1469a7 : #62bfff) : (ChromeTheme.light ? #c7d3e1 : #344155);
                                 background: (ChromeTheme.light ? #ffffff : #171f29);
@@ -910,7 +917,7 @@ export component MainWindow inherits Window {
                                     x: 18px;
                                     width: parent.width - 82px;
                                     height: parent.height;
-                                    text: "Search DuckDuckGo or enter an address";
+                                    text: "Search with DuckDuckGo or enter an address";
                                     color: (ChromeTheme.light ? #4b6179 : #a9b8cb);
                                     font-size: 14px;
                                     vertical-alignment: center;
@@ -955,6 +962,13 @@ export component MainWindow inherits Window {
                                         }
                                     }
                                 }
+                            }
+
+                            Text {
+                                text: "Search privately with DuckDuckGo.";
+                                color: ChromeTheme.light ? #4b6179 : #8492a4;
+                                font-size: 12px;
+                                horizontal-alignment: center;
                             }
 
                             if root.bookmarks.length > 0: Text {
