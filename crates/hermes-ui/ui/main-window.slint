@@ -512,6 +512,8 @@ export component MainWindow inherits Window {
             }
 
             browser-menu := PopupWindow {
+
+                close-policy: close-on-click-outside;
                 x: Math.max(0px, root.width - 248px);
                 y: 44px;
                 width: 232px;
@@ -541,6 +543,7 @@ export component MainWindow inherits Window {
                 }
             }
             site-panel := PopupWindow {
+                close-policy: close-on-click-outside;
                 x: Math.max(0px, root.width - 300px);
                 y: 44px;
                 width: 284px;
@@ -570,7 +573,7 @@ export component MainWindow inherits Window {
                         if root.site-host != "": ActionButton {
                             label: root.shield-paused ? "Resume and reload" : "Pause and reload";
                             accessible-label: self.label;
-                            clicked => { site-panel.close(); root.toggle-shield(); }
+                            clicked => { root.toggle-shield(); site-panel.close(); }
                         }
                     }
                 }
@@ -667,6 +670,8 @@ export component MainWindow inherits Window {
                         : (ChromeTheme.light ? #f5f8fd : #0c1117);
 
                     appearance := PopupWindow {
+
+                        close-policy: close-on-click-outside;
                         width: 254px;
                         height: 184px;
                         x: Math.max(0px, web-view-area.width - 270px);
