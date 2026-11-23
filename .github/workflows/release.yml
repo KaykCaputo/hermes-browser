@@ -58,9 +58,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          rustup update stable
-          rustup default stable
-          rustup component add clippy rustfmt
+          rustup show active-toolchain
 
           rustc --version
           cargo --version
@@ -80,6 +78,13 @@ jobs:
             build-essential \
             clang-14 \
             cmake \
+            ffmpeg \
+            mesa-vulkan-drivers \
+            pulseaudio \
+            xvfb \
+            xauth \
+            xdotool \
+            gstreamer1.0-gl \
             gstreamer1.0-libav \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-base \
@@ -179,51 +184,21 @@ jobs:
             exit 1
           fi
 
-      - name: Create Linux archive
+      - name: Create Linux packages
+        run: make package-deb LINUX_PACKAGE_NAME=hermes-browser-linux-x86_64
+
+      - name: Test video playback from the extracted archive
         shell: bash
         run: |
           set -euo pipefail
-
           package="hermes-browser-linux-x86_64"
-          executable="target/release/hermes-desktop"
-          output_directory="dist/${package}"
-          archive="dist/${package}.tar.gz"
-          checksum="${archive}.sha256"
-
-          test -f "${executable}"
-
-          mkdir -p "${output_directory}"
-
-          install \
-            -m 0755 \
-            "${executable}" \
-            "${output_directory}/hermes-browser"
-
-          strip --strip-unneeded \
-            "${output_directory}/hermes-browser"
-
-          cp README.md \
-            "${output_directory}/README.md"
-
-          if [[ -f LICENSE ]]; then
-            cp LICENSE \
-              "${output_directory}/LICENSE"
-          fi
-
-          tar \
-            -C dist \
-            -czf "${archive}" \
-            "${package}"
-
-          (
-            cd dist
-            sha256sum \
-              "${package}.tar.gz" \
-              > "${package}.tar.gz.sha256"
-          )
-
-          test -f "${archive}"
-          test -f "${checksum}"
+          (cd dist && sha256sum -c "${package}.tar.gz.sha256")
+          (cd dist && sha256sum -c hermes-browser_*_amd64.deb.sha256)
+          dpkg-deb -x dist/hermes-browser_*_amd64.deb "${RUNNER_TEMP}/hermes-deb"
+          tar -C "${RUNNER_TEMP}" -xzf "dist/${package}.tar.gz"
+          cmp "${RUNNER_TEMP}/hermes-deb/usr/bin/hermes-browser" "${RUNNER_TEMP}/${package}/hermes-browser"
+          pulseaudio --start --exit-idle-time=-1
+          xvfb-run -a python3 scripts/test-packaged-media.py "${RUNNER_TEMP}/${package}/hermes-browser"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v7
@@ -232,6 +207,7 @@ jobs:
           path: |
             dist/hermes-browser-linux-x86_64.tar.gz
             dist/hermes-browser-linux-x86_64.tar.gz.sha256
+            dist/hermes-browser_*_amd64.deb*
           if-no-files-found: error
           retention-days: 14
 

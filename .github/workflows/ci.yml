@@ -70,9 +70,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          rustup update stable
-          rustup default stable
-          rustup component add clippy rustfmt
+          rustup show active-toolchain
 
           rustc --version
           cargo --version
@@ -92,6 +90,7 @@ jobs:
             build-essential \
             clang-14 \
             cmake \
+            gstreamer1.0-gl \
             gstreamer1.0-libav \
             gstreamer1.0-plugins-bad \
             gstreamer1.0-plugins-base \

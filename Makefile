@@ -30,6 +30,7 @@ LINUX_ARCHIVE := $(LINUX_PACKAGE_NAME).tar.gz
 	build \
 	build-release \
 	package-linux \
+	package-deb \
 	run \
 	run-debug \
 	run-release \
@@ -56,6 +57,7 @@ help:
 		'qa' 'Run formatting, linting, and tests.' \
 		'build' 'Build the complete workspace in debug mode.' \
 		'build-release' 'Build the complete workspace in release mode.' \
+		'package-deb' 'Build the apt-installable package and Linux archive.' \
 		'package-linux' 'Build and package the Linux x86-64 release.' \
 		'run' 'Run the optimized Hermes Desktop build.' \
 		'run-debug' 'Run Hermes Desktop with development debug information.' \
@@ -103,6 +105,7 @@ install-linux-deps:
 		build-essential \
 		clang-14 \
 		cmake \
+		gstreamer1.0-gl \
 		gstreamer1.0-libav \
 		gstreamer1.0-plugins-bad \
 		gstreamer1.0-plugins-base \
@@ -159,14 +162,23 @@ build:
 build-release:
 	"$(CARGO)" build --workspace --release
 
-package-linux: build-release
+package-linux:
+	"$(CARGO)" build --locked --release --package "$(APP_PACKAGE)"
 	mkdir -p "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)"
-	cp "target/release/$(APP_PACKAGE)" "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/hermes-browser"
-	"$(STRIP)" --strip-unneeded "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/hermes-browser"
+	@set -e; \
+		staged=$$(mktemp "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/.hermes-browser.XXXXXX"); \
+		trap 'rm -f "$$staged"' EXIT; \
+		install -m 755 "$(or $(CARGO_TARGET_DIR),target)/release/$(APP_PACKAGE)" "$$staged"; \
+		"$(STRIP)" --strip-unneeded "$$staged"; \
+		mv -f "$$staged" "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/hermes-browser"
 	cp README.md "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/README.md"
 	cp LICENSE "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/LICENSE"
 	tar -C "$(DIST_DIR)" -czf "$(DIST_DIR)/$(LINUX_ARCHIVE)" "$(LINUX_PACKAGE_NAME)"
 	cd "$(DIST_DIR)" && sha256sum "$(LINUX_ARCHIVE)" > "$(LINUX_ARCHIVE).sha256"
+
+package-deb: package-linux
+	sh packaging/linux/build-deb.sh "$(DIST_DIR)/$(LINUX_PACKAGE_NAME)/hermes-browser" "$(PROJECT_VERSION)" "$(DIST_DIR)/hermes-browser_$(PROJECT_VERSION)_amd64.deb"
+	cd "$(DIST_DIR)" && sha256sum "hermes-browser_$(PROJECT_VERSION)_amd64.deb" > "hermes-browser_$(PROJECT_VERSION)_amd64.deb.sha256"
 
 run:
 	RUST_LOG="$(RUST_LOG)" "$(CARGO)" run --package "$(APP_PACKAGE)" --release -- $(ARGS)
