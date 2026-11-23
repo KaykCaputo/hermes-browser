@@ -18,14 +18,14 @@ The target creates an optimized executable, strips it, copies the README and lic
 The current package name follows this shape:
 
 ```text
-hermes-browser-v0.2.0-linux-x86_64.tar.gz
-hermes-browser-v0.2.0-linux-x86_64.tar.gz.sha256
+hermes-browser-v0.2.1-linux-x86_64.tar.gz
+hermes-browser-v0.2.1-linux-x86_64.tar.gz.sha256
 ```
 
 Change `PROJECT_VERSION` when testing another version:
 
 ```bash
-make package-linux PROJECT_VERSION=0.2.0+local
+make package-linux PROJECT_VERSION=0.2.1+local
 ```
 
 ## Continuous integration
@@ -41,8 +41,8 @@ The release workflow builds on Ubuntu 22.04 to preserve the glibc 2.35 compatibi
 Version tags trigger GitHub Release publication:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 Before pushing a tag:
