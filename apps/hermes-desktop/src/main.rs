@@ -39,6 +39,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     select_hardware_accelerated_backend()?;
 
     let window = MainWindow::new()?;
+    let weak = window.as_weak();
+    window.on_drag_window(move || {
+        if let Some(window) = weak.upgrade()
+            && !window.window().is_fullscreen()
+        {
+            window.window().with_winit_window(|native| {
+                let _ = native.drag_window();
+            });
+        }
+    });
+    window.on_close_window(|| {
+        let _ = slint::quit_event_loop();
+    });
     let temporary = std::env::args()
         .skip(1)
         .any(|arg| arg == "--temporary-profile");
