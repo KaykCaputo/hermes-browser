@@ -212,8 +212,8 @@ The complete documentation starts at [`docs/index.md`](docs/index.md). Rust API 
 Linux packages are built on an Ubuntu 22.04 GitHub-hosted runner. Version tags create a GitHub Release automatically:
 
 ```bash
-git tag v0.1.2
-git push origin v0.1.2
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The release workflow produces `hermes-browser-linux-x86_64.tar.gz` and an apt-installable amd64 Debian package, each with a SHA-256 checksum.
