@@ -43,3 +43,13 @@ Restoring a session loads the selected page first. Each other saved tab starts l
 
 Hermes saves the open tab addresses, their order, and the selected tab on normal exit. Reopening a tab loads its address again. Select a saved bookmark from the new-tab page.
 
+
+## Customize the browser
+
+Use the toolbar menu to switch between horizontal and vertical tabs, reopen the last closed tab, change zoom, or toggle fullscreen. The arrow at the top of the vertical tab strip collapses it to icons. Drag a tab to reorder it and right-click to pin it. Pinned tabs stay together and are restored with the session.
+
+The address bar suggests matching bookmarks and open tabs. Use the arrow keys and Enter to pick a result, or Escape to dismiss the list. These suggestions come from the current window and saved bookmarks.
+
+Open **Customize** on the new-tab page to switch between System, Light, and Dark themes, or choose a solid or gradient background. Use the toolbar star to add a shortcut and right-click a shortcut to remove it.
+
+A tab playing media shows a control to mute HTML video or audio in the page and its same-origin frames. The control depends on the playback state reported by Servo.

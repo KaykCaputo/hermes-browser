@@ -33,3 +33,7 @@ Use Hermes with local test pages, known public sites, and non-sensitive data. Do
 ## Reporting a security issue
 
 Avoid publishing exploit details in a general bug report. Contact the maintainer through the repository profile first so the issue can be handled privately and routed upstream when it belongs to Servo or a dependency.
+
+## Blocking controls
+
+The shield next to the address bar opens the current site's blocking controls and shows the requests blocked for the current load. Use **Pause and reload** if blocking prevents a site from working, or **Resume and reload** to restore blocking. Exceptions apply to the exact hostname and are saved with the regular profile.
