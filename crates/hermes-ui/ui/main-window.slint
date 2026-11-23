@@ -1,4 +1,8 @@
-import { ListView } from "std-widgets.slint";
+export struct BookmarkTile {
+    address: string,
+    label: string,
+    initial: string,
+}
 
 export enum WebViewPointerButton {
     left,
@@ -165,7 +169,7 @@ export component MainWindow inherits Window {
     in property <bool> user-fullscreen;
     in property <string> committed-address;
     in property <string> displayed-tab;
-    in property <[string]> bookmarks;
+    in property <[BookmarkTile]> bookmarks;
     in property <bool> profile-available;
     in property <bool> is-bookmarked;
     callback toggle-bookmark();
@@ -364,8 +368,8 @@ export component MainWindow inherits Window {
                 background: #0c1117;
 
                 new-tab-content := Rectangle {
-                    width: parent.width < 640px ? parent.width - 48px : 580px;
-                    height: 300px;
+                    width: Math.max(0px, Math.min(parent.width - 32px, 560px));
+                    height: root.bookmarks.length > 0 ? 340px : 180px;
                     x: (parent.width - self.width) / 2;
                     y: Math.max(24px, (parent.height - self.height) / 2 - 24px);
                     background: transparent;
@@ -375,11 +379,11 @@ export component MainWindow inherits Window {
 
                         HorizontalLayout {
                             alignment: center;
-                            height: 84px;
+                            height: 56px;
 
                             Image {
-                                width: 80px;
-                                height: 80px;
+                                width: 54px;
+                                height: 54px;
                                 source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
                                 image-fit: contain;
                             }
@@ -458,24 +462,44 @@ export component MainWindow inherits Window {
                             font-size: 13px;
                             font-weight: 600;
                         }
-                        if root.bookmarks.length > 0: ListView {
-                            height: 88px;
-                            for address in root.bookmarks: Rectangle {
-                                height: 30px;
-                                background: link.has-hover ? #202c38 : transparent;
-                                Text {
-                                    x: 12px;
-                                    width: parent.width - 24px;
-                                    text: address;
-                                    color: #71c5ff;
-                                    overflow: elide;
-                                    vertical-alignment: center;
-                                }
-                                accessible-role: button;
-                                accessible-label: address;
-                                accessible-action-default => { root.navigate(address); }
-                                link := TouchArea {
-                                    clicked => { root.navigate(address); }
+                        if root.bookmarks.length > 0: bookmark-grid := Flickable {
+                            height: 158px;
+                            viewport-width: self.width;
+                            viewport-height: Math.ceil(root.bookmarks.length / tiles.columns) * 78px;
+                            tiles := Rectangle {
+                                property <int> columns: Math.max(1, Math.min(4, Math.floor(self.width / 96px)));
+                                width: bookmark-grid.viewport-width;
+                                height: bookmark-grid.viewport-height;
+                                for bookmark[index] in root.bookmarks: Rectangle {
+                                    width: parent.width / tiles.columns - 6px;
+                                    height: 72px;
+                                    x: Math.mod(index, tiles.columns) * (parent.width / tiles.columns);
+                                    y: Math.floor(index / tiles.columns) * 78px;
+                                    border-radius: 12px;
+                                    background: hit.has-hover ? #263746 : #171f29;
+                                    accessible-role: button;
+                                    accessible-label: bookmark.label;
+                                    accessible-action-default => { root.navigate(bookmark.address); }
+                                    Text {
+                                        y: 7px;
+                                        width: parent.width;
+                                        height: 28px;
+                                        text: bookmark.initial;
+                                        color: #71c5ff;
+                                        font-size: 20px;
+                                        font-weight: 650;
+                                        horizontal-alignment: center;
+                                    }
+                                    Text {
+                                        x: 6px;
+                                        y: 40px;
+                                        width: parent.width - 12px;
+                                        text: bookmark.label;
+                                        color: #edf4fa;
+                                        horizontal-alignment: center;
+                                        overflow: elide;
+                                    }
+                                    hit := TouchArea { clicked => { root.navigate(bookmark.address); } }
                                 }
                             }
                         }

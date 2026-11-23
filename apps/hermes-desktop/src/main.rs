@@ -4,7 +4,7 @@ use std::error::Error;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 
-use hermes_ui::{BrowserTab, MainWindow, WebViewPointerButton};
+use hermes_ui::{BookmarkTile, BrowserTab, MainWindow, WebViewPointerButton};
 use rendering::BrowserRenderingContext;
 use slint::winit_030::{EventResult, WinitWindowAccessor, winit};
 use slint::{
@@ -135,7 +135,7 @@ fn sync_bookmark_state(window: &MainWindow) {
         window
             .get_bookmarks()
             .iter()
-            .any(|address| address == window.get_committed_address()),
+            .any(|bookmark| bookmark.address == window.get_committed_address()),
     );
 }
 
@@ -143,7 +143,24 @@ fn set_bookmarks(window: &MainWindow, bookmarks: &[String]) {
     window.set_bookmarks(ModelRc::new(VecModel::from(
         bookmarks
             .iter()
-            .map(|url| url.as_str().into())
+            .map(|address| {
+                let parsed = talaria_core::resolve_address(address).ok();
+                let label = parsed
+                    .as_ref()
+                    .and_then(|url| url.host_str())
+                    .unwrap_or(address);
+                let label = label.strip_prefix("www.").unwrap_or(label);
+                BookmarkTile {
+                    address: address.as_str().into(),
+                    label: label.into(),
+                    initial: label
+                        .chars()
+                        .next()
+                        .map(|letter| letter.to_uppercase().to_string())
+                        .unwrap_or_default()
+                        .into(),
+                }
+            })
             .collect::<Vec<_>>(),
     )));
     sync_bookmark_state(window);
