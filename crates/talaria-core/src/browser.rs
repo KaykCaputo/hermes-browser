@@ -71,6 +71,7 @@ pub enum BrowserEvent {
     MediaPlaying(bool),
     MediaMuted(bool),
     BlockedRequest,
+    ResetBlockedRequests,
     AddressChanged {
         url: String,
     },
@@ -156,6 +157,7 @@ impl BrowserState {
         match event {
             BrowserEvent::MediaPlaying(playing) => self.media_playing = playing,
             BrowserEvent::MediaMuted(muted) => self.media_muted = muted,
+            BrowserEvent::ResetBlockedRequests => self.blocked_requests = 0,
             BrowserEvent::BlockedRequest => {
                 self.blocked_requests = self.blocked_requests.saturating_add(1)
             }
@@ -179,7 +181,6 @@ impl BrowserState {
                     self.fullscreen = false;
                 }
                 if matches!(state, LoadState::Loading) && self.load_state != LoadState::Loading {
-                    self.blocked_requests = 0;
                     self.media_playing = false;
                     self.media_muted = false;
                 }

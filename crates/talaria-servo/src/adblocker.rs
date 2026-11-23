@@ -34,17 +34,22 @@ impl ContentBlocker {
     pub(crate) fn handle_web_resource_load(
         &self,
         web_view: Option<&WebView>,
+        request_host: Option<&str>,
         load: WebResourceLoad,
     ) -> bool {
         let page = web_view.and_then(WebView::url);
-        if page
-            .as_ref()
-            .and_then(Url::host_str)
-            .is_some_and(|host| self.exceptions.borrow().contains(host))
-        {
+        let request = load.request();
+        let host = request_host
+            .or_else(|| page.as_ref().and_then(Url::host_str))
+            .or_else(|| {
+                request
+                    .referrer_url
+                    .as_ref()
+                    .and_then(|url| url.as_url().host_str())
+            });
+        if host.is_some_and(|host| self.exceptions.borrow().contains(host)) {
             return false;
         }
-        let request = load.request();
         let should_block = match &request.referrer_url {
             Some(source) => self.should_block(request, Some(source.as_url())),
             None => self.should_block(request, page.as_ref()),

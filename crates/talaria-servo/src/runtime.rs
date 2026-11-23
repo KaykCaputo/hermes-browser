@@ -174,6 +174,7 @@ impl ServoRuntime {
             browser_event_sender,
             frame_ready: frame_ready.clone(),
             load_metrics: RefCell::new(PageLoadMetrics::default()),
+            request_host: RefCell::default(),
             content_blocker: Rc::clone(&self.content_blocker),
         });
 
@@ -213,7 +214,8 @@ struct BrowserServoDelegate {
 
 impl servo::ServoDelegate for BrowserServoDelegate {
     fn load_web_resource(&self, load: servo::WebResourceLoad) {
-        self.content_blocker.handle_web_resource_load(None, load);
+        self.content_blocker
+            .handle_web_resource_load(None, None, load);
     }
 }
 
@@ -233,6 +235,7 @@ struct BrowserDelegate {
     browser_event_sender: Sender<TabEvent>,
     frame_ready: FrameReadySignal,
     load_metrics: RefCell<PageLoadMetrics>,
+    request_host: RefCell<Option<String>>,
     content_blocker: Rc<ContentBlocker>,
 }
 
@@ -284,10 +287,17 @@ impl servo::WebViewDelegate for BrowserDelegate {
     }
 
     fn load_web_resource(&self, web_view: servo::WebView, load: servo::WebResourceLoad) {
-        if self
-            .content_blocker
-            .handle_web_resource_load(Some(&web_view), load)
-        {
+        if load.request().is_for_main_frame {
+            *self.request_host.borrow_mut() =
+                load.request().url.as_url().host_str().map(str::to_owned);
+            self.send_browser_event(BrowserEvent::ResetBlockedRequests);
+            return;
+        }
+        if self.content_blocker.handle_web_resource_load(
+            Some(&web_view),
+            self.request_host.borrow().as_deref(),
+            load,
+        ) {
             self.send_browser_event(BrowserEvent::BlockedRequest);
         }
     }
