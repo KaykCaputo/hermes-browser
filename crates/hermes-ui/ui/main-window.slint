@@ -635,8 +635,23 @@ export component MainWindow inherits Window {
                 }
 
                 ChromeButton {
-                    label: root.blocked-requests > 0 ? "⛨ " + root.blocked-requests : "⛨";
-                    width: root.blocked-requests > 0 ? 52px : 34px;
+                    width: root.blocked-requests > 0 ? counter.preferred-width + 38px : 34px;
+                    Image {
+                        x: 8px;
+                        y: (parent.height - self.height) / 2;
+                        width: 18px;
+                        height: 18px;
+                        image-fit: contain;
+                        source: @image-url("../../../apps/hermes-desktop/resources/hermes-browser.svg");
+                    }
+                    counter := Text {
+                        x: 30px;
+                        height: parent.height;
+                        text: root.blocked-requests > 999 ? "999+" : root.blocked-requests > 0 ? "" + root.blocked-requests : "";
+                        color: ChromeTheme.light ? #40536a : #a9b8cb;
+                        font-size: 13px;
+                        vertical-alignment: center;
+                    }
                     enabled: !root.is-new-tab;
                     accessible-label: "Ad and tracker blocking";
                     clicked => { root.open-site-panel(); site-panel.show(); }
