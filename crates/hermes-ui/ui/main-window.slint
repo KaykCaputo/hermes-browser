@@ -99,6 +99,9 @@ component BrowserTabButton inherits Rectangle {
     in property <bool> closable;
     callback selected;
     callback closed;
+    callback dragged(int);
+    in property <bool> vertical;
+    in property <length> tab-step: 190px;
 
     min-width: 112px;
     max-width: 248px;
@@ -117,8 +120,23 @@ component BrowserTabButton inherits Rectangle {
     }
 
     tab-touch := TouchArea {
+        property <length> start;
+        property <bool> drag-ended;
+        pointer-event(event) => {
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                self.start = root.vertical ? self.mouse-y : self.mouse-x;
+                self.drag-ended = false;
+            } else if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                let delta = (root.vertical ? self.mouse-y : self.mouse-x) - self.start;
+                let steps = Math.round(delta / root.tab-step);
+                if steps != 0 {
+                    self.drag-ended = true;
+                    root.dragged(steps);
+                }
+            }
+        }
         clicked => {
-            root.selected();
+            if !self.drag-ended { root.selected(); }
         }
     }
 
@@ -232,6 +250,7 @@ export component MainWindow inherits Window {
     callback new-tab;
     callback select-tab(int);
     callback close-tab(int);
+    callback move-tab(int, int);
     callback web-view-pointer-moved(float, float);
     callback web-view-pointer-button(WebViewPointerButton, bool, float, float);
     callback web-view-scrolled(float, float, float, float);
@@ -285,8 +304,20 @@ export component MainWindow inherits Window {
                 tab-strip := Flickable {
                     horizontal-stretch: 1;
                     viewport-width: Math.max(self.width, root.tabs.length * 190px);
+                    interactive: false;
                     viewport-height: self.height;
 
+                    TouchArea {
+                        width: tab-strip.width;
+                        height: tab-strip.height;
+                        scroll-event(event) => {
+                            tab-strip.viewport-x = Math.min(0px, Math.max(
+                                tab-strip.width - tab-strip.viewport-width,
+                                tab-strip.viewport-x + (event.delta-x != 0 ? event.delta-x : event.delta-y)
+                            ));
+                            accept
+                        }
+                    }
                     HorizontalLayout {
                         width: tab-strip.viewport-width;
                         spacing: 6px;
@@ -300,9 +331,8 @@ export component MainWindow inherits Window {
                                 root.select-tab(index);
                             }
 
-                            closed => {
-                                root.close-tab(index);
-                            }
+                            closed => { root.close-tab(index); }
+                            dragged(steps) => { root.move-tab(index, Math.max(0, Math.min(root.tabs.length - 1, index + steps))); }
                         }
                     }
                 }

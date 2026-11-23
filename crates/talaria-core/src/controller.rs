@@ -196,6 +196,16 @@ impl BrowserController {
         true
     }
 
+    pub fn move_tab(&mut self, from: usize, to: usize) -> bool {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return false;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.tab_revision += 1;
+        true
+    }
+
     pub fn close_tab_at(&mut self, index: usize) -> bool {
         let Some(tab_id) = self.tabs.get(index).map(Tab::id) else {
             return false;

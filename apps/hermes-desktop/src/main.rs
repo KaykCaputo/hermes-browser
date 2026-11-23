@@ -848,6 +848,20 @@ fn connect_ui_callbacks(
         }
     });
 
+    let move_tab_controller = Rc::clone(&controller);
+    let move_tab_window = window.as_weak();
+    window.on_move_tab(move |from, to| {
+        let (Ok(from), Ok(to)) = (usize::try_from(from), usize::try_from(to)) else {
+            return;
+        };
+        if move_tab_controller.borrow_mut().move_tab(from, to)
+            && let Some(window) = move_tab_window.upgrade()
+        {
+            sync_ui(&window, &move_tab_controller.borrow());
+            window.window().request_redraw();
+        }
+    });
+
     let close_tab_controller = Rc::clone(&controller);
     let close_tab_window = window.as_weak();
     window.on_close_tab(move |index| {
